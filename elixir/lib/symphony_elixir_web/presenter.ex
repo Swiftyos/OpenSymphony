@@ -19,7 +19,7 @@ defmodule SymphonyElixirWeb.Presenter do
           },
           running: Enum.map(snapshot.running, &running_entry_payload/1),
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
-          codex_totals: snapshot.codex_totals,
+          agent_totals: snapshot.agent_totals,
           rate_limits: snapshot.rate_limits
         }
 
@@ -76,7 +76,7 @@ defmodule SymphonyElixirWeb.Presenter do
       running: running && running_issue_payload(running),
       retry: retry && retry_issue_payload(retry),
       logs: %{
-        codex_session_logs: []
+        agent_session_logs: []
       },
       recent_events: (running && recent_events_payload(running)) || [],
       last_error: retry && retry.error,
@@ -104,14 +104,14 @@ defmodule SymphonyElixirWeb.Presenter do
       workspace_path: Map.get(entry, :workspace_path),
       session_id: entry.session_id,
       turn_count: Map.get(entry, :turn_count, 0),
-      last_event: entry.last_codex_event,
-      last_message: summarize_message(entry.last_codex_message),
+      last_event: entry.last_agent_event,
+      last_message: summarize_message(entry.last_agent_message),
       started_at: iso8601(entry.started_at),
-      last_event_at: iso8601(entry.last_codex_timestamp),
+      last_event_at: iso8601(entry.last_agent_timestamp),
       tokens: %{
-        input_tokens: entry.codex_input_tokens,
-        output_tokens: entry.codex_output_tokens,
-        total_tokens: entry.codex_total_tokens
+        input_tokens: entry.agent_input_tokens,
+        output_tokens: entry.agent_output_tokens,
+        total_tokens: entry.agent_total_tokens
       }
     }
   end
@@ -136,13 +136,13 @@ defmodule SymphonyElixirWeb.Presenter do
       turn_count: Map.get(running, :turn_count, 0),
       state: running.state,
       started_at: iso8601(running.started_at),
-      last_event: running.last_codex_event,
-      last_message: summarize_message(running.last_codex_message),
-      last_event_at: iso8601(running.last_codex_timestamp),
+      last_event: running.last_agent_event,
+      last_message: summarize_message(running.last_agent_message),
+      last_event_at: iso8601(running.last_agent_timestamp),
       tokens: %{
-        input_tokens: running.codex_input_tokens,
-        output_tokens: running.codex_output_tokens,
-        total_tokens: running.codex_total_tokens
+        input_tokens: running.agent_input_tokens,
+        output_tokens: running.agent_output_tokens,
+        total_tokens: running.agent_total_tokens
       }
     }
   end
@@ -170,16 +170,16 @@ defmodule SymphonyElixirWeb.Presenter do
   defp recent_events_payload(running) do
     [
       %{
-        at: iso8601(running.last_codex_timestamp),
-        event: running.last_codex_event,
-        message: summarize_message(running.last_codex_message)
+        at: iso8601(running.last_agent_timestamp),
+        event: running.last_agent_event,
+        message: summarize_message(running.last_agent_message)
       }
     ]
     |> Enum.reject(&is_nil(&1.at))
   end
 
   defp summarize_message(nil), do: nil
-  defp summarize_message(message), do: StatusDashboard.humanize_codex_message(message)
+  defp summarize_message(message), do: StatusDashboard.humanize_agent_message(message)
 
   defp due_at_iso8601(due_in_ms) when is_integer(due_in_ms) do
     DateTime.utc_now()

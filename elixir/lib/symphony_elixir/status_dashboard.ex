@@ -307,15 +307,15 @@ defmodule SymphonyElixir.StatusDashboard do
 
   defp snapshot_with_samples(token_samples, now_ms) do
     case snapshot_payload() do
-      {:ok, %{running: running, retrying: retrying, codex_totals: codex_totals} = snapshot} ->
-        total_tokens = Map.get(codex_totals, :total_tokens, 0)
+      {:ok, %{running: running, retrying: retrying, agent_totals: agent_totals} = snapshot} ->
+        total_tokens = Map.get(agent_totals, :total_tokens, 0)
 
         {
           {:ok,
            %{
              running: running,
              retrying: retrying,
-             codex_totals: codex_totals,
+             agent_totals: agent_totals,
              rate_limits: Map.get(snapshot, :rate_limits),
              polling: Map.get(snapshot, :polling)
            }},
@@ -332,14 +332,14 @@ defmodule SymphonyElixir.StatusDashboard do
 
   defp format_snapshot_content(snapshot_data, tps, terminal_columns_override \\ nil) do
     case snapshot_data do
-      {:ok, %{running: running, retrying: retrying, codex_totals: codex_totals} = snapshot} ->
+      {:ok, %{running: running, retrying: retrying, agent_totals: agent_totals} = snapshot} ->
         rate_limits = Map.get(snapshot, :rate_limits)
         project_link_lines = format_project_link_lines()
         project_refresh_line = format_project_refresh_line(Map.get(snapshot, :polling))
-        codex_input_tokens = Map.get(codex_totals, :input_tokens, 0)
-        codex_output_tokens = Map.get(codex_totals, :output_tokens, 0)
-        codex_total_tokens = Map.get(codex_totals, :total_tokens, 0)
-        codex_seconds_running = Map.get(codex_totals, :seconds_running, 0)
+        agent_input_tokens = Map.get(agent_totals, :input_tokens, 0)
+        agent_output_tokens = Map.get(agent_totals, :output_tokens, 0)
+        agent_total_tokens = Map.get(agent_totals, :total_tokens, 0)
+        agent_seconds_running = Map.get(agent_totals, :seconds_running, 0)
         agent_count = length(running)
         max_agents = Config.settings!().agent.max_concurrent_agents
         running_event_width = running_event_width(terminal_columns_override)
@@ -355,13 +355,13 @@ defmodule SymphonyElixir.StatusDashboard do
              colorize("#{max_agents}", @ansi_gray),
            colorize("│ Throughput: ", @ansi_bold) <> colorize("#{format_tps(tps)} tps", @ansi_cyan),
            colorize("│ Runtime: ", @ansi_bold) <>
-             colorize(format_runtime_seconds(codex_seconds_running), @ansi_magenta),
+             colorize(format_runtime_seconds(agent_seconds_running), @ansi_magenta),
            colorize("│ Tokens: ", @ansi_bold) <>
-             colorize("in #{format_count(codex_input_tokens)}", @ansi_yellow) <>
+             colorize("in #{format_count(agent_input_tokens)}", @ansi_yellow) <>
              colorize(" | ", @ansi_gray) <>
-             colorize("out #{format_count(codex_output_tokens)}", @ansi_yellow) <>
+             colorize("out #{format_count(agent_output_tokens)}", @ansi_yellow) <>
              colorize(" | ", @ansi_gray) <>
-             colorize("total #{format_count(codex_total_tokens)}", @ansi_yellow),
+             colorize("total #{format_count(agent_total_tokens)}", @ansi_yellow),
            colorize("│ Rate Limits: ", @ansi_bold) <> format_rate_limits(rate_limits),
            project_link_lines,
            project_refresh_line,
@@ -553,14 +553,14 @@ defmodule SymphonyElixir.StatusDashboard do
         %{
           running: running,
           retrying: retrying,
-          codex_totals: codex_totals
+          agent_totals: agent_totals
         } = snapshot
         when is_list(running) and is_list(retrying) ->
           {:ok,
            %{
              running: running,
              retrying: retrying,
-             codex_totals: codex_totals,
+             agent_totals: agent_totals,
              rate_limits: Map.get(snapshot, :rate_limits),
              polling: Map.get(snapshot, :polling)
            }}
@@ -592,21 +592,22 @@ defmodule SymphonyElixir.StatusDashboard do
     state = running_entry.state || "unknown"
     state_display = format_cell(to_string(state), @running_stage_width)
     session = running_entry.session_id |> compact_session_id() |> format_cell(@running_session_width)
-    pid = format_cell(running_entry.codex_app_server_pid || "n/a", @running_pid_width)
-    total_tokens = running_entry.codex_total_tokens || 0
+    pid = format_cell(running_entry.agent_server_pid || "n/a", @running_pid_width)
+    total_tokens = running_entry.agent_total_tokens || 0
     runtime_seconds = running_entry.runtime_seconds || 0
     turn_count = Map.get(running_entry, :turn_count, 0)
     age = format_cell(format_runtime_and_turns(runtime_seconds, turn_count), @running_age_width)
-    event = running_entry.last_codex_event || "none"
-    event_label = format_cell(summarize_message(running_entry.last_codex_message), running_event_width)
+    event = running_entry.last_agent_event || "none"
+    event_label = format_cell(summarize_message(running_entry.last_agent_message), running_event_width)
 
     tokens = format_count(total_tokens) |> format_cell(@running_tokens_width, :right)
 
     status_color =
       case event do
         :none -> @ansi_red
-        "codex/event/token_count" -> @ansi_yellow
-        "codex/event/task_started" -> @ansi_green
+        "message.part.updated" -> @ansi_yellow
+        "session.status" -> @ansi_green
+        :turn_started -> @ansi_green
         "turn_completed" -> @ansi_magenta
         _ -> @ansi_blue
       end
@@ -1045,8 +1046,8 @@ defmodule SymphonyElixir.StatusDashboard do
     colorize("●", color_code)
   end
 
-  defp snapshot_total_tokens({:ok, %{codex_totals: codex_totals}}) when is_map(codex_totals) do
-    Map.get(codex_totals, :total_tokens, 0)
+  defp snapshot_total_tokens({:ok, %{agent_totals: agent_totals}}) when is_map(agent_totals) do
+    Map.get(agent_totals, :total_tokens, 0)
   end
 
   defp snapshot_total_tokens(_snapshot_data), do: 0
@@ -1068,31 +1069,241 @@ defmodule SymphonyElixir.StatusDashboard do
   end
 
   @doc false
+  @spec humanize_agent_message(term()) :: String.t()
+  def humanize_agent_message(nil), do: "no agent message yet"
+
+  def humanize_agent_message(%{event: event, message: message}) do
+    payload = unwrap_agent_message_payload(message)
+
+    (humanize_agent_event(event, message, payload) ||
+       humanize_codex_event(event, message, payload) ||
+       humanize_agent_payload(payload) ||
+       humanize_codex_payload(payload))
+    |> truncate(140)
+  end
+
+  def humanize_agent_message(%{message: message}) do
+    message
+    |> unwrap_agent_message_payload()
+    |> then(&(humanize_agent_payload(&1) || humanize_codex_payload(&1)))
+    |> truncate(140)
+  end
+
+  def humanize_agent_message(message) do
+    message
+    |> unwrap_agent_message_payload()
+    |> then(&(humanize_agent_payload(&1) || humanize_codex_payload(&1)))
+    |> truncate(140)
+  end
+
+  defp summarize_message(message), do: humanize_agent_message(message)
+
+  @doc false
   @spec humanize_codex_message(term()) :: String.t()
-  def humanize_codex_message(nil), do: "no codex message yet"
+  def humanize_codex_message(message), do: humanize_agent_message(message)
 
-  def humanize_codex_message(%{event: event, message: message}) do
-    payload = unwrap_codex_message_payload(message)
-
-    (humanize_codex_event(event, message, payload) || humanize_codex_payload(payload))
-    |> truncate(140)
+  defp humanize_agent_event(:turn_started, _message, payload) do
+    session_id = map_value(payload, ["session_id", :session_id])
+    if is_binary(session_id), do: "turn started (#{session_id})", else: "turn started"
   end
 
-  def humanize_codex_message(%{message: message}) do
-    message
-    |> unwrap_codex_message_payload()
-    |> humanize_codex_payload()
-    |> truncate(140)
+  defp humanize_agent_event(:turn_completed, message, payload) do
+    usage =
+      map_value(message, ["usage", :usage]) ||
+        map_path(payload, ["info", "tokens"]) ||
+        map_path(payload, [:info, :tokens])
+
+    case format_usage_counts(usage) do
+      nil -> "turn completed"
+      usage_text -> "turn completed (#{usage_text})"
+    end
   end
 
-  def humanize_codex_message(message) do
-    message
-    |> unwrap_codex_message_payload()
-    |> humanize_codex_payload()
-    |> truncate(140)
+  defp humanize_agent_event(:turn_ended_with_error, message, _payload),
+    do: "turn ended with error: #{format_reason(message)}"
+
+  defp humanize_agent_event("session.status", _message, payload) do
+    status =
+      map_path(payload, ["payload", "properties", "status", "type"]) ||
+        map_path(payload, [:payload, :properties, :status, :type])
+
+    case status do
+      "busy" -> "session busy"
+      "idle" -> "session idle"
+      "retry" ->
+        attempt =
+          map_path(payload, ["payload", "properties", "status", "attempt"]) ||
+            map_path(payload, [:payload, :properties, :status, :attempt])
+
+        if is_integer(attempt), do: "session retrying (attempt #{attempt})", else: "session retrying"
+
+      _ -> "session status updated"
+    end
   end
 
-  defp summarize_message(message), do: humanize_codex_message(message)
+  defp humanize_agent_event("message.updated", _message, payload) do
+    error_message =
+      map_path(payload, ["payload", "properties", "info", "error", "data", "message"]) ||
+        map_path(payload, [:payload, :properties, :info, :error, :data, :message])
+
+    if is_binary(error_message), do: "assistant error: #{error_message}", else: "message updated"
+  end
+
+  defp humanize_agent_event("message.part.delta", _message, payload) do
+    delta =
+      map_path(payload, ["payload", "properties", "delta"]) ||
+        map_path(payload, [:payload, :properties, :delta])
+
+    if is_binary(delta) and String.trim(delta) != "" do
+      "streaming #{inline_text(delta)}"
+    else
+      "message streaming"
+    end
+  end
+
+  defp humanize_agent_event("message.part.updated", _message, payload) do
+    humanize_agent_part(
+      map_path(payload, ["payload", "properties", "part"]) ||
+        map_path(payload, [:payload, :properties, :part])
+    )
+  end
+
+  defp humanize_agent_event("permission.asked", _message, payload) do
+    permission =
+      map_path(payload, ["payload", "properties", "permission"]) ||
+        map_path(payload, [:payload, :properties, :permission])
+
+    patterns =
+      map_path(payload, ["payload", "properties", "patterns"]) ||
+        map_path(payload, [:payload, :properties, :patterns]) ||
+        []
+
+    scope =
+      patterns
+      |> Enum.take(2)
+      |> Enum.join(", ")
+
+    cond do
+      is_binary(permission) and scope != "" -> "permission requested: #{permission} (#{scope})"
+      is_binary(permission) -> "permission requested: #{permission}"
+      true -> "permission requested"
+    end
+  end
+
+  defp humanize_agent_event("question.asked", _message, payload) do
+    header =
+      map_path(payload, ["payload", "properties", "questions"]) ||
+        map_path(payload, [:payload, :properties, :questions]) ||
+        []
+
+    case header do
+      [%{} = question | _] ->
+        question_header = map_value(question, ["header", :header])
+        if is_binary(question_header), do: "question asked: #{question_header}", else: "question asked"
+
+      _ ->
+        "question asked"
+    end
+  end
+
+  defp humanize_agent_event("session.diff", _message, payload) do
+    diff =
+      map_path(payload, ["payload", "properties", "diff"]) ||
+        map_path(payload, [:payload, :properties, :diff]) ||
+        []
+
+    if is_list(diff), do: "session diff updated (#{length(diff)} files)", else: "session diff updated"
+  end
+
+  defp humanize_agent_event("session.error", _message, payload) do
+    error_message =
+      map_path(payload, ["payload", "properties", "error", "data", "message"]) ||
+        map_path(payload, [:payload, :properties, :error, :data, :message])
+
+    if is_binary(error_message), do: "session error: #{error_message}", else: "session error"
+  end
+
+  defp humanize_agent_event(_event, _message, _payload), do: nil
+
+  defp humanize_agent_payload(%{"payload" => %{"type" => type}} = payload) when is_binary(type) do
+    humanize_agent_event(type, %{}, payload)
+  end
+
+  defp humanize_agent_payload(%{payload: %{type: type}} = payload) when is_binary(type) do
+    humanize_agent_event(type, %{}, payload)
+  end
+
+  defp humanize_agent_payload(_payload), do: nil
+
+  defp unwrap_agent_message_payload(%{} = message) do
+    cond do
+      is_binary(map_value(message, ["event", :event])) ->
+        message
+
+      is_binary(map_path(message, ["payload", "type"])) ->
+        message
+
+      true ->
+        unwrap_codex_message_payload(message)
+    end
+  end
+
+  defp unwrap_agent_message_payload(message), do: message
+
+  defp humanize_agent_part(%{"type" => "tool"} = part), do: humanize_agent_tool_part(part)
+  defp humanize_agent_part(%{type: "tool"} = part), do: humanize_agent_tool_part(part)
+
+  defp humanize_agent_part(%{"type" => "patch", "files" => files}) when is_list(files),
+    do: "patch updated (#{length(files)} files)"
+
+  defp humanize_agent_part(%{type: "patch", files: files}) when is_list(files),
+    do: "patch updated (#{length(files)} files)"
+
+  defp humanize_agent_part(%{"type" => "retry", "attempt" => attempt}) when is_integer(attempt),
+    do: "retry scheduled (attempt #{attempt})"
+
+  defp humanize_agent_part(%{type: "retry", attempt: attempt}) when is_integer(attempt),
+    do: "retry scheduled (attempt #{attempt})"
+
+  defp humanize_agent_part(%{"type" => "agent", "name" => name}) when is_binary(name),
+    do: "agent switched to #{name}"
+
+  defp humanize_agent_part(%{type: "agent", name: name}) when is_binary(name),
+    do: "agent switched to #{name}"
+
+  defp humanize_agent_part(%{"type" => "step-finish", "tokens" => tokens}) do
+    case format_usage_counts(tokens) do
+      nil -> "step finished"
+      usage_text -> "step finished (#{usage_text})"
+    end
+  end
+
+  defp humanize_agent_part(%{type: "step-finish", tokens: tokens}) do
+    case format_usage_counts(tokens) do
+      nil -> "step finished"
+      usage_text -> "step finished (#{usage_text})"
+    end
+  end
+
+  defp humanize_agent_part(%{"type" => "text", "text" => text}) when is_binary(text),
+    do: inline_text(text)
+
+  defp humanize_agent_part(%{type: "text", text: text}) when is_binary(text),
+    do: inline_text(text)
+
+  defp humanize_agent_part(%{"type" => "reasoning", "text" => text}) when is_binary(text),
+    do: "reasoning #{inline_text(text)}"
+
+  defp humanize_agent_part(%{type: "reasoning", text: text}) when is_binary(text),
+    do: "reasoning #{inline_text(text)}"
+
+  defp humanize_agent_part(_part), do: "message part updated"
+
+  defp humanize_agent_tool_part(part) do
+    tool = map_value(part, ["tool", :tool]) || "tool"
+    status = map_path(part, ["state", "status"]) || map_path(part, [:state, :status]) || "updated"
+    "#{tool} #{status}"
+  end
 
   defp humanize_codex_event(:session_started, _message, payload) do
     session_id = map_value(payload, ["session_id", :session_id])
@@ -1563,6 +1774,8 @@ defmodule SymphonyElixir.StatusDashboard do
         map_value(usage, [
           "input_tokens",
           :input_tokens,
+          "input",
+          :input,
           "prompt_tokens",
           :prompt_tokens,
           "inputTokens",
@@ -1577,6 +1790,8 @@ defmodule SymphonyElixir.StatusDashboard do
         map_value(usage, [
           "output_tokens",
           :output_tokens,
+          "output",
+          :output,
           "completion_tokens",
           :completion_tokens,
           "outputTokens",
@@ -1598,10 +1813,21 @@ defmodule SymphonyElixir.StatusDashboard do
         ])
       )
 
+    reasoning =
+      parse_integer(
+        map_value(usage, [
+          "reasoning",
+          :reasoning
+        ])
+      )
+
+    total = total || ((input || 0) + (output || 0) + (reasoning || 0))
+
     parts =
       []
       |> append_usage_part("in", input)
       |> append_usage_part("out", output)
+      |> append_usage_part("reasoning", reasoning)
       |> append_usage_part("total", total)
 
     case parts do

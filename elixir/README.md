@@ -15,13 +15,13 @@ This directory contains the current Elixir/OTP implementation of Symphony, based
 
 1. Polls Linear for candidate work
 2. Creates a workspace per issue
-3. Launches Codex in [App Server mode](https://developers.openai.com/codex/app-server/) inside the
+3. Launches OpenCode in server mode inside the
    workspace
-4. Sends a workflow prompt to Codex
-5. Keeps Codex working on the issue until the work is done
+4. Sends a workflow prompt to OpenCode
+5. Keeps OpenCode working on the issue until the work is done
 
-During app-server sessions, Symphony also serves a client-side `linear_graphql` tool so that repo
-skills can make raw Linear GraphQL calls.
+During OpenCode sessions, Symphony also bootstraps a workspace-local `linear_graphql` custom tool
+so that repo skills can make raw Linear GraphQL calls without storing secrets in the repo.
 
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
 Symphony stops the active agent for that issue and cleans up matching workspaces.
@@ -81,7 +81,7 @@ Optional flags:
 - `--port` also starts the Phoenix observability service (default: disabled)
 
 The `WORKFLOW.md` file uses YAML front matter for configuration, plus a Markdown body used as the
-Codex session prompt.
+OpenCode session prompt.
 
 Minimal example:
 
@@ -98,8 +98,8 @@ hooks:
 agent:
   max_concurrent_agents: 10
   max_turns: 20
-codex:
-  command: codex app-server
+opencode:
+  command: opencode serve --hostname 127.0.0.1 --port 0
 ---
 
 You are working on a Linear issue {{ issue.identifier }}.
@@ -110,17 +110,16 @@ Title: {{ issue.title }} Body: {{ issue.description }}
 Notes:
 
 - If a value is missing, defaults are used.
-- Safer Codex defaults are used when policy fields are omitted:
-  - `codex.approval_policy` defaults to `{"reject":{"sandbox_approval":true,"rules":true,"mcp_elicitations":true}}`
-  - `codex.thread_sandbox` defaults to `workspace-write`
-  - `codex.turn_sandbox_policy` defaults to a `workspaceWrite` policy rooted at the current issue workspace
-- Supported `codex.approval_policy` values depend on the targeted Codex app-server version. In the current local Codex schema, string values include `untrusted`, `on-failure`, `on-request`, and `never`, and object-form `reject` is also supported.
-- Supported `codex.thread_sandbox` values: `read-only`, `workspace-write`, `danger-full-access`.
-- When `codex.turn_sandbox_policy` is set explicitly, Symphony passes the map through to Codex
-  unchanged. Compatibility then depends on the targeted Codex app-server version rather than local
-  Symphony validation.
-- `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
+- `opencode.command` defaults to `opencode serve --hostname 127.0.0.1 --port 0`.
+- `opencode.agent` defaults to `build`.
+- `opencode.model` is optional and must use `provider/model` format when set.
+- `agent.max_turns` caps how many back-to-back OpenCode turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
+- OpenCode v1 is local-only in Symphony. `worker.ssh_hosts` and
+  `worker.max_concurrent_agents_per_host` are rejected during config validation.
+- OpenCode permissions are handled automatically for a limited unattended allowlist inside the
+  issue workspace. Requests outside the workspace, `external_directory`, unknown permissions, and
+  interactive questions are rejected.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
   identifier, title, and body.
 - Use `hooks.after_create` to bootstrap a fresh workspace. For a Git-backed repo, you can run
@@ -130,7 +129,7 @@ Notes:
 - `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`.
 - For path values, `~` is expanded to the home directory.
 - For env-backed path values, use `$VAR`. `workspace.root` resolves `$VAR` before path handling,
-  while `codex.command` stays a shell command string and any `$VAR` expansion there happens in the
+  while `opencode.command` stays a shell command string and any `$VAR` expansion there happens in the
   launched shell.
 
 ```yaml
@@ -141,8 +140,10 @@ workspace:
 hooks:
   after_create: |
     git clone --depth 1 "$SOURCE_REPO_URL" .
-codex:
-  command: "$CODEX_BIN app-server --model gpt-5.3-codex"
+opencode:
+  command: "$OPENCODE_BIN serve --hostname 127.0.0.1 --port 0"
+  agent: build
+  model: openai/gpt-5.3
 ```
 
 - If `WORKFLOW.md` is missing or has invalid YAML at startup, Symphony does not boot.
@@ -165,7 +166,7 @@ The observability UI now runs on a minimal Phoenix stack:
 - `lib/`: application code and Mix tasks
 - `test/`: ExUnit coverage for runtime behavior
 - `WORKFLOW.md`: in-repo workflow contract used by local runs
-- `../.codex/`: repository-local Codex skills and setup helpers
+- `../.codex/`: repository-local skills and setup helpers used by the workflow
 
 ## Testing
 
@@ -174,7 +175,7 @@ make all
 ```
 
 Run the real external end-to-end test only when you want Symphony to create disposable Linear
-resources and launch a real `codex app-server` session:
+resources and launch a real `opencode serve --hostname 127.0.0.1 --port 0` session:
 
 ```bash
 cd elixir
@@ -185,22 +186,11 @@ make e2e
 Optional environment variables:
 
 - `SYMPHONY_LIVE_LINEAR_TEAM_KEY` defaults to `SYME2E`
-- `SYMPHONY_LIVE_SSH_WORKER_HOSTS` uses those SSH hosts when set, as a comma-separated list
 
-`make e2e` runs two live scenarios:
-- one with a local worker
-- one with SSH workers
-
-If `SYMPHONY_LIVE_SSH_WORKER_HOSTS` is unset, the SSH scenario uses `docker compose` to start two
-disposable SSH workers on `localhost:<port>`. The live test generates a temporary SSH keypair,
-mounts the host `~/.codex/auth.json` into each worker, verifies that Symphony can talk to them
-over real SSH, then runs the same orchestration flow against those worker addresses. This keeps
-the transport representative without depending on long-lived external machines.
-
-Set `SYMPHONY_LIVE_SSH_WORKER_HOSTS` if you want `make e2e` to target real SSH hosts instead.
+`make e2e` currently targets the local-only OpenCode flow.
 
 The live test creates a temporary Linear project and issue, writes a temporary `WORKFLOW.md`, runs
-a real agent turn, verifies the workspace side effect, requires Codex to comment on and close the
+a real agent turn, verifies the workspace side effect, requires OpenCode to comment on and close the
 Linear issue, then marks the project completed so the run remains visible in Linear.
 
 ## FAQ
@@ -213,8 +203,8 @@ actively running subagents, which is very useful during development.
 
 ### What's the easiest way to set this up for my own codebase?
 
-Launch `codex` in your repo, give it the URL to the Symphony repo, and ask it to set things up for
-you.
+Launch OpenCode in your repo, give it the URL to the Symphony repo, and ask it to set things up
+for you.
 
 ## License
 

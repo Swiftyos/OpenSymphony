@@ -5,8 +5,6 @@ defmodule SymphonyElixir.Config.Schema do
 
   import Ecto.Changeset
 
-  alias SymphonyElixir.PathSafety
-
   @primary_key false
 
   @type t :: %__MODULE__{}
@@ -150,27 +148,16 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
-  defmodule Codex do
+  defmodule OpenCode do
     @moduledoc false
     use Ecto.Schema
     import Ecto.Changeset
 
     @primary_key false
     embedded_schema do
-      field(:command, :string, default: "codex app-server")
-
-      field(:approval_policy, StringOrMap,
-        default: %{
-          "reject" => %{
-            "sandbox_approval" => true,
-            "rules" => true,
-            "mcp_elicitations" => true
-          }
-        }
-      )
-
-      field(:thread_sandbox, :string, default: "workspace-write")
-      field(:turn_sandbox_policy, :map)
+      field(:command, :string, default: "opencode serve --hostname 127.0.0.1 --port 0")
+      field(:agent, :string, default: "build")
+      field(:model, :string)
       field(:turn_timeout_ms, :integer, default: 3_600_000)
       field(:read_timeout_ms, :integer, default: 5_000)
       field(:stall_timeout_ms, :integer, default: 300_000)
@@ -183,19 +170,49 @@ defmodule SymphonyElixir.Config.Schema do
         attrs,
         [
           :command,
-          :approval_policy,
-          :thread_sandbox,
-          :turn_sandbox_policy,
+          :agent,
+          :model,
           :turn_timeout_ms,
           :read_timeout_ms,
           :stall_timeout_ms
         ],
         empty_values: []
       )
-      |> validate_required([:command])
+      |> validate_required([:command, :agent])
       |> validate_number(:turn_timeout_ms, greater_than: 0)
       |> validate_number(:read_timeout_ms, greater_than: 0)
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
+      |> validate_change(:model, fn :model, value ->
+        cond do
+          is_nil(value) ->
+            []
+
+          is_binary(value) and String.trim(value) == "" ->
+            []
+
+          is_binary(value) and String.contains?(value, "/") ->
+            []
+
+          true ->
+            [model: "must use provider/model format"]
+        end
+      end)
+    end
+  end
+
+  defmodule Codex do
+    @moduledoc false
+    use Ecto.Schema
+
+    @primary_key false
+    embedded_schema do
+      field(:command, :string)
+      field(:approval_policy, StringOrMap)
+      field(:thread_sandbox, :string)
+      field(:turn_sandbox_policy, :map)
+      field(:turn_timeout_ms, :integer)
+      field(:read_timeout_ms, :integer)
+      field(:stall_timeout_ms, :integer)
     end
   end
 
@@ -262,12 +279,13 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   embedded_schema do
+    field(:codex, :map, virtual: true)
     embeds_one(:tracker, Tracker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:polling, Polling, on_replace: :update, defaults_to_struct: true)
     embeds_one(:workspace, Workspace, on_replace: :update, defaults_to_struct: true)
     embeds_one(:worker, Worker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
-    embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:opencode, OpenCode, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
@@ -275,45 +293,26 @@ defmodule SymphonyElixir.Config.Schema do
 
   @spec parse(map()) :: {:ok, %__MODULE__{}} | {:error, {:invalid_workflow_config, String.t()}}
   def parse(config) when is_map(config) do
-    config
-    |> normalize_keys()
-    |> drop_nil_values()
-    |> changeset()
-    |> apply_action(:validate)
-    |> case do
-      {:ok, settings} ->
-        {:ok, finalize_settings(settings)}
+    normalized_config =
+      config
+      |> normalize_keys()
+      |> drop_nil_values()
 
-      {:error, changeset} ->
+    with :ok <- validate_unsupported_config(normalized_config),
+         changeset <- changeset(normalized_config),
+         {:ok, settings} <- apply_action(changeset, :validate),
+         finalized_settings <- finalize_settings(settings),
+         :ok <- validate_open_code_local_only(finalized_settings) do
+      {:ok, finalized_settings}
+    else
+      {:error, %Ecto.Changeset{} = changeset} ->
         {:error, {:invalid_workflow_config, format_errors(changeset)}}
-    end
-  end
 
-  @spec resolve_turn_sandbox_policy(%__MODULE__{}, Path.t() | nil) :: map()
-  def resolve_turn_sandbox_policy(settings, workspace \\ nil) do
-    case settings.codex.turn_sandbox_policy do
-      %{} = policy ->
-        policy
+      {:error, {:invalid_workflow_config, _message} = reason} ->
+        {:error, reason}
 
-      _ ->
-        workspace
-        |> default_workspace_root(settings.workspace.root)
-        |> expand_local_workspace_root()
-        |> default_turn_sandbox_policy()
-    end
-  end
-
-  @spec resolve_runtime_turn_sandbox_policy(%__MODULE__{}, Path.t() | nil, keyword()) ::
-          {:ok, map()} | {:error, term()}
-  def resolve_runtime_turn_sandbox_policy(settings, workspace \\ nil, opts \\ []) do
-    case settings.codex.turn_sandbox_policy do
-      %{} = policy ->
-        {:ok, policy}
-
-      _ ->
-        workspace
-        |> default_workspace_root(settings.workspace.root)
-        |> default_runtime_turn_sandbox_policy(opts)
+      {:error, reason} ->
+        {:error, {:invalid_workflow_config, inspect(reason)}}
     end
   end
 
@@ -359,7 +358,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:workspace, with: &Workspace.changeset/2)
     |> cast_embed(:worker, with: &Worker.changeset/2)
     |> cast_embed(:agent, with: &Agent.changeset/2)
-    |> cast_embed(:codex, with: &Codex.changeset/2)
+    |> cast_embed(:opencode, with: &OpenCode.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
@@ -377,13 +376,12 @@ defmodule SymphonyElixir.Config.Schema do
       | root: resolve_path_value(settings.workspace.root, Path.join(System.tmp_dir!(), "symphony_workspaces"))
     }
 
-    codex = %{
-      settings.codex
-      | approval_policy: normalize_keys(settings.codex.approval_policy),
-        turn_sandbox_policy: normalize_optional_map(settings.codex.turn_sandbox_policy)
+    opencode = %{
+      settings.opencode
+      | model: normalize_optional_string(settings.opencode.model)
     }
 
-    %{settings | tracker: tracker, workspace: workspace, codex: codex}
+    %{settings | tracker: tracker, workspace: workspace, opencode: opencode}
   end
 
   defp normalize_keys(value) when is_map(value) do
@@ -395,8 +393,14 @@ defmodule SymphonyElixir.Config.Schema do
   defp normalize_keys(value) when is_list(value), do: Enum.map(value, &normalize_keys/1)
   defp normalize_keys(value), do: value
 
-  defp normalize_optional_map(nil), do: nil
-  defp normalize_optional_map(value) when is_map(value), do: normalize_keys(value)
+  defp normalize_optional_string(nil), do: nil
+
+  defp normalize_optional_string(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
 
   defp normalize_key(value) when is_atom(value), do: Atom.to_string(value)
   defp normalize_key(value), do: to_string(value)
@@ -479,53 +483,66 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp normalize_secret_value(_value), do: nil
 
-  defp default_turn_sandbox_policy(workspace) do
-    %{
-      "type" => "workspaceWrite",
-      "writableRoots" => [workspace],
-      "readOnlyAccess" => %{"type" => "fullAccess"},
-      "networkAccess" => false,
-      "excludeTmpdirEnvVar" => false,
-      "excludeSlashTmp" => false
-    }
-  end
-
-  defp default_runtime_turn_sandbox_policy(workspace_root, opts) when is_binary(workspace_root) do
-    if Keyword.get(opts, :remote, false) do
-      {:ok, default_turn_sandbox_policy(workspace_root)}
-    else
-      with expanded_workspace_root <- expand_local_workspace_root(workspace_root),
-           {:ok, canonical_workspace_root} <- PathSafety.canonicalize(expanded_workspace_root) do
-        {:ok, default_turn_sandbox_policy(canonical_workspace_root)}
-      end
-    end
-  end
-
-  defp default_runtime_turn_sandbox_policy(workspace_root, _opts) do
-    {:error, {:unsafe_turn_sandbox_policy, {:invalid_workspace_root, workspace_root}}}
-  end
-
-  defp default_workspace_root(workspace, _fallback) when is_binary(workspace) and workspace != "",
-    do: workspace
-
-  defp default_workspace_root(nil, fallback), do: fallback
-  defp default_workspace_root("", fallback), do: fallback
-  defp default_workspace_root(workspace, _fallback), do: workspace
-
-  defp expand_local_workspace_root(workspace_root)
-       when is_binary(workspace_root) and workspace_root != "" do
-    Path.expand(workspace_root)
-  end
-
-  defp expand_local_workspace_root(_workspace_root) do
-    Path.expand(Path.join(System.tmp_dir!(), "symphony_workspaces"))
-  end
-
   defp format_errors(changeset) do
     changeset
     |> traverse_errors(&translate_error/1)
     |> flatten_errors()
     |> Enum.join(", ")
+  end
+
+  defp validate_unsupported_config(config) when is_map(config) do
+    cond do
+      Map.has_key?(config, "codex") ->
+        {:error,
+         {:invalid_workflow_config,
+          "`codex:` is no longer supported. Rename it to `opencode:` and remove Codex-only sandbox and approval keys."}}
+
+      unsupported_opencode_key = unsupported_opencode_key(config) ->
+        {:error,
+         {:invalid_workflow_config,
+          "`opencode.#{unsupported_opencode_key}` is no longer supported. OpenCode v1 uses `command`, `agent`, `model`, and timeout settings only."}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_unsupported_config(_config), do: :ok
+
+  defp unsupported_opencode_key(config) when is_map(config) do
+    config
+    |> Map.get("opencode", %{})
+    |> case do
+      opencode when is_map(opencode) ->
+        Enum.find(["approval_policy", "thread_sandbox", "turn_sandbox_policy"], &Map.has_key?(opencode, &1))
+
+      _ ->
+        nil
+    end
+  end
+
+  defp validate_open_code_local_only(settings) do
+    ssh_hosts =
+      settings.worker.ssh_hosts
+      |> List.wrap()
+      |> Enum.map(&to_string/1)
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+
+    cond do
+      ssh_hosts != [] ->
+        {:error,
+         {:invalid_workflow_config,
+          "OpenCode v1 is local-only. Remove `worker.ssh_hosts` from `WORKFLOW.md`."}}
+
+      is_integer(settings.worker.max_concurrent_agents_per_host) ->
+        {:error,
+         {:invalid_workflow_config,
+          "OpenCode v1 is local-only. Remove `worker.max_concurrent_agents_per_host` from `WORKFLOW.md`."}}
+
+      true ->
+        :ok
+    end
   end
 
   defp flatten_errors(errors, prefix \\ nil)

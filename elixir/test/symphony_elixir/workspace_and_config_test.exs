@@ -2,7 +2,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   use SymphonyElixir.TestSupport
   alias Ecto.Changeset
   alias SymphonyElixir.Config.Schema
-  alias SymphonyElixir.Config.Schema.{Codex, StringOrMap}
+  alias SymphonyElixir.Config.Schema.StringOrMap
   alias SymphonyElixir.Linear.Client
 
   test "workspace bootstrap can be implemented in after_create hook" do
@@ -501,7 +501,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       max_concurrent_agents: 3,
       running: %{},
       claimed: MapSet.new(),
-      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      agent_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
       retry_attempts: %{}
     }
 
@@ -523,7 +523,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       max_concurrent_agents: 3,
       running: %{},
       claimed: MapSet.new(),
-      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      agent_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
       retry_attempts: %{}
     }
 
@@ -543,7 +543,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       max_concurrent_agents: 3,
       running: %{},
       claimed: MapSet.new(),
-      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      agent_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
       retry_attempts: %{}
     }
 
@@ -727,12 +727,12 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     write_workflow_file!(Workflow.workflow_file_path(),
       workspace_root: nil,
       max_concurrent_agents: nil,
-      codex_approval_policy: nil,
-      codex_thread_sandbox: nil,
-      codex_turn_sandbox_policy: nil,
-      codex_turn_timeout_ms: nil,
-      codex_read_timeout_ms: nil,
-      codex_stall_timeout_ms: nil,
+      opencode_command: nil,
+      opencode_agent: nil,
+      opencode_model: nil,
+      opencode_turn_timeout_ms: nil,
+      opencode_read_timeout_ms: nil,
+      opencode_stall_timeout_ms: nil,
       tracker_api_token: nil,
       tracker_project_slug: nil
     )
@@ -744,67 +744,34 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.workspace.root == Path.join(System.tmp_dir!(), "symphony_workspaces")
     assert config.worker.max_concurrent_agents_per_host == nil
     assert config.agent.max_concurrent_agents == 10
-    assert config.codex.command == "codex app-server"
+    assert config.opencode.command == "opencode serve --hostname 127.0.0.1 --port 0"
+    assert config.opencode.agent == "build"
+    assert config.opencode.model == nil
+    assert config.opencode.turn_timeout_ms == 3_600_000
+    assert config.opencode.read_timeout_ms == 5_000
+    assert config.opencode.stall_timeout_ms == 300_000
 
-    assert config.codex.approval_policy == %{
-             "reject" => %{
-               "sandbox_approval" => true,
-               "rules" => true,
-               "mcp_elicitations" => true
-             }
+    assert {:ok, runtime_settings} = Config.opencode_runtime_settings()
+
+    assert runtime_settings == %{
+             command: "opencode serve --hostname 127.0.0.1 --port 0",
+             agent: "build",
+             model: nil,
+             turn_timeout_ms: 3_600_000,
+             read_timeout_ms: 5_000,
+             stall_timeout_ms: 300_000
            }
-
-    assert config.codex.thread_sandbox == "workspace-write"
-
-    assert {:ok, canonical_default_workspace_root} =
-             SymphonyElixir.PathSafety.canonicalize(Path.join(System.tmp_dir!(), "symphony_workspaces"))
-
-    assert Config.codex_turn_sandbox_policy() == %{
-             "type" => "workspaceWrite",
-             "writableRoots" => [canonical_default_workspace_root],
-             "readOnlyAccess" => %{"type" => "fullAccess"},
-             "networkAccess" => false,
-             "excludeTmpdirEnvVar" => false,
-             "excludeSlashTmp" => false
-           }
-
-    assert config.codex.turn_timeout_ms == 3_600_000
-    assert config.codex.read_timeout_ms == 5_000
-    assert config.codex.stall_timeout_ms == 300_000
-
-    write_workflow_file!(Workflow.workflow_file_path(), codex_command: "codex app-server --model gpt-5.3-codex")
-    assert Config.settings!().codex.command == "codex app-server --model gpt-5.3-codex"
-
-    explicit_root =
-      Path.join(
-        System.tmp_dir!(),
-        "symphony-elixir-explicit-sandbox-root-#{System.unique_integer([:positive])}"
-      )
-
-    explicit_workspace = Path.join(explicit_root, "MT-EXPLICIT")
-    explicit_cache = Path.join(explicit_workspace, "cache")
-    File.mkdir_p!(explicit_cache)
-
-    on_exit(fn -> File.rm_rf(explicit_root) end)
 
     write_workflow_file!(Workflow.workflow_file_path(),
-      workspace_root: explicit_root,
-      codex_approval_policy: "on-request",
-      codex_thread_sandbox: "workspace-write",
-      codex_turn_sandbox_policy: %{
-        type: "workspaceWrite",
-        writableRoots: [explicit_workspace, explicit_cache]
-      }
+      opencode_command: "opencode serve --hostname 127.0.0.1 --port 4200",
+      opencode_agent: "review",
+      opencode_model: "openai/gpt-5.4"
     )
 
     config = Config.settings!()
-    assert config.codex.approval_policy == "on-request"
-    assert config.codex.thread_sandbox == "workspace-write"
-
-    assert Config.codex_turn_sandbox_policy(explicit_workspace) == %{
-             "type" => "workspaceWrite",
-             "writableRoots" => [explicit_workspace, explicit_cache]
-           }
+    assert config.opencode.command == "opencode serve --hostname 127.0.0.1 --port 4200"
+    assert config.opencode.agent == "review"
+    assert config.opencode.model == "openai/gpt-5.4"
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: ",")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
@@ -814,21 +781,21 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "agent.max_concurrent_agents"
 
-    write_workflow_file!(Workflow.workflow_file_path(), worker_max_concurrent_agents_per_host: 0)
+    write_workflow_file!(Workflow.workflow_file_path(), opencode_turn_timeout_ms: "bad")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "worker.max_concurrent_agents_per_host"
+    assert message =~ "opencode.turn_timeout_ms"
 
-    write_workflow_file!(Workflow.workflow_file_path(), codex_turn_timeout_ms: "bad")
+    write_workflow_file!(Workflow.workflow_file_path(), opencode_read_timeout_ms: "bad")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "codex.turn_timeout_ms"
+    assert message =~ "opencode.read_timeout_ms"
 
-    write_workflow_file!(Workflow.workflow_file_path(), codex_read_timeout_ms: "bad")
+    write_workflow_file!(Workflow.workflow_file_path(), opencode_stall_timeout_ms: "bad")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "codex.read_timeout_ms"
+    assert message =~ "opencode.stall_timeout_ms"
 
-    write_workflow_file!(Workflow.workflow_file_path(), codex_stall_timeout_ms: "bad")
+    write_workflow_file!(Workflow.workflow_file_path(), opencode_model: "gpt-5.4")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "codex.stall_timeout_ms"
+    assert message =~ "opencode.model"
 
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_active_states: %{todo: true},
@@ -846,41 +813,6 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     )
 
     assert {:error, {:invalid_workflow_config, _message}} = Config.validate!()
-
-    write_workflow_file!(Workflow.workflow_file_path(), codex_approval_policy: "")
-    assert :ok = Config.validate!()
-    assert Config.settings!().codex.approval_policy == ""
-
-    write_workflow_file!(Workflow.workflow_file_path(), codex_thread_sandbox: "")
-    assert :ok = Config.validate!()
-    assert Config.settings!().codex.thread_sandbox == ""
-
-    write_workflow_file!(Workflow.workflow_file_path(), codex_turn_sandbox_policy: "bad")
-    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "codex.turn_sandbox_policy"
-
-    write_workflow_file!(Workflow.workflow_file_path(),
-      codex_approval_policy: "future-policy",
-      codex_thread_sandbox: "future-sandbox",
-      codex_turn_sandbox_policy: %{
-        type: "futureSandbox",
-        nested: %{flag: true}
-      }
-    )
-
-    config = Config.settings!()
-    assert config.codex.approval_policy == "future-policy"
-    assert config.codex.thread_sandbox == "future-sandbox"
-
-    assert :ok = Config.validate!()
-
-    assert Config.codex_turn_sandbox_policy() == %{
-             "type" => "futureSandbox",
-             "nested" => %{"flag" => true}
-           }
-
-    write_workflow_file!(Workflow.workflow_file_path(), codex_command: "codex app-server")
-    assert Config.settings!().codex.command == "codex app-server"
   end
 
   test "config resolves $VAR references for env-backed secret and path values" do
@@ -888,7 +820,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     api_key_env_var = "SYMP_LINEAR_API_KEY_#{System.unique_integer([:positive])}"
     workspace_root = Path.join("/tmp", "symphony-workspace-root")
     api_key = "resolved-secret"
-    codex_bin = Path.join(["~", "bin", "codex"])
+    opencode_bin = Path.join(["~", "bin", "opencode"])
 
     previous_workspace_root = System.get_env(workspace_env_var)
     previous_api_key = System.get_env(api_key_env_var)
@@ -904,13 +836,13 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: "$#{api_key_env_var}",
       workspace_root: "$#{workspace_env_var}",
-      codex_command: "#{codex_bin} app-server"
+      opencode_command: "#{opencode_bin} serve --hostname 127.0.0.1 --port 0"
     )
 
     config = Config.settings!()
     assert config.tracker.api_key == api_key
     assert config.workspace.root == Path.expand(workspace_root)
-    assert config.codex.command == "#{codex_bin} app-server"
+    assert config.opencode.command == "#{opencode_bin} serve --hostname 127.0.0.1 --port 0"
   end
 
   test "config no longer resolves legacy env: references" do
@@ -962,8 +894,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.max_concurrent_agents_for_state(:not_a_string) == 10
 
     write_workflow_file!(Workflow.workflow_file_path(), worker_max_concurrent_agents_per_host: 2)
-    assert :ok = Config.validate!()
-    assert Config.settings!().worker.max_concurrent_agents_per_host == 2
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "OpenCode v1 is local-only"
+    assert message =~ "worker.max_concurrent_agents_per_host"
   end
 
   test "schema helpers cover custom type and state limit validation" do
@@ -1000,7 +933,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
            ]
   end
 
-  test "schema parse normalizes policy keys and env-backed fallbacks" do
+  test "schema parse resolves env-backed fallbacks" do
     missing_workspace_env = "SYMP_MISSING_WORKSPACE_#{System.unique_integer([:positive])}"
     empty_secret_env = "SYMP_EMPTY_SECRET_#{System.unique_integer([:positive])}"
     missing_secret_env = "SYMP_MISSING_SECRET_#{System.unique_integer([:positive])}"
@@ -1025,16 +958,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert {:ok, settings} =
              Schema.parse(%{
                tracker: %{api_key: "$#{empty_secret_env}"},
-               workspace: %{root: "$#{missing_workspace_env}"},
-               codex: %{approval_policy: %{reject: %{sandbox_approval: true}}}
+               workspace: %{root: "$#{missing_workspace_env}"}
              })
 
     assert settings.tracker.api_key == nil
     assert settings.workspace.root == Path.join(System.tmp_dir!(), "symphony_workspaces")
-
-    assert settings.codex.approval_policy == %{
-             "reject" => %{"sandbox_approval" => true}
-           }
 
     assert {:ok, settings} =
              Schema.parse(%{
@@ -1046,119 +974,40 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert settings.workspace.root == Path.join(System.tmp_dir!(), "symphony_workspaces")
   end
 
-  test "schema resolves sandbox policies from explicit and default workspaces" do
-    explicit_policy = %{"type" => "workspaceWrite", "writableRoots" => ["/tmp/explicit"]}
-
-    assert Schema.resolve_turn_sandbox_policy(%Schema{
-             codex: %Codex{turn_sandbox_policy: explicit_policy},
-             workspace: %Schema.Workspace{root: "/tmp/ignored"}
-           }) == explicit_policy
-
-    assert Schema.resolve_turn_sandbox_policy(%Schema{
-             codex: %Codex{turn_sandbox_policy: nil},
-             workspace: %Schema.Workspace{root: ""}
-           }) == %{
-             "type" => "workspaceWrite",
-             "writableRoots" => [Path.expand(Path.join(System.tmp_dir!(), "symphony_workspaces"))],
-             "readOnlyAccess" => %{"type" => "fullAccess"},
-             "networkAccess" => false,
-             "excludeTmpdirEnvVar" => false,
-             "excludeSlashTmp" => false
-           }
-
-    assert Schema.resolve_turn_sandbox_policy(
-             %Schema{
-               codex: %Codex{turn_sandbox_policy: nil},
-               workspace: %Schema.Workspace{root: "/tmp/ignored"}
-             },
-             "/tmp/workspace"
-           ) == %{
-             "type" => "workspaceWrite",
-             "writableRoots" => [Path.expand("/tmp/workspace")],
-             "readOnlyAccess" => %{"type" => "fullAccess"},
-             "networkAccess" => false,
-             "excludeTmpdirEnvVar" => false,
-             "excludeSlashTmp" => false
-           }
-  end
-
-  test "schema keeps workspace roots raw while sandbox helpers expand only for local use" do
-    assert {:ok, settings} =
+  test "schema parse rejects legacy codex config" do
+    assert {:error, {:invalid_workflow_config, message}} =
              Schema.parse(%{
-               workspace: %{root: "~/.symphony-workspaces"},
-               codex: %{}
+               tracker: %{kind: "memory"},
+               codex: %{command: "codex app-server"}
              })
 
-    assert settings.workspace.root == "~/.symphony-workspaces"
-
-    assert Schema.resolve_turn_sandbox_policy(settings) == %{
-             "type" => "workspaceWrite",
-             "writableRoots" => [Path.expand("~/.symphony-workspaces")],
-             "readOnlyAccess" => %{"type" => "fullAccess"},
-             "networkAccess" => false,
-             "excludeTmpdirEnvVar" => false,
-             "excludeSlashTmp" => false
-           }
-
-    assert {:ok, remote_policy} =
-             Schema.resolve_runtime_turn_sandbox_policy(settings, nil, remote: true)
-
-    assert remote_policy == %{
-             "type" => "workspaceWrite",
-             "writableRoots" => ["~/.symphony-workspaces"],
-             "readOnlyAccess" => %{"type" => "fullAccess"},
-             "networkAccess" => false,
-             "excludeTmpdirEnvVar" => false,
-             "excludeSlashTmp" => false
-           }
+    assert message =~ "`codex:` is no longer supported"
   end
 
-  test "runtime sandbox policy resolution passes explicit policies through unchanged" do
-    test_root =
-      Path.join(
-        System.tmp_dir!(),
-        "symphony-elixir-runtime-sandbox-#{System.unique_integer([:positive])}"
-      )
+  test "schema parse rejects unsupported opencode sandbox and approval keys" do
+    for key <- ["approval_policy", "thread_sandbox", "turn_sandbox_policy"] do
+      assert {:error, {:invalid_workflow_config, message}} =
+               Schema.parse(%{
+                 tracker: %{kind: "memory"},
+                 opencode: %{key => "legacy-value"}
+               })
 
-    try do
-      workspace_root = Path.join(test_root, "workspaces")
-      issue_workspace = Path.join(workspace_root, "MT-100")
-      File.mkdir_p!(issue_workspace)
-
-      write_workflow_file!(Workflow.workflow_file_path(),
-        workspace_root: workspace_root,
-        codex_turn_sandbox_policy: %{
-          type: "workspaceWrite",
-          writableRoots: ["relative/path"],
-          networkAccess: true
-        }
-      )
-
-      assert {:ok, runtime_settings} = Config.codex_runtime_settings(issue_workspace)
-
-      assert runtime_settings.turn_sandbox_policy == %{
-               "type" => "workspaceWrite",
-               "writableRoots" => ["relative/path"],
-               "networkAccess" => true
-             }
-
-      write_workflow_file!(Workflow.workflow_file_path(),
-        workspace_root: workspace_root,
-        codex_turn_sandbox_policy: %{
-          type: "futureSandbox",
-          nested: %{flag: true}
-        }
-      )
-
-      assert {:ok, runtime_settings} = Config.codex_runtime_settings(issue_workspace)
-
-      assert runtime_settings.turn_sandbox_policy == %{
-               "type" => "futureSandbox",
-               "nested" => %{"flag" => true}
-             }
-    after
-      File.rm_rf(test_root)
+      assert message =~ "`opencode.#{key}` is no longer supported"
     end
+  end
+
+  test "config validation rejects local-only ssh worker settings" do
+    write_workflow_file!(Workflow.workflow_file_path(), worker_ssh_hosts: ["worker-01"])
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "OpenCode v1 is local-only"
+    assert message =~ "worker.ssh_hosts"
+
+    write_workflow_file!(Workflow.workflow_file_path(), worker_max_concurrent_agents_per_host: 2)
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "OpenCode v1 is local-only"
+    assert message =~ "worker.max_concurrent_agents_per_host"
   end
 
   test "path safety returns errors for invalid path segments" do
@@ -1170,133 +1019,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              SymphonyElixir.PathSafety.canonicalize(path)
   end
 
-  test "runtime sandbox policy resolution defaults when omitted and ignores workspace for explicit policies" do
-    test_root =
-      Path.join(
-        System.tmp_dir!(),
-        "symphony-elixir-runtime-sandbox-branches-#{System.unique_integer([:positive])}"
-      )
-
-    try do
-      workspace_root = Path.join(test_root, "workspaces")
-      issue_workspace = Path.join(workspace_root, "MT-101")
-
-      File.mkdir_p!(issue_workspace)
-
-      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
-
-      settings = Config.settings!()
-
-      assert {:ok, canonical_workspace_root} =
-               SymphonyElixir.PathSafety.canonicalize(workspace_root)
-
-      assert {:ok, default_policy} = Schema.resolve_runtime_turn_sandbox_policy(settings)
-      assert default_policy["type"] == "workspaceWrite"
-      assert default_policy["writableRoots"] == [canonical_workspace_root]
-
-      assert {:ok, blank_workspace_policy} =
-               Schema.resolve_runtime_turn_sandbox_policy(settings, "")
-
-      assert blank_workspace_policy == default_policy
-
-      read_only_settings = %{
-        settings
-        | codex: %{settings.codex | turn_sandbox_policy: %{"type" => "readOnly", "networkAccess" => true}}
-      }
-
-      assert {:ok, %{"type" => "readOnly", "networkAccess" => true}} =
-               Schema.resolve_runtime_turn_sandbox_policy(read_only_settings, 123)
-
-      future_settings = %{
-        settings
-        | codex: %{settings.codex | turn_sandbox_policy: %{"type" => "futureSandbox", "nested" => %{"flag" => true}}}
-      }
-
-      assert {:ok, %{"type" => "futureSandbox", "nested" => %{"flag" => true}}} =
-               Schema.resolve_runtime_turn_sandbox_policy(future_settings, 123)
-
-      assert {:error, {:unsafe_turn_sandbox_policy, {:invalid_workspace_root, 123}}} =
-               Schema.resolve_runtime_turn_sandbox_policy(settings, 123)
-    after
-      File.rm_rf(test_root)
-    end
-  end
-
   test "workflow prompt is used when building base prompt" do
-    workflow_prompt = "Workflow prompt body used as codex instruction."
+    workflow_prompt = "Workflow prompt body used as Symphony instruction."
 
     write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
     assert Config.workflow_prompt() == workflow_prompt
-  end
-
-  test "remote workspace lifecycle uses ssh host aliases from worker config" do
-    test_root =
-      Path.join(
-        System.tmp_dir!(),
-        "symphony-elixir-remote-workspace-#{System.unique_integer([:positive])}"
-      )
-
-    previous_path = System.get_env("PATH")
-    previous_trace = System.get_env("SYMP_TEST_SSH_TRACE")
-
-    on_exit(fn ->
-      restore_env("PATH", previous_path)
-      restore_env("SYMP_TEST_SSH_TRACE", previous_trace)
-    end)
-
-    try do
-      trace_file = Path.join(test_root, "ssh.trace")
-      fake_ssh = Path.join(test_root, "ssh")
-      workspace_root = "~/.symphony-remote-workspaces"
-      workspace_path = "/remote/home/.symphony-remote-workspaces/MT-SSH-WS"
-
-      File.mkdir_p!(test_root)
-      System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
-      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
-
-      File.write!(fake_ssh, """
-      #!/bin/sh
-      trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-fake-ssh.trace}"
-      printf 'ARGV:%s\\n' "$*" >> "$trace_file"
-
-      case "$*" in
-        *"__SYMPHONY_WORKSPACE__"*)
-          printf '%s\\t%s\\t%s\\n' '__SYMPHONY_WORKSPACE__' '1' '#{workspace_path}'
-          ;;
-      esac
-
-      exit 0
-      """)
-
-      File.chmod!(fake_ssh, 0o755)
-
-      write_workflow_file!(Workflow.workflow_file_path(),
-        workspace_root: workspace_root,
-        worker_ssh_hosts: ["worker-01:2200"],
-        hook_before_run: "echo before-run",
-        hook_after_run: "echo after-run",
-        hook_before_remove: "echo before-remove"
-      )
-
-      assert Config.settings!().worker.ssh_hosts == ["worker-01:2200"]
-      assert Config.settings!().workspace.root == workspace_root
-      assert {:ok, ^workspace_path} = Workspace.create_for_issue("MT-SSH-WS", "worker-01:2200")
-      assert :ok = Workspace.run_before_run_hook(workspace_path, "MT-SSH-WS", "worker-01:2200")
-      assert :ok = Workspace.run_after_run_hook(workspace_path, "MT-SSH-WS", "worker-01:2200")
-      assert :ok = Workspace.remove_issue_workspaces("MT-SSH-WS", "worker-01:2200")
-
-      trace = File.read!(trace_file)
-      assert trace =~ "-p 2200 worker-01 bash -lc"
-      assert trace =~ "__SYMPHONY_WORKSPACE__"
-      assert trace =~ "~/.symphony-remote-workspaces/MT-SSH-WS"
-      assert trace =~ "${workspace#~/}"
-      assert trace =~ "echo before-run"
-      assert trace =~ "echo after-run"
-      assert trace =~ "echo before-remove"
-      assert trace =~ "rm -rf"
-      assert trace =~ workspace_path
-    after
-      File.rm_rf(test_root)
-    end
   end
 end

@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.Codex.DynamicTool do
   @moduledoc """
-  Executes client-side tool calls requested by Codex app-server turns.
+  Legacy helper retained for tests around the previous Codex dynamic tool contract.
   """
 
   alias SymphonyElixir.Linear.Client
