@@ -7,8 +7,8 @@ defmodule SymphonyElixir.TestSupport do
       import ExUnit.CaptureLog
 
       alias SymphonyElixir.AgentRunner
+      alias SymphonyElixir.AppServer
       alias SymphonyElixir.CLI
-      alias SymphonyElixir.OpenCode.AppServer
       alias SymphonyElixir.Config
       alias SymphonyElixir.HttpServer
       alias SymphonyElixir.Linear.Client
@@ -103,10 +103,18 @@ defmodule SymphonyElixir.TestSupport do
           workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
           worker_ssh_hosts: [],
           worker_max_concurrent_agents_per_host: nil,
+          agent_backend: "opencode",
           max_concurrent_agents: 10,
           max_turns: 20,
           max_retry_backoff_ms: 300_000,
           max_concurrent_agents_by_state: %{},
+          codex_command: "codex app-server",
+          codex_approval_policy: %{reject: %{sandbox_approval: true, rules: true, mcp_elicitations: true}},
+          codex_thread_sandbox: "workspace-write",
+          codex_turn_sandbox_policy: nil,
+          codex_turn_timeout_ms: 3_600_000,
+          codex_read_timeout_ms: 5_000,
+          codex_stall_timeout_ms: 300_000,
           opencode_command: "opencode serve --hostname 127.0.0.1 --port 0",
           opencode_agent: "build",
           opencode_model: nil,
@@ -139,21 +147,24 @@ defmodule SymphonyElixir.TestSupport do
     workspace_root = Keyword.get(config, :workspace_root)
     worker_ssh_hosts = Keyword.get(config, :worker_ssh_hosts)
     worker_max_concurrent_agents_per_host = Keyword.get(config, :worker_max_concurrent_agents_per_host)
+    agent_backend = Keyword.get(config, :agent_backend)
     max_concurrent_agents = Keyword.get(config, :max_concurrent_agents)
     max_turns = Keyword.get(config, :max_turns)
     max_retry_backoff_ms = Keyword.get(config, :max_retry_backoff_ms)
     max_concurrent_agents_by_state = Keyword.get(config, :max_concurrent_agents_by_state)
-    opencode_command = Keyword.get(config, :opencode_command, Keyword.get(config, :opencode_command))
+    codex_command = Keyword.get(config, :codex_command)
+    codex_approval_policy = Keyword.get(config, :codex_approval_policy)
+    codex_thread_sandbox = Keyword.get(config, :codex_thread_sandbox)
+    codex_turn_sandbox_policy = Keyword.get(config, :codex_turn_sandbox_policy)
+    codex_turn_timeout_ms = Keyword.get(config, :codex_turn_timeout_ms)
+    codex_read_timeout_ms = Keyword.get(config, :codex_read_timeout_ms)
+    codex_stall_timeout_ms = Keyword.get(config, :codex_stall_timeout_ms)
+    opencode_command = Keyword.get(config, :opencode_command)
     opencode_agent = Keyword.get(config, :opencode_agent)
     opencode_model = Keyword.get(config, :opencode_model)
-    opencode_turn_timeout_ms =
-      Keyword.get(config, :opencode_turn_timeout_ms, Keyword.get(config, :opencode_turn_timeout_ms))
-
-    opencode_read_timeout_ms =
-      Keyword.get(config, :opencode_read_timeout_ms, Keyword.get(config, :opencode_read_timeout_ms))
-
-    opencode_stall_timeout_ms =
-      Keyword.get(config, :opencode_stall_timeout_ms, Keyword.get(config, :opencode_stall_timeout_ms))
+    opencode_turn_timeout_ms = Keyword.get(config, :opencode_turn_timeout_ms)
+    opencode_read_timeout_ms = Keyword.get(config, :opencode_read_timeout_ms)
+    opencode_stall_timeout_ms = Keyword.get(config, :opencode_stall_timeout_ms)
     hook_after_create = Keyword.get(config, :hook_after_create)
     hook_before_run = Keyword.get(config, :hook_before_run)
     hook_after_run = Keyword.get(config, :hook_after_run)
@@ -183,10 +194,19 @@ defmodule SymphonyElixir.TestSupport do
         "  root: #{yaml_value(workspace_root)}",
         worker_yaml(worker_ssh_hosts, worker_max_concurrent_agents_per_host),
         "agent:",
+        "  backend: #{yaml_value(agent_backend)}",
         "  max_concurrent_agents: #{yaml_value(max_concurrent_agents)}",
         "  max_turns: #{yaml_value(max_turns)}",
         "  max_retry_backoff_ms: #{yaml_value(max_retry_backoff_ms)}",
         "  max_concurrent_agents_by_state: #{yaml_value(max_concurrent_agents_by_state)}",
+        "codex:",
+        "  command: #{yaml_value(codex_command)}",
+        "  approval_policy: #{yaml_value(codex_approval_policy)}",
+        "  thread_sandbox: #{yaml_value(codex_thread_sandbox)}",
+        "  turn_sandbox_policy: #{yaml_value(codex_turn_sandbox_policy)}",
+        "  turn_timeout_ms: #{yaml_value(codex_turn_timeout_ms)}",
+        "  read_timeout_ms: #{yaml_value(codex_read_timeout_ms)}",
+        "  stall_timeout_ms: #{yaml_value(codex_stall_timeout_ms)}",
         "opencode:",
         "  command: #{yaml_value(opencode_command)}",
         "  agent: #{yaml_value(opencode_agent)}",

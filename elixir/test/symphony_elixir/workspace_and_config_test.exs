@@ -744,12 +744,44 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.workspace.root == Path.join(System.tmp_dir!(), "symphony_workspaces")
     assert config.worker.max_concurrent_agents_per_host == nil
     assert config.agent.max_concurrent_agents == 10
+    assert config.agent.backend == "opencode"
+    assert config.codex.command == "codex app-server"
+    assert config.codex.thread_sandbox == "workspace-write"
+    assert config.codex.turn_timeout_ms == 3_600_000
+    assert config.codex.read_timeout_ms == 5_000
+    assert config.codex.stall_timeout_ms == 300_000
     assert config.opencode.command == "opencode serve --hostname 127.0.0.1 --port 0"
     assert config.opencode.agent == "build"
     assert config.opencode.model == nil
     assert config.opencode.turn_timeout_ms == 3_600_000
     assert config.opencode.read_timeout_ms == 5_000
     assert config.opencode.stall_timeout_ms == 300_000
+    assert Config.agent_backend() == "opencode"
+    assert Config.agent_stall_timeout_ms() == 300_000
+
+    assert {:ok, canonical_workspace_root} =
+             SymphonyElixir.PathSafety.canonicalize(Path.join(System.tmp_dir!(), "symphony_workspaces"))
+
+    assert {:ok, codex_runtime_settings} = Config.codex_runtime_settings()
+
+    assert codex_runtime_settings == %{
+             approval_policy: %{
+               "reject" => %{
+                 "sandbox_approval" => true,
+                 "rules" => true,
+                 "mcp_elicitations" => true
+               }
+             },
+             thread_sandbox: "workspace-write",
+             turn_sandbox_policy: %{
+                "type" => "workspaceWrite",
+               "writableRoots" => [canonical_workspace_root],
+                "readOnlyAccess" => %{"type" => "fullAccess"},
+                "networkAccess" => false,
+                "excludeTmpdirEnvVar" => false,
+               "excludeSlashTmp" => false
+             }
+           }
 
     assert {:ok, runtime_settings} = Config.opencode_runtime_settings()
 
@@ -974,14 +1006,64 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert settings.workspace.root == Path.join(System.tmp_dir!(), "symphony_workspaces")
   end
 
-  test "schema parse rejects legacy codex config" do
-    assert {:error, {:invalid_workflow_config, message}} =
+  test "schema parse accepts codex config and infers codex backend" do
+    assert {:ok, settings} =
              Schema.parse(%{
                tracker: %{kind: "memory"},
-               codex: %{command: "codex app-server"}
+               codex: %{command: "codex app-server --model gpt-5.3-codex"}
              })
 
-    assert message =~ "`codex:` is no longer supported"
+    assert settings.agent.backend == "codex"
+    assert settings.codex.command == "codex app-server --model gpt-5.3-codex"
+  end
+
+  test "schema parse accepts explicit backend selection" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               tracker: %{kind: "memory"},
+               agent: %{backend: "opencode"},
+               codex: %{command: "codex app-server"},
+               opencode: %{command: "opencode serve --hostname 127.0.0.1 --port 4200", agent: "review"}
+             })
+
+    assert settings.agent.backend == "opencode"
+    assert settings.opencode.command == "opencode serve --hostname 127.0.0.1 --port 4200"
+  end
+
+  test "schema parse infers backend from a lone provider block" do
+    assert {:ok, opencode_settings} =
+             Schema.parse(%{
+               tracker: %{kind: "memory"},
+               opencode: %{command: "opencode serve --hostname 127.0.0.1 --port 4200", agent: "review"}
+             })
+
+    assert opencode_settings.agent.backend == "opencode"
+
+    assert {:ok, codex_settings} =
+             Schema.parse(%{
+               tracker: %{kind: "memory"},
+               codex: %{command: "codex app-server --model gpt-5.4-codex"}
+             })
+
+    assert codex_settings.agent.backend == "codex"
+  end
+
+  test "schema parse defaults to codex when backend selection is ambiguous or absent" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               tracker: %{kind: "memory"}
+             })
+
+    assert settings.agent.backend == "codex"
+
+    assert {:ok, settings} =
+             Schema.parse(%{
+               tracker: %{kind: "memory"},
+               codex: %{command: "codex app-server"},
+               opencode: %{command: "opencode serve --hostname 127.0.0.1 --port 0", agent: "build"}
+             })
+
+    assert settings.agent.backend == "codex"
   end
 
   test "schema parse rejects unsupported opencode sandbox and approval keys" do
@@ -996,7 +1078,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
-  test "config validation rejects local-only ssh worker settings" do
+  test "config validation rejects local-only ssh worker settings only for opencode" do
     write_workflow_file!(Workflow.workflow_file_path(), worker_ssh_hosts: ["worker-01"])
 
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
@@ -1008,6 +1090,16 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "OpenCode v1 is local-only"
     assert message =~ "worker.max_concurrent_agents_per_host"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      agent_backend: "codex",
+      worker_ssh_hosts: ["worker-01"],
+      worker_max_concurrent_agents_per_host: 2
+    )
+
+    assert :ok = Config.validate!()
+    assert Config.agent_backend() == "codex"
+    assert Config.agent_stall_timeout_ms() == 300_000
   end
 
   test "path safety returns errors for invalid path segments" do

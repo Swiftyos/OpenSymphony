@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.Orchestrator do
   @moduledoc """
-  Polls Linear and dispatches repository copies to OpenCode-backed workers.
+  Polls Linear and dispatches repository copies to agent-backed workers.
   """
 
   use GenServer
@@ -14,6 +14,12 @@ defmodule SymphonyElixir.Orchestrator do
   @failure_retry_base_ms 10_000
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
+  @empty_codex_totals %{
+    input_tokens: 0,
+    output_tokens: 0,
+    total_tokens: 0,
+    seconds_running: 0
+  }
   @empty_agent_totals %{
     input_tokens: 0,
     output_tokens: 0,
@@ -37,6 +43,8 @@ defmodule SymphonyElixir.Orchestrator do
       completed: MapSet.new(),
       claimed: MapSet.new(),
       retry_attempts: %{},
+      codex_totals: nil,
+      codex_rate_limits: nil,
       agent_totals: nil,
       rate_limits: nil
     ]
@@ -59,10 +67,9 @@ defmodule SymphonyElixir.Orchestrator do
       next_poll_due_at_ms: now_ms,
       poll_check_in_progress: false,
       tick_timer_ref: nil,
-      tick_token: nil,
-      agent_totals: @empty_agent_totals,
-      rate_limits: nil
+      tick_token: nil
     }
+    |> initialize_backend_totals(config)
 
     run_terminal_workspace_cleanup()
     state = schedule_tick(state, 0)
@@ -179,6 +186,29 @@ defmodule SymphonyElixir.Orchestrator do
         {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
     end
   end
+
+  def handle_info(
+        {:codex_worker_update, issue_id, %{event: _, timestamp: _} = update},
+        %{running: running} = state
+      ) do
+    case Map.get(running, issue_id) do
+      nil ->
+        {:noreply, state}
+
+      running_entry ->
+        {updated_running_entry, token_delta} = integrate_codex_update(running_entry, update)
+
+        state =
+          state
+          |> apply_codex_token_delta(token_delta)
+          |> apply_codex_rate_limits(update)
+
+        notify_dashboard()
+        {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
+    end
+  end
+
+  def handle_info({:codex_worker_update, _issue_id, _update}, state), do: {:noreply, state}
 
   def handle_info(
         {:agent_worker_update, issue_id, %{event: _, timestamp: _} = update},
@@ -446,7 +476,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_stalled_running_issues(%State{} = state) do
-    timeout_ms = Config.settings!().opencode.stall_timeout_ms
+    timeout_ms = Config.agent_stall_timeout_ms()
 
     cond do
       timeout_ms <= 0 ->
@@ -479,7 +509,7 @@ defmodule SymphonyElixir.Orchestrator do
       |> terminate_running_issue(issue_id, false)
       |> schedule_issue_retry(issue_id, next_attempt, %{
         identifier: identifier,
-        error: "stalled for #{elapsed_ms}ms without agent activity"
+        error: "stalled for #{elapsed_ms}ms without #{stall_activity_label(running_entry)} activity"
       })
     else
       state
@@ -499,10 +529,18 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp last_activity_timestamp(running_entry) when is_map(running_entry) do
-    Map.get(running_entry, :last_agent_timestamp) || Map.get(running_entry, :started_at)
+    Map.get(running_entry, :last_agent_timestamp) ||
+      Map.get(running_entry, :last_codex_timestamp) ||
+      Map.get(running_entry, :started_at)
   end
 
   defp last_activity_timestamp(_running_entry), do: nil
+
+  defp stall_activity_label(running_entry) when is_map(running_entry) do
+    if codex_running_entry?(running_entry), do: "codex", else: "agent"
+  end
+
+  defp stall_activity_label(_running_entry), do: "agent"
 
   defp terminate_task(pid) when is_pid(pid) do
     case Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, pid) do
@@ -699,29 +737,7 @@ defmodule SymphonyElixir.Orchestrator do
 
         Logger.info("Dispatching issue to agent: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)} worker_host=#{worker_host || "local"}")
 
-        running =
-          Map.put(state.running, issue.id, %{
-            pid: pid,
-            ref: ref,
-            identifier: issue.identifier,
-            issue: issue,
-            worker_host: worker_host,
-            workspace_path: nil,
-            session_id: nil,
-            last_agent_message: nil,
-            last_agent_timestamp: nil,
-            last_agent_event: nil,
-            agent_server_pid: nil,
-            agent_input_tokens: 0,
-            agent_output_tokens: 0,
-            agent_total_tokens: 0,
-            agent_last_reported_input_tokens: 0,
-            agent_last_reported_output_tokens: 0,
-            agent_last_reported_total_tokens: 0,
-            turn_count: 0,
-            retry_attempt: normalize_retry_attempt(attempt),
-            started_at: DateTime.utc_now()
-          })
+        running = Map.put(state.running, issue.id, new_running_entry(issue, pid, ref, worker_host, attempt))
 
         %{
           state
@@ -738,6 +754,51 @@ defmodule SymphonyElixir.Orchestrator do
           identifier: issue.identifier,
           error: "failed to spawn agent: #{inspect(reason)}",
           worker_host: worker_host
+        })
+    end
+  end
+
+  defp new_running_entry(issue, pid, ref, worker_host, attempt) do
+    base = %{
+      pid: pid,
+      ref: ref,
+      identifier: issue.identifier,
+      issue: issue,
+      worker_host: worker_host,
+      workspace_path: nil,
+      session_id: nil,
+      turn_count: 0,
+      retry_attempt: normalize_retry_attempt(attempt),
+      started_at: DateTime.utc_now()
+    }
+
+    case Config.agent_backend() do
+      "opencode" ->
+        Map.merge(base, %{
+          last_agent_message: nil,
+          last_agent_timestamp: nil,
+          last_agent_event: nil,
+          agent_server_pid: nil,
+          agent_input_tokens: 0,
+          agent_output_tokens: 0,
+          agent_total_tokens: 0,
+          agent_last_reported_input_tokens: 0,
+          agent_last_reported_output_tokens: 0,
+          agent_last_reported_total_tokens: 0
+        })
+
+      _ ->
+        Map.merge(base, %{
+          last_codex_message: nil,
+          last_codex_timestamp: nil,
+          last_codex_event: nil,
+          codex_app_server_pid: nil,
+          codex_input_tokens: 0,
+          codex_output_tokens: 0,
+          codex_total_tokens: 0,
+          codex_last_reported_input_tokens: 0,
+          codex_last_reported_output_tokens: 0,
+          codex_last_reported_total_tokens: 0
         })
     end
   end
@@ -1105,26 +1166,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     running =
       state.running
-      |> Enum.map(fn {issue_id, metadata} ->
-        %{
-          issue_id: issue_id,
-          identifier: metadata.identifier,
-          state: metadata.issue.state,
-          worker_host: Map.get(metadata, :worker_host),
-          workspace_path: Map.get(metadata, :workspace_path),
-          session_id: metadata.session_id,
-          agent_server_pid: metadata.agent_server_pid,
-          agent_input_tokens: metadata.agent_input_tokens,
-          agent_output_tokens: metadata.agent_output_tokens,
-          agent_total_tokens: metadata.agent_total_tokens,
-          turn_count: Map.get(metadata, :turn_count, 0),
-          started_at: metadata.started_at,
-          last_agent_timestamp: metadata.last_agent_timestamp,
-          last_agent_message: metadata.last_agent_message,
-          last_agent_event: metadata.last_agent_event,
-          runtime_seconds: running_seconds(metadata.started_at, now)
-        }
-      end)
+      |> Enum.map(fn {issue_id, metadata} -> snapshot_running_entry(issue_id, metadata, now) end)
 
     retrying =
       state.retry_attempts
@@ -1144,8 +1186,8 @@ defmodule SymphonyElixir.Orchestrator do
      %{
        running: running,
        retrying: retrying,
-       agent_totals: state.agent_totals,
-       rate_limits: Map.get(state, :rate_limits),
+       agent_totals: snapshot_agent_totals(state),
+       rate_limits: snapshot_rate_limits(state),
        polling: %{
          checking?: state.poll_check_in_progress == true,
          next_poll_in_ms: next_poll_in_ms(state.next_poll_due_at_ms, now_ms),
@@ -1169,8 +1211,156 @@ defmodule SymphonyElixir.Orchestrator do
      }, state}
   end
 
+  defp snapshot_running_entry(issue_id, metadata, now) do
+    %{
+      issue_id: issue_id,
+      identifier: metadata.identifier,
+      state: metadata.issue.state,
+      worker_host: Map.get(metadata, :worker_host),
+      workspace_path: Map.get(metadata, :workspace_path),
+      session_id: metadata.session_id,
+      agent_server_pid: running_entry_agent_server_pid(metadata),
+      agent_input_tokens: running_entry_input_tokens(metadata),
+      agent_output_tokens: running_entry_output_tokens(metadata),
+      agent_total_tokens: running_entry_total_tokens(metadata),
+      turn_count: Map.get(metadata, :turn_count, 0),
+      started_at: metadata.started_at,
+      last_agent_timestamp: running_entry_last_timestamp(metadata),
+      last_agent_message: running_entry_last_message(metadata),
+      last_agent_event: running_entry_last_event(metadata),
+      runtime_seconds: running_seconds(metadata.started_at, now)
+    }
+  end
+
+  defp snapshot_agent_totals(%State{} = state) do
+    state.agent_totals || state.codex_totals || @empty_agent_totals
+  end
+
+  defp snapshot_rate_limits(%State{} = state) do
+    state.rate_limits || state.codex_rate_limits
+  end
+
+  defp running_entry_agent_server_pid(metadata) when is_map(metadata) do
+    Map.get(metadata, :agent_server_pid) || Map.get(metadata, :codex_app_server_pid)
+  end
+
+  defp running_entry_agent_server_pid(_metadata), do: nil
+
+  defp running_entry_input_tokens(metadata) when is_map(metadata) do
+    Map.get(metadata, :agent_input_tokens) || Map.get(metadata, :codex_input_tokens, 0)
+  end
+
+  defp running_entry_input_tokens(_metadata), do: 0
+
+  defp running_entry_output_tokens(metadata) when is_map(metadata) do
+    Map.get(metadata, :agent_output_tokens) || Map.get(metadata, :codex_output_tokens, 0)
+  end
+
+  defp running_entry_output_tokens(_metadata), do: 0
+
+  defp running_entry_total_tokens(metadata) when is_map(metadata) do
+    Map.get(metadata, :agent_total_tokens) || Map.get(metadata, :codex_total_tokens, 0)
+  end
+
+  defp running_entry_total_tokens(_metadata), do: 0
+
+  defp running_entry_last_timestamp(metadata) when is_map(metadata) do
+    Map.get(metadata, :last_agent_timestamp) || Map.get(metadata, :last_codex_timestamp)
+  end
+
+  defp running_entry_last_timestamp(_metadata), do: nil
+
+  defp running_entry_last_message(metadata) when is_map(metadata) do
+    Map.get(metadata, :last_agent_message) || Map.get(metadata, :last_codex_message)
+  end
+
+  defp running_entry_last_message(_metadata), do: nil
+
+  defp running_entry_last_event(metadata) when is_map(metadata) do
+    Map.get(metadata, :last_agent_event) || Map.get(metadata, :last_codex_event)
+  end
+
+  defp running_entry_last_event(_metadata), do: nil
+
+  defp codex_running_entry?(running_entry) when is_map(running_entry) do
+    Map.has_key?(running_entry, :codex_input_tokens) or
+      Map.has_key?(running_entry, :last_codex_timestamp) or
+      Map.has_key?(running_entry, :codex_app_server_pid)
+  end
+
+  defp codex_running_entry?(_running_entry), do: false
+
+  defp integrate_codex_update(running_entry, %{event: event, timestamp: timestamp} = update) do
+    token_delta = extract_codex_token_delta(running_entry, update)
+    codex_input_tokens = Map.get(running_entry, :codex_input_tokens, 0)
+    codex_output_tokens = Map.get(running_entry, :codex_output_tokens, 0)
+    codex_total_tokens = Map.get(running_entry, :codex_total_tokens, 0)
+    codex_app_server_pid = Map.get(running_entry, :codex_app_server_pid)
+    last_reported_input = Map.get(running_entry, :codex_last_reported_input_tokens, 0)
+    last_reported_output = Map.get(running_entry, :codex_last_reported_output_tokens, 0)
+    last_reported_total = Map.get(running_entry, :codex_last_reported_total_tokens, 0)
+    turn_count = Map.get(running_entry, :turn_count, 0)
+
+    {
+      Map.merge(running_entry, %{
+        last_codex_timestamp: timestamp,
+        last_codex_message: summarize_codex_update(update),
+        session_id: session_id_for_update(running_entry.session_id, update),
+        last_codex_event: event,
+        codex_app_server_pid: codex_app_server_pid_for_update(codex_app_server_pid, update),
+        codex_input_tokens: codex_input_tokens + token_delta.input_tokens,
+        codex_output_tokens: codex_output_tokens + token_delta.output_tokens,
+        codex_total_tokens: codex_total_tokens + token_delta.total_tokens,
+        codex_last_reported_input_tokens: max(last_reported_input, token_delta.input_reported),
+        codex_last_reported_output_tokens: max(last_reported_output, token_delta.output_reported),
+        codex_last_reported_total_tokens: max(last_reported_total, token_delta.total_reported),
+        turn_count: turn_count_for_codex_update(turn_count, running_entry.session_id, update)
+      }),
+      token_delta
+    }
+  end
+
+  defp codex_app_server_pid_for_update(_existing, %{codex_app_server_pid: pid})
+       when is_binary(pid),
+       do: pid
+
+  defp codex_app_server_pid_for_update(_existing, %{codex_app_server_pid: pid})
+       when is_integer(pid),
+       do: Integer.to_string(pid)
+
+  defp codex_app_server_pid_for_update(_existing, %{codex_app_server_pid: pid}) when is_list(pid),
+    do: to_string(pid)
+
+  defp codex_app_server_pid_for_update(existing, _update), do: existing
+
+  defp turn_count_for_codex_update(existing_count, existing_session_id, %{
+         event: :session_started,
+         session_id: session_id
+       })
+       when is_integer(existing_count) and is_binary(session_id) do
+    if session_id == existing_session_id do
+      existing_count
+    else
+      existing_count + 1
+    end
+  end
+
+  defp turn_count_for_codex_update(existing_count, _existing_session_id, _update)
+       when is_integer(existing_count),
+       do: existing_count
+
+  defp turn_count_for_codex_update(_existing_count, _existing_session_id, _update), do: 0
+
+  defp summarize_codex_update(update) do
+    %{
+      event: update[:event],
+      message: update[:payload] || update[:raw],
+      timestamp: update[:timestamp]
+    }
+  end
+
   defp integrate_agent_update(running_entry, %{event: event, timestamp: timestamp} = update) do
-    token_delta = extract_token_delta(running_entry, update)
+    token_delta = extract_agent_token_delta(running_entry, update)
     agent_input_tokens = Map.get(running_entry, :agent_input_tokens, 0)
     agent_output_tokens = Map.get(running_entry, :agent_output_tokens, 0)
     agent_total_tokens = Map.get(running_entry, :agent_total_tokens, 0)
@@ -1208,6 +1398,17 @@ defmodule SymphonyElixir.Orchestrator do
        do: Integer.to_string(pid)
 
   defp agent_server_pid_for_update(_existing, %{agent_server_pid: pid}) when is_list(pid),
+    do: to_string(pid)
+
+  defp agent_server_pid_for_update(_existing, %{codex_app_server_pid: pid})
+       when is_binary(pid),
+       do: pid
+
+  defp agent_server_pid_for_update(_existing, %{codex_app_server_pid: pid})
+       when is_integer(pid),
+       do: Integer.to_string(pid)
+
+  defp agent_server_pid_for_update(_existing, %{codex_app_server_pid: pid}) when is_list(pid),
     do: to_string(pid)
 
   defp agent_server_pid_for_update(existing, _update), do: existing
@@ -1294,22 +1495,31 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp record_session_completion_totals(state, running_entry) when is_map(running_entry) do
     runtime_seconds = running_seconds(running_entry.started_at, DateTime.utc_now())
+    token_delta = %{
+      input_tokens: 0,
+      output_tokens: 0,
+      total_tokens: 0,
+      seconds_running: runtime_seconds
+    }
 
-    agent_totals =
-      apply_token_delta(
-        state.agent_totals,
-        %{
-          input_tokens: 0,
-          output_tokens: 0,
-          total_tokens: 0,
-          seconds_running: runtime_seconds
-        }
-      )
-
-    %{state | agent_totals: agent_totals}
+    if codex_running_entry?(running_entry) do
+      %{state | codex_totals: apply_token_delta(state.codex_totals, token_delta)}
+    else
+      %{state | agent_totals: apply_token_delta(state.agent_totals, token_delta)}
+    end
   end
 
   defp record_session_completion_totals(state, _running_entry), do: state
+
+  defp initialize_backend_totals(%State{} = state, config) do
+    case config.agent.backend do
+      "opencode" ->
+        %{state | agent_totals: @empty_agent_totals, rate_limits: nil}
+
+      _ ->
+        %{state | codex_totals: @empty_codex_totals, codex_rate_limits: nil}
+    end
+  end
 
   defp refresh_runtime_config(%State{} = state) do
     config = Config.settings!()
@@ -1329,6 +1539,28 @@ defmodule SymphonyElixir.Orchestrator do
   defp dispatch_slots_available?(%Issue{} = issue, %State{} = state) do
     available_slots(state) > 0 and state_slots_available?(issue, state.running)
   end
+
+  defp apply_codex_token_delta(
+         %{codex_totals: codex_totals} = state,
+         %{input_tokens: input, output_tokens: output, total_tokens: total} = token_delta
+       )
+       when is_integer(input) and is_integer(output) and is_integer(total) do
+    %{state | codex_totals: apply_token_delta(codex_totals, token_delta)}
+  end
+
+  defp apply_codex_token_delta(state, _token_delta), do: state
+
+  defp apply_codex_rate_limits(%State{} = state, update) when is_map(update) do
+    case extract_rate_limits(update) do
+      %{} = rate_limits ->
+        %{state | codex_rate_limits: rate_limits}
+
+      _ ->
+        state
+    end
+  end
+
+  defp apply_codex_rate_limits(state, _update), do: state
 
   defp apply_agent_token_delta(
          %{agent_totals: agent_totals} = state,
@@ -1368,28 +1600,31 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
-  defp extract_token_delta(running_entry, %{event: _, timestamp: _} = update) do
+  defp extract_codex_token_delta(running_entry, %{event: _, timestamp: _} = update) do
     running_entry = running_entry || %{}
-    usage = extract_token_usage(update)
+    usage = extract_codex_token_usage(update)
 
     {
       compute_token_delta(
         running_entry,
         :input,
         usage,
-        :agent_last_reported_input_tokens
+        :codex_last_reported_input_tokens,
+        &get_codex_token_usage/2
       ),
       compute_token_delta(
         running_entry,
         :output,
         usage,
-        :agent_last_reported_output_tokens
+        :codex_last_reported_output_tokens,
+        &get_codex_token_usage/2
       ),
       compute_token_delta(
         running_entry,
         :total,
         usage,
-        :agent_last_reported_total_tokens
+        :codex_last_reported_total_tokens,
+        &get_codex_token_usage/2
       )
     }
     |> Tuple.to_list()
@@ -1405,8 +1640,48 @@ defmodule SymphonyElixir.Orchestrator do
     end)
   end
 
-  defp compute_token_delta(running_entry, token_key, usage, reported_key) do
-    next_total = get_token_usage(usage, token_key)
+  defp extract_agent_token_delta(running_entry, %{event: _, timestamp: _} = update) do
+    running_entry = running_entry || %{}
+    usage = extract_agent_token_usage(update)
+
+    {
+      compute_token_delta(
+        running_entry,
+        :input,
+        usage,
+        :agent_last_reported_input_tokens,
+        &get_agent_token_usage/2
+      ),
+      compute_token_delta(
+        running_entry,
+        :output,
+        usage,
+        :agent_last_reported_output_tokens,
+        &get_agent_token_usage/2
+      ),
+      compute_token_delta(
+        running_entry,
+        :total,
+        usage,
+        :agent_last_reported_total_tokens,
+        &get_agent_token_usage/2
+      )
+    }
+    |> Tuple.to_list()
+    |> then(fn [input, output, total] ->
+      %{
+        input_tokens: input.delta,
+        output_tokens: output.delta,
+        total_tokens: total.delta,
+        input_reported: input.reported,
+        output_reported: output.reported,
+        total_reported: total.reported
+      }
+    end)
+  end
+
+  defp compute_token_delta(running_entry, token_key, usage, reported_key, token_usage_getter) do
+    next_total = token_usage_getter.(usage, token_key)
     prev_reported = Map.get(running_entry, reported_key, 0)
 
     delta =
@@ -1422,7 +1697,7 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
-  defp extract_token_usage(update) do
+  defp extract_codex_token_usage(update) do
     payloads = [
       update[:usage],
       Map.get(update, "usage"),
@@ -1432,8 +1707,23 @@ defmodule SymphonyElixir.Orchestrator do
       update
     ]
 
-    Enum.find_value(payloads, &absolute_token_usage_from_payload/1) ||
-      Enum.find_value(payloads, &turn_completed_usage_from_payload/1) ||
+    Enum.find_value(payloads, &absolute_codex_token_usage_from_payload/1) ||
+      Enum.find_value(payloads, &turn_completed_codex_usage_from_payload/1) ||
+      %{}
+  end
+
+  defp extract_agent_token_usage(update) do
+    payloads = [
+      update[:usage],
+      Map.get(update, "usage"),
+      Map.get(update, :usage),
+      update[:payload],
+      Map.get(update, "payload"),
+      update
+    ]
+
+    Enum.find_value(payloads, &absolute_agent_token_usage_from_payload/1) ||
+      Enum.find_value(payloads, &turn_completed_agent_usage_from_payload/1) ||
       %{}
   end
 
@@ -1446,7 +1736,24 @@ defmodule SymphonyElixir.Orchestrator do
       rate_limits_from_payload(update)
   end
 
-  defp absolute_token_usage_from_payload(payload) when is_map(payload) do
+  defp absolute_codex_token_usage_from_payload(payload) when is_map(payload) do
+    absolute_paths = [
+      ["params", "msg", "payload", "info", "total_token_usage"],
+      [:params, :msg, :payload, :info, :total_token_usage],
+      ["params", "msg", "info", "total_token_usage"],
+      [:params, :msg, :info, :total_token_usage],
+      ["params", "tokenUsage", "total"],
+      [:params, :tokenUsage, :total],
+      ["tokenUsage", "total"],
+      [:tokenUsage, :total]
+    ]
+
+    explicit_map_at_paths(payload, absolute_paths, &codex_integer_token_map?/1)
+  end
+
+  defp absolute_codex_token_usage_from_payload(_payload), do: nil
+
+  defp absolute_agent_token_usage_from_payload(payload) when is_map(payload) do
     absolute_paths = [
       ["tokens"],
       [:tokens],
@@ -1474,12 +1781,28 @@ defmodule SymphonyElixir.Orchestrator do
       [:tokenUsage, :total]
     ]
 
-    explicit_map_at_paths(payload, absolute_paths)
+    explicit_map_at_paths(payload, absolute_paths, &agent_integer_token_map?/1)
   end
 
-  defp absolute_token_usage_from_payload(_payload), do: nil
+  defp absolute_agent_token_usage_from_payload(_payload), do: nil
 
-  defp turn_completed_usage_from_payload(payload) when is_map(payload) do
+  defp turn_completed_codex_usage_from_payload(payload) when is_map(payload) do
+    method = Map.get(payload, "method") || Map.get(payload, :method)
+
+    if method in ["turn/completed", :turn_completed] do
+      direct =
+        Map.get(payload, "usage") ||
+          Map.get(payload, :usage) ||
+          map_at_path(payload, ["params", "usage"]) ||
+          map_at_path(payload, [:params, :usage])
+
+      if is_map(direct) and codex_integer_token_map?(direct), do: direct
+    end
+  end
+
+  defp turn_completed_codex_usage_from_payload(_payload), do: nil
+
+  defp turn_completed_agent_usage_from_payload(payload) when is_map(payload) do
     method = Map.get(payload, "method") || Map.get(payload, :method)
 
     if method in ["turn/completed", :turn_completed] or
@@ -1490,11 +1813,11 @@ defmodule SymphonyElixir.Orchestrator do
           map_at_path(payload, ["params", "usage"]) ||
           map_at_path(payload, [:params, :usage])
 
-      if is_map(direct) and integer_token_map?(direct), do: direct
+      if is_map(direct) and agent_integer_token_map?(direct), do: direct
     end
   end
 
-  defp turn_completed_usage_from_payload(_payload), do: nil
+  defp turn_completed_agent_usage_from_payload(_payload), do: nil
 
   defp rate_limits_from_payload(payload) when is_map(payload) do
     direct = Map.get(payload, "rate_limits") || Map.get(payload, :rate_limits)
@@ -1563,15 +1886,16 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp rate_limits_map?(_payload), do: false
 
-  defp explicit_map_at_paths(payload, paths) when is_map(payload) and is_list(paths) do
+  defp explicit_map_at_paths(payload, paths, map_predicate)
+       when is_map(payload) and is_list(paths) and is_function(map_predicate, 1) do
     Enum.find_value(paths, fn path ->
       value = map_at_path(payload, path)
 
-      if is_map(value) and integer_token_map?(value), do: value
+      if is_map(value) and map_predicate.(value), do: value
     end)
   end
 
-  defp explicit_map_at_paths(_payload, _paths), do: nil
+  defp explicit_map_at_paths(_payload, _paths, _map_predicate), do: nil
 
   defp map_at_path(payload, path) when is_map(payload) and is_list(path) do
     Enum.reduce_while(path, payload, fn key, acc ->
@@ -1585,7 +1909,38 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp map_at_path(_payload, _path), do: nil
 
-  defp integer_token_map?(payload) do
+  defp codex_integer_token_map?(payload) do
+    token_fields = [
+      :input_tokens,
+      :output_tokens,
+      :total_tokens,
+      :prompt_tokens,
+      :completion_tokens,
+      :inputTokens,
+      :outputTokens,
+      :totalTokens,
+      :promptTokens,
+      :completionTokens,
+      "input_tokens",
+      "output_tokens",
+      "total_tokens",
+      "prompt_tokens",
+      "completion_tokens",
+      "inputTokens",
+      "outputTokens",
+      "totalTokens",
+      "promptTokens",
+      "completionTokens"
+    ]
+
+    token_fields
+    |> Enum.any?(fn field ->
+      value = payload_get(payload, field)
+      !is_nil(integer_like(value))
+    end)
+  end
+
+  defp agent_integer_token_map?(payload) do
     token_fields = [
       :input_tokens,
       :output_tokens,
@@ -1623,7 +1978,45 @@ defmodule SymphonyElixir.Orchestrator do
     end)
   end
 
-  defp get_token_usage(usage, :input),
+  defp get_codex_token_usage(usage, :input),
+    do:
+      payload_get(usage, [
+        "input_tokens",
+        "prompt_tokens",
+        :input_tokens,
+        :prompt_tokens,
+        "promptTokens",
+        :promptTokens,
+        "inputTokens",
+        :inputTokens
+      ])
+
+  defp get_codex_token_usage(usage, :output),
+    do:
+      payload_get(usage, [
+        "output_tokens",
+        "completion_tokens",
+        :output_tokens,
+        :completion_tokens,
+        :completion,
+        "outputTokens",
+        :outputTokens,
+        "completionTokens",
+        :completionTokens
+      ])
+
+  defp get_codex_token_usage(usage, :total),
+    do:
+      payload_get(usage, [
+        "total_tokens",
+        "total",
+        :total_tokens,
+        :total,
+        "totalTokens",
+        :totalTokens
+      ])
+
+  defp get_agent_token_usage(usage, :input),
     do:
       payload_get(usage, [
         "input_tokens",
@@ -1638,7 +2031,7 @@ defmodule SymphonyElixir.Orchestrator do
         :inputTokens
       ])
 
-  defp get_token_usage(usage, :output),
+  defp get_agent_token_usage(usage, :output),
     do:
       payload_get(usage, [
         "output_tokens",
@@ -1654,7 +2047,7 @@ defmodule SymphonyElixir.Orchestrator do
         :completionTokens
       ])
 
-  defp get_token_usage(usage, :total) do
+  defp get_agent_token_usage(usage, :total) do
     payload_get(usage, [
       "total_tokens",
       "total",
@@ -1663,8 +2056,8 @@ defmodule SymphonyElixir.Orchestrator do
       "totalTokens",
       :totalTokens
     ]) ||
-      (get_token_usage(usage, :input) || 0) +
-        (get_token_usage(usage, :output) || 0) +
+      (get_agent_token_usage(usage, :input) || 0) +
+        (get_agent_token_usage(usage, :output) || 0) +
         (payload_get(usage, ["reasoning", :reasoning]) || 0)
   end
 

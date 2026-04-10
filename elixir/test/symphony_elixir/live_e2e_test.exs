@@ -402,6 +402,9 @@ defmodule SymphonyElixir.LiveE2ETest do
       when is_binary(workspace_path) ->
         runtime_info
 
+      {:codex_worker_update, ^issue_id, _message} ->
+        receive_runtime_info!(issue_id)
+
       {:agent_worker_update, ^issue_id, _message} ->
         receive_runtime_info!(issue_id)
     after
@@ -457,9 +460,10 @@ defmodule SymphonyElixir.LiveE2ETest do
       write_workflow_file!(workflow_file,
         tracker_api_token: "$LINEAR_API_KEY",
         tracker_project_slug: "bootstrap",
+        agent_backend: "codex",
         workspace_root: worker_setup.workspace_root,
         worker_ssh_hosts: worker_setup.ssh_worker_hosts,
-        opencode_command: worker_setup.opencode_command,
+        codex_command: worker_setup.codex_command,
         codex_approval_policy: "never",
         observability_enabled: false
       )
@@ -488,12 +492,13 @@ defmodule SymphonyElixir.LiveE2ETest do
         tracker_project_slug: project["slugId"],
         tracker_active_states: active_state_names(team),
         tracker_terminal_states: terminal_states,
+        agent_backend: "codex",
         workspace_root: worker_setup.workspace_root,
         worker_ssh_hosts: worker_setup.ssh_worker_hosts,
-        opencode_command: worker_setup.opencode_command,
+        codex_command: worker_setup.codex_command,
         codex_approval_policy: "never",
-        opencode_turn_timeout_ms: 600_000,
-        opencode_stall_timeout_ms: 600_000,
+        codex_turn_timeout_ms: 600_000,
+        codex_stall_timeout_ms: 600_000,
         observability_enabled: false,
         prompt: live_prompt(project["slugId"])
       )
@@ -521,7 +526,7 @@ defmodule SymphonyElixir.LiveE2ETest do
   defp live_worker_setup!(:local, _run_id, test_root) when is_binary(test_root) do
     %{
       cleanup: fn -> :ok end,
-      opencode_command: "codex app-server",
+      codex_command: "codex app-server",
       ssh_worker_hosts: [],
       workspace_root: Path.join(test_root, "workspaces")
     }
@@ -559,7 +564,7 @@ defmodule SymphonyElixir.LiveE2ETest do
 
     %{
       cleanup: fn -> cleanup_remote_test_root(remote_test_root, ssh_worker_hosts) end,
-      opencode_command: "codex app-server",
+      codex_command: "codex app-server",
       ssh_worker_hosts: ssh_worker_hosts,
       workspace_root: remote_workspace_root
     }
@@ -597,7 +602,7 @@ defmodule SymphonyElixir.LiveE2ETest do
             cleanup_remote_test_root(remote_test_root, worker_hosts)
             base_cleanup.()
           end,
-          opencode_command: "codex app-server",
+          codex_command: "codex app-server",
           ssh_worker_hosts: worker_hosts,
           workspace_root: remote_workspace_root
         }
