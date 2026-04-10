@@ -2,6 +2,7 @@ defmodule SymphonyElixir.OpenCode.Tooling do
   @moduledoc false
 
   alias SymphonyElixir.Config
+  alias SymphonyElixir.Linear.GraphqlTool
 
   @linear_tool_path [".opencode", "tools", "linear_graphql.ts"]
   @git_exclude_entry ".opencode/"
@@ -107,74 +108,6 @@ defmodule SymphonyElixir.OpenCode.Tooling do
   end
 
   defp linear_tool_source do
-    """
-    import { tool } from "@opencode-ai/plugin";
-    import { z } from "zod";
-
-    const ENDPOINT = process.env.SYMPHONY_LINEAR_ENDPOINT || "https://api.linear.app/graphql";
-    const API_KEY = process.env.SYMPHONY_LINEAR_API_KEY;
-
-    const format = (value: unknown) => JSON.stringify(value, null, 2);
-
-    const fail = (payload: unknown): never => {
-      throw new Error(format(payload));
-    };
-
-    export default tool({
-      description: "Execute a raw GraphQL query or mutation against Linear using Symphony's configured auth.",
-      args: {
-        query: z.string().min(1),
-        variables: z.record(z.string(), z.unknown()).nullable().optional(),
-      },
-      async execute(args) {
-        if (!API_KEY) {
-          fail({
-            error: {
-              message: "Symphony is missing Linear auth. Set `tracker.api_key` in `WORKFLOW.md` or export `LINEAR_API_KEY`.",
-            },
-          });
-        }
-
-        try {
-          const response = await fetch(ENDPOINT, {
-            method: "POST",
-            headers: {
-              Authorization: API_KEY,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              query: args.query.trim(),
-              variables: args.variables ?? {},
-            }),
-          });
-
-          const json = await response.json();
-
-          if (!response.ok) {
-            fail({
-              error: {
-                message: `Linear GraphQL request failed with HTTP ${response.status}.`,
-                status: response.status,
-                body: json,
-              },
-            });
-          }
-
-          if (Array.isArray(json?.errors) && json.errors.length > 0) {
-            fail(json);
-          }
-
-          return format(json);
-        } catch (error) {
-          fail({
-            error: {
-              message: "Linear GraphQL request failed before receiving a successful response.",
-              reason: error instanceof Error ? error.message : String(error),
-            },
-          });
-        }
-      },
-    });
-    """
+    GraphqlTool.open_code_tool_source()
   end
 end

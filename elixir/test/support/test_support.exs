@@ -121,6 +121,12 @@ defmodule SymphonyElixir.TestSupport do
           opencode_turn_timeout_ms: 3_600_000,
           opencode_read_timeout_ms: 5_000,
           opencode_stall_timeout_ms: 300_000,
+          claude_command: "claude",
+          claude_model: nil,
+          claude_permission_mode: "bypassPermissions",
+          claude_turn_timeout_ms: 3_600_000,
+          claude_read_timeout_ms: 5_000,
+          claude_stall_timeout_ms: 300_000,
           hook_after_create: nil,
           hook_before_run: nil,
           hook_after_run: nil,
@@ -165,6 +171,12 @@ defmodule SymphonyElixir.TestSupport do
     opencode_turn_timeout_ms = Keyword.get(config, :opencode_turn_timeout_ms)
     opencode_read_timeout_ms = Keyword.get(config, :opencode_read_timeout_ms)
     opencode_stall_timeout_ms = Keyword.get(config, :opencode_stall_timeout_ms)
+    claude_command = Keyword.get(config, :claude_command)
+    claude_model = Keyword.get(config, :claude_model)
+    claude_permission_mode = Keyword.get(config, :claude_permission_mode)
+    claude_turn_timeout_ms = Keyword.get(config, :claude_turn_timeout_ms)
+    claude_read_timeout_ms = Keyword.get(config, :claude_read_timeout_ms)
+    claude_stall_timeout_ms = Keyword.get(config, :claude_stall_timeout_ms)
     hook_after_create = Keyword.get(config, :hook_after_create)
     hook_before_run = Keyword.get(config, :hook_before_run)
     hook_after_run = Keyword.get(config, :hook_after_run)
@@ -214,6 +226,13 @@ defmodule SymphonyElixir.TestSupport do
         "  turn_timeout_ms: #{yaml_value(opencode_turn_timeout_ms)}",
         "  read_timeout_ms: #{yaml_value(opencode_read_timeout_ms)}",
         "  stall_timeout_ms: #{yaml_value(opencode_stall_timeout_ms)}",
+        "claude:",
+        "  command: #{yaml_value(claude_command)}",
+        "  model: #{yaml_value(claude_model)}",
+        "  permission_mode: #{yaml_value(claude_permission_mode)}",
+        "  turn_timeout_ms: #{yaml_value(claude_turn_timeout_ms)}",
+        "  read_timeout_ms: #{yaml_value(claude_read_timeout_ms)}",
+        "  stall_timeout_ms: #{yaml_value(claude_stall_timeout_ms)}",
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
         server_yaml(server_port, server_host),

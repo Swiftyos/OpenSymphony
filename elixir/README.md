@@ -15,13 +15,15 @@ This directory contains the current Elixir/OTP implementation of Symphony, based
 
 1. Polls Linear for candidate work
 2. Creates a workspace per issue
-3. Launches OpenCode in server mode inside the
-   workspace
-4. Sends a workflow prompt to OpenCode
-5. Keeps OpenCode working on the issue until the work is done
+3. Launches the configured unattended agent backend inside the workspace
+4. Sends a workflow prompt to that backend
+5. Keeps the backend working on the issue until the work is done
 
-During OpenCode sessions, Symphony also bootstraps a workspace-local `linear_graphql` custom tool
-so that repo skills can make raw Linear GraphQL calls without storing secrets in the repo.
+Supported backends today are Codex, OpenCode, and Claude Code.
+
+During unattended agent sessions, Symphony also bootstraps a workspace-local Linear integration so
+that repo skills can make raw Linear GraphQL calls without storing secrets in the repo. OpenCode
+gets a generated custom tool, and Claude Code gets a generated workspace-local MCP server.
 
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
 Symphony stops the active agent for that issue and cleans up matching workspaces.
@@ -81,7 +83,7 @@ Optional flags:
 - `--port` also starts the Phoenix observability service (default: disabled)
 
 The `WORKFLOW.md` file uses YAML front matter for configuration, plus a Markdown body used as the
-OpenCode session prompt.
+agent session prompt.
 
 Minimal example:
 
@@ -96,6 +98,7 @@ hooks:
   after_create: |
     git clone git@github.com:your-org/your-repo.git .
 agent:
+  backend: opencode
   max_concurrent_agents: 10
   max_turns: 20
 opencode:
@@ -110,10 +113,19 @@ Title: {{ issue.title }} Body: {{ issue.description }}
 Notes:
 
 - If a value is missing, defaults are used.
+- `agent.backend` accepts `codex`, `opencode`, or `claude`. If omitted, Symphony infers the
+  backend from a single configured provider block; ambiguous or empty provider config falls back to
+  `codex`.
 - `opencode.command` defaults to `opencode serve --hostname 127.0.0.1 --port 0`.
 - `opencode.agent` defaults to `build`.
 - `opencode.model` is optional and must use `provider/model` format when set.
-- `agent.max_turns` caps how many back-to-back OpenCode turns Symphony will run in a single agent
+- `claude.command` defaults to `claude`.
+- `claude.model` is optional.
+- `claude.permission_mode` defaults to `bypassPermissions`.
+- Claude Code supports both local runs and SSH workers. Each local or remote worker must already
+  have working Claude credentials, and the first Claude bootstrap assumes `node` is available so
+  Symphony can generate a workspace-local MCP server.
+- `agent.max_turns` caps how many back-to-back unattended turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
 - OpenCode v1 is local-only in Symphony. `worker.ssh_hosts` and
   `worker.max_concurrent_agents_per_host` are rejected during config validation.
@@ -203,8 +215,8 @@ actively running subagents, which is very useful during development.
 
 ### What's the easiest way to set this up for my own codebase?
 
-Launch OpenCode in your repo, give it the URL to the Symphony repo, and ask it to set things up
-for you.
+Launch Codex, Claude Code, or OpenCode in your repo, give it the URL to the Symphony repo, and ask
+it to set things up for you.
 
 ## License
 

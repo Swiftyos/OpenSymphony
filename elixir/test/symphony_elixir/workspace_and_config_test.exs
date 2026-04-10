@@ -756,6 +756,12 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.opencode.turn_timeout_ms == 3_600_000
     assert config.opencode.read_timeout_ms == 5_000
     assert config.opencode.stall_timeout_ms == 300_000
+    assert config.claude.command == "claude"
+    assert config.claude.model == nil
+    assert config.claude.permission_mode == "bypassPermissions"
+    assert config.claude.turn_timeout_ms == 3_600_000
+    assert config.claude.read_timeout_ms == 5_000
+    assert config.claude.stall_timeout_ms == 300_000
     assert Config.agent_backend() == "opencode"
     assert Config.agent_stall_timeout_ms() == 300_000
 
@@ -774,11 +780,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              },
              thread_sandbox: "workspace-write",
              turn_sandbox_policy: %{
-                "type" => "workspaceWrite",
+               "type" => "workspaceWrite",
                "writableRoots" => [canonical_workspace_root],
-                "readOnlyAccess" => %{"type" => "fullAccess"},
-                "networkAccess" => false,
-                "excludeTmpdirEnvVar" => false,
+               "readOnlyAccess" => %{"type" => "fullAccess"},
+               "networkAccess" => false,
+               "excludeTmpdirEnvVar" => false,
                "excludeSlashTmp" => false
              }
            }
@@ -794,6 +800,17 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              stall_timeout_ms: 300_000
            }
 
+    assert {:ok, claude_runtime_settings} = Config.claude_runtime_settings()
+
+    assert claude_runtime_settings == %{
+             command: "claude",
+             model: nil,
+             permission_mode: "bypassPermissions",
+             turn_timeout_ms: 3_600_000,
+             read_timeout_ms: 5_000,
+             stall_timeout_ms: 300_000
+           }
+
     write_workflow_file!(Workflow.workflow_file_path(),
       opencode_command: "opencode serve --hostname 127.0.0.1 --port 4200",
       opencode_agent: "review",
@@ -804,6 +821,17 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.opencode.command == "opencode serve --hostname 127.0.0.1 --port 4200"
     assert config.opencode.agent == "review"
     assert config.opencode.model == "openai/gpt-5.4"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      claude_command: "claude --debug",
+      claude_model: "sonnet",
+      claude_permission_mode: "dontAsk"
+    )
+
+    config = Config.settings!()
+    assert config.claude.command == "claude --debug"
+    assert config.claude.model == "sonnet"
+    assert config.claude.permission_mode == "dontAsk"
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: ",")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
@@ -828,6 +856,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     write_workflow_file!(Workflow.workflow_file_path(), opencode_model: "gpt-5.4")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "opencode.model"
+
+    write_workflow_file!(Workflow.workflow_file_path(), claude_permission_mode: "bad")
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "claude.permission_mode"
 
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_active_states: %{todo: true},
@@ -1017,6 +1049,19 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert settings.codex.command == "codex app-server --model gpt-5.3-codex"
   end
 
+  test "schema parse accepts claude config and infers claude backend" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               tracker: %{kind: "memory"},
+               claude: %{command: "claude --debug", permission_mode: "dontAsk", model: "sonnet"}
+             })
+
+    assert settings.agent.backend == "claude"
+    assert settings.claude.command == "claude --debug"
+    assert settings.claude.permission_mode == "dontAsk"
+    assert settings.claude.model == "sonnet"
+  end
+
   test "schema parse accepts explicit backend selection" do
     assert {:ok, settings} =
              Schema.parse(%{
@@ -1028,6 +1073,17 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert settings.agent.backend == "opencode"
     assert settings.opencode.command == "opencode serve --hostname 127.0.0.1 --port 4200"
+
+    assert {:ok, claude_settings} =
+             Schema.parse(%{
+               tracker: %{kind: "memory"},
+               agent: %{backend: "claude"},
+               codex: %{command: "codex app-server"},
+               claude: %{command: "claude", permission_mode: "bypassPermissions"}
+             })
+
+    assert claude_settings.agent.backend == "claude"
+    assert claude_settings.claude.command == "claude"
   end
 
   test "schema parse infers backend from a lone provider block" do
@@ -1046,6 +1102,14 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              })
 
     assert codex_settings.agent.backend == "codex"
+
+    assert {:ok, claude_settings} =
+             Schema.parse(%{
+               tracker: %{kind: "memory"},
+               claude: %{command: "claude", permission_mode: "bypassPermissions"}
+             })
+
+    assert claude_settings.agent.backend == "claude"
   end
 
   test "schema parse defaults to codex when backend selection is ambiguous or absent" do
@@ -1100,6 +1164,17 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert :ok = Config.validate!()
     assert Config.agent_backend() == "codex"
     assert Config.agent_stall_timeout_ms() == 300_000
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      agent_backend: "claude",
+      worker_ssh_hosts: ["worker-02"],
+      worker_max_concurrent_agents_per_host: 3,
+      claude_stall_timeout_ms: 123_000
+    )
+
+    assert :ok = Config.validate!()
+    assert Config.agent_backend() == "claude"
+    assert Config.agent_stall_timeout_ms() == 123_000
   end
 
   test "path safety returns errors for invalid path segments" do

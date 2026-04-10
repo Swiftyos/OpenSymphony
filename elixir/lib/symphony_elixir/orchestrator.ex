@@ -61,15 +61,16 @@ defmodule SymphonyElixir.Orchestrator do
     now_ms = System.monotonic_time(:millisecond)
     config = Config.settings!()
 
-    state = %State{
-      poll_interval_ms: config.polling.interval_ms,
-      max_concurrent_agents: config.agent.max_concurrent_agents,
-      next_poll_due_at_ms: now_ms,
-      poll_check_in_progress: false,
-      tick_timer_ref: nil,
-      tick_token: nil
-    }
-    |> initialize_backend_totals(config)
+    state =
+      %State{
+        poll_interval_ms: config.polling.interval_ms,
+        max_concurrent_agents: config.agent.max_concurrent_agents,
+        next_poll_due_at_ms: now_ms,
+        poll_check_in_progress: false,
+        tick_timer_ref: nil,
+        tick_token: nil
+      }
+      |> initialize_backend_totals(config)
 
     run_terminal_workspace_cleanup()
     state = schedule_tick(state, 0)
@@ -773,7 +774,7 @@ defmodule SymphonyElixir.Orchestrator do
     }
 
     case Config.agent_backend() do
-      "opencode" ->
+      backend when backend in ["opencode", "claude"] ->
         Map.merge(base, %{
           last_agent_message: nil,
           last_agent_timestamp: nil,
@@ -1495,6 +1496,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp record_session_completion_totals(state, running_entry) when is_map(running_entry) do
     runtime_seconds = running_seconds(running_entry.started_at, DateTime.utc_now())
+
     token_delta = %{
       input_tokens: 0,
       output_tokens: 0,
@@ -1513,7 +1515,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp initialize_backend_totals(%State{} = state, config) do
     case config.agent.backend do
-      "opencode" ->
+      backend when backend in ["opencode", "claude"] ->
         %{state | agent_totals: @empty_agent_totals, rate_limits: nil}
 
       _ ->

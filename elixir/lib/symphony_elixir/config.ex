@@ -35,6 +35,15 @@ defmodule SymphonyElixir.Config do
           stall_timeout_ms: non_neg_integer()
         }
 
+  @type claude_runtime_settings :: %{
+          command: String.t(),
+          model: String.t() | nil,
+          permission_mode: String.t(),
+          turn_timeout_ms: pos_integer(),
+          read_timeout_ms: pos_integer(),
+          stall_timeout_ms: non_neg_integer()
+        }
+
   @spec settings() :: {:ok, Schema.t()} | {:error, term()}
   def settings do
     case Workflow.current() do
@@ -79,6 +88,7 @@ defmodule SymphonyElixir.Config do
 
     case settings.agent.backend do
       "opencode" -> settings.opencode.stall_timeout_ms
+      "claude" -> settings.claude.stall_timeout_ms
       _ -> settings.codex.stall_timeout_ms
     end
   end
@@ -147,6 +157,21 @@ defmodule SymphonyElixir.Config do
          turn_timeout_ms: settings.opencode.turn_timeout_ms,
          read_timeout_ms: settings.opencode.read_timeout_ms,
          stall_timeout_ms: settings.opencode.stall_timeout_ms
+       }}
+    end
+  end
+
+  @spec claude_runtime_settings() :: {:ok, claude_runtime_settings()} | {:error, term()}
+  def claude_runtime_settings do
+    with {:ok, settings} <- settings() do
+      {:ok,
+       %{
+         command: settings.claude.command,
+         model: settings.claude.model,
+         permission_mode: settings.claude.permission_mode,
+         turn_timeout_ms: settings.claude.turn_timeout_ms,
+         read_timeout_ms: settings.claude.read_timeout_ms,
+         stall_timeout_ms: settings.claude.stall_timeout_ms
        }}
     end
   end

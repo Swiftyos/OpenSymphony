@@ -8,24 +8,25 @@ defmodule SymphonyElixir.OpenCode.AppServer do
   alias SymphonyElixir.{Config, PathSafety}
 
   @allowed_unattended_permissions MapSet.new([
-                                   "read",
-                                   "edit",
-                                   "glob",
-                                   "grep",
-                                   "list",
-                                   "bash",
-                                   "lsp",
-                                   "task",
-                                   "skill",
-                                   "todowrite",
-                                   "webfetch",
-                                   "websearch",
-                                   "codesearch"
-                                 ])
+                                    "read",
+                                    "edit",
+                                    "glob",
+                                    "grep",
+                                    "list",
+                                    "bash",
+                                    "lsp",
+                                    "task",
+                                    "skill",
+                                    "todowrite",
+                                    "webfetch",
+                                    "websearch",
+                                    "codesearch"
+                                  ])
   @listening_line_regex ~r/opencode server listening on (?<url>http:\/\/[^\s]+)/
   @poll_interval_ms 250
   @port_line_bytes 1_048_576
   @stream_idle_poll_ms 250
+  @post_message_listener_drain_ms 100
   @port_log_preview_bytes 1_000
 
   @type session :: %{
@@ -400,6 +401,7 @@ defmodule SymphonyElixir.OpenCode.AppServer do
 
       {ref, result} when ref == message_task.ref ->
         Process.demonitor(message_task.ref, [:flush])
+        Process.sleep(@post_message_listener_drain_ms)
         stop_async_task(listener_task)
         result
 
@@ -864,7 +866,7 @@ defmodule SymphonyElixir.OpenCode.AppServer do
   end
 
   defp issue_title(%{title: title}) when is_binary(title), do: title
-  defp issue_title(_issue), do: "OpenCode turn"
+  defp issue_title(_issue), do: "agent turn"
 
   defp sleep_or_timeout(deadline_ms, timeout_reason, next_fun) do
     if System.monotonic_time(:millisecond) >= deadline_ms do

@@ -149,11 +149,11 @@ defmodule SymphonyElixir.Config.Schema do
           is_nil(value) ->
             []
 
-          value in ["codex", "opencode"] ->
+          value in ["codex", "opencode", "claude"] ->
             []
 
           true ->
-            [backend: "must be one of: codex, opencode"]
+            [backend: "must be one of: codex, opencode, claude"]
         end
       end)
       |> validate_number(:max_concurrent_agents, greater_than: 0)
@@ -265,6 +265,60 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule Claude do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+    alias SymphonyElixir.Config.Schema
+
+    @permission_modes [
+      "acceptEdits",
+      "auto",
+      "bypassPermissions",
+      "default",
+      "dontAsk",
+      "plan"
+    ]
+
+    @primary_key false
+    embedded_schema do
+      field(:command, :string, default: "claude")
+      field(:model, :string)
+      field(:permission_mode, :string, default: "bypassPermissions")
+      field(:turn_timeout_ms, :integer, default: 3_600_000)
+      field(:read_timeout_ms, :integer, default: 5_000)
+      field(:stall_timeout_ms, :integer, default: 300_000)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(
+        attrs,
+        [:command, :model, :permission_mode, :turn_timeout_ms, :read_timeout_ms, :stall_timeout_ms],
+        empty_values: []
+      )
+      |> update_change(:model, &Schema.normalize_optional_string/1)
+      |> update_change(:permission_mode, &Schema.normalize_optional_string/1)
+      |> validate_required([:command, :permission_mode])
+      |> validate_number(:turn_timeout_ms, greater_than: 0)
+      |> validate_number(:read_timeout_ms, greater_than: 0)
+      |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
+      |> validate_change(:permission_mode, fn :permission_mode, value ->
+        cond do
+          is_nil(value) ->
+            []
+
+          value in @permission_modes ->
+            []
+
+          true ->
+            [permission_mode: "must be one of: #{Enum.join(@permission_modes, ", ")}"]
+        end
+      end)
+    end
+  end
+
   defmodule Hooks do
     @moduledoc false
     use Ecto.Schema
@@ -335,6 +389,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
     embeds_one(:opencode, OpenCode, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:claude, Claude, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
@@ -437,6 +492,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:agent, with: &Agent.changeset/2)
     |> cast_embed(:codex, with: &Codex.changeset/2)
     |> cast_embed(:opencode, with: &OpenCode.changeset/2)
+    |> cast_embed(:claude, with: &Claude.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
@@ -470,7 +526,13 @@ defmodule SymphonyElixir.Config.Schema do
       | model: normalize_optional_string(settings.opencode.model)
     }
 
-    %{settings | tracker: tracker, workspace: workspace, agent: agent, codex: codex, opencode: opencode}
+    claude = %{
+      settings.claude
+      | model: normalize_optional_string(settings.claude.model),
+        permission_mode: normalize_optional_string(settings.claude.permission_mode) || "bypassPermissions"
+    }
+
+    %{settings | tracker: tracker, workspace: workspace, agent: agent, codex: codex, opencode: opencode, claude: claude}
   end
 
   defp normalize_keys(value) when is_map(value) do
@@ -632,9 +694,7 @@ defmodule SymphonyElixir.Config.Schema do
         :ok
 
       unsupported_opencode_key ->
-        {:error,
-         {:invalid_workflow_config,
-          "`opencode.#{unsupported_opencode_key}` is no longer supported. OpenCode v1 uses `command`, `agent`, `model`, and timeout settings only."}}
+        {:error, {:invalid_workflow_config, "`opencode.#{unsupported_opencode_key}` is no longer supported. OpenCode v1 uses `command`, `agent`, `model`, and timeout settings only."}}
     end
   end
 
@@ -652,7 +712,9 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
-  defp validate_open_code_local_only(%__MODULE__{agent: %{backend: "codex"}}), do: :ok
+  defp validate_open_code_local_only(%__MODULE__{agent: %{backend: backend}})
+       when backend in ["codex", "claude"],
+       do: :ok
 
   defp validate_open_code_local_only(settings) do
     ssh_hosts =
@@ -664,14 +726,10 @@ defmodule SymphonyElixir.Config.Schema do
 
     cond do
       ssh_hosts != [] ->
-        {:error,
-         {:invalid_workflow_config,
-          "OpenCode v1 is local-only. Remove `worker.ssh_hosts` from `WORKFLOW.md`."}}
+        {:error, {:invalid_workflow_config, "OpenCode v1 is local-only. Remove `worker.ssh_hosts` from `WORKFLOW.md`."}}
 
       is_integer(settings.worker.max_concurrent_agents_per_host) ->
-        {:error,
-         {:invalid_workflow_config,
-          "OpenCode v1 is local-only. Remove `worker.max_concurrent_agents_per_host` from `WORKFLOW.md`."}}
+        {:error, {:invalid_workflow_config, "OpenCode v1 is local-only. Remove `worker.max_concurrent_agents_per_host` from `WORKFLOW.md`."}}
 
       true ->
         :ok
@@ -680,16 +738,25 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp resolve_agent_backend(explicit_backend, raw_config) do
     case normalize_optional_string(explicit_backend) do
-      backend when backend in ["codex", "opencode"] ->
+      backend when backend in ["codex", "opencode", "claude"] ->
         backend
 
       _ ->
-        case {provider_config_present?(raw_config, "codex"), provider_config_present?(raw_config, "opencode")} do
-          {true, false} -> "codex"
-          {false, true} -> "opencode"
+        case provider_presence(raw_config) do
+          {true, false, false} -> "codex"
+          {false, true, false} -> "opencode"
+          {false, false, true} -> "claude"
           _ -> "codex"
         end
     end
+  end
+
+  defp provider_presence(raw_config) do
+    {
+      provider_config_present?(raw_config, "codex"),
+      provider_config_present?(raw_config, "opencode"),
+      provider_config_present?(raw_config, "claude")
+    }
   end
 
   defp provider_config_present?(config, key) when is_map(config) and is_binary(key) do

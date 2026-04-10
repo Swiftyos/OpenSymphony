@@ -3,9 +3,10 @@ defmodule SymphonyElixir.AppServer do
   Dispatches agent app-server operations to the configured backend.
   """
 
+  alias SymphonyElixir.ClaudeCode.AppServer, as: ClaudeCodeAppServer
   alias SymphonyElixir.Codex.AppServer, as: CodexAppServer
-  alias SymphonyElixir.OpenCode.AppServer, as: OpenCodeAppServer
   alias SymphonyElixir.Config
+  alias SymphonyElixir.OpenCode.AppServer, as: OpenCodeAppServer
 
   @spec run(Path.t(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def run(workspace, prompt, issue, opts \\ []) do
@@ -31,6 +32,7 @@ defmodule SymphonyElixir.AppServer do
   def backend_module do
     case Config.agent_backend() do
       "opencode" -> OpenCodeAppServer
+      "claude" -> ClaudeCodeAppServer
       _ -> CodexAppServer
     end
   end

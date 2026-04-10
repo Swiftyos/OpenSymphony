@@ -4,6 +4,7 @@ defmodule SymphonyElixir.AgentRunner do
   """
 
   require Logger
+  alias SymphonyElixir.ClaudeCode.Tooling, as: ClaudeCodeTooling
   alias SymphonyElixir.Codex.AppServer, as: CodexAppServer
   alias SymphonyElixir.{AppServer, Config, Linear.Issue, OpenCode.Tooling, PromptBuilder, Tracker, Workspace}
 
@@ -35,7 +36,7 @@ defmodule SymphonyElixir.AgentRunner do
 
         try do
           with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host),
-               :ok <- prepare_workspace_for_backend(workspace) do
+               :ok <- prepare_workspace_for_backend(workspace, worker_host) do
             run_backend_turns(workspace, issue, agent_update_recipient, opts, worker_host)
           end
         after
@@ -49,11 +50,8 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp run_backend_turns(workspace, issue, update_recipient, opts, worker_host) do
     case Config.agent_backend() do
-      "opencode" ->
-        run_agent_turns(workspace, issue, update_recipient, opts, worker_host)
-
-      _ ->
-        run_codex_turns(workspace, issue, update_recipient, opts, worker_host)
+      "codex" -> run_codex_turns(workspace, issue, update_recipient, opts, worker_host)
+      _ -> run_agent_turns(workspace, issue, update_recipient, opts, worker_host)
     end
   end
 
@@ -215,7 +213,7 @@ defmodule SymphonyElixir.AgentRunner do
     """
     Continuation guidance:
 
-    - The previous Codex turn completed normally, but the Linear issue is still in an active state.
+    - The previous agent turn completed normally, but the Linear issue is still in an active state.
     - This is continuation turn ##{turn_number} of #{max_turns} for the current agent run.
     - Resume from the current workspace and workpad state instead of restarting from scratch.
     - The original task instructions and prior turn context are already present in this thread, so do not restate them before acting.
@@ -229,7 +227,7 @@ defmodule SymphonyElixir.AgentRunner do
     """
     Continuation guidance:
 
-    - The previous OpenCode turn completed normally, but the Linear issue is still in an active state.
+    - The previous agent turn completed normally, but the Linear issue is still in an active state.
     - This is continuation turn ##{turn_number} of #{max_turns} for the current agent run.
     - Resume from the current workspace and workpad state instead of restarting from scratch.
     - The original task instructions and prior turn context are already present in this thread, so do not restate them before acting.
@@ -237,9 +235,10 @@ defmodule SymphonyElixir.AgentRunner do
     """
   end
 
-  defp prepare_workspace_for_backend(workspace) do
+  defp prepare_workspace_for_backend(workspace, worker_host) do
     case Config.agent_backend() do
       "opencode" -> Tooling.bootstrap_workspace(workspace)
+      "claude" -> ClaudeCodeTooling.bootstrap_workspace(workspace, worker_host)
       _ -> :ok
     end
   end
