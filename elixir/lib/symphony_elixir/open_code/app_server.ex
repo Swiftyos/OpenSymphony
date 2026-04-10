@@ -663,7 +663,7 @@ defmodule SymphonyElixir.OpenCode.AppServer do
             receive_stream_events(response, buffer, session, turn_ref, owner, on_message)
 
           {:error, reason} ->
-            send(owner, {turn_ref, :stream_error, {:event_stream_parse_failed, reason}})
+            send(owner, {turn_ref, :stream_error, event_stream_error(session, reason)})
             :ok
         end
     after
@@ -1137,6 +1137,38 @@ defmodule SymphonyElixir.OpenCode.AppServer do
     )
   end
 
+  defp event_stream_error(session, reason) do
+    transport_reason = mint_transport_reason(reason)
+
+    if transport_reason == :timeout do
+      opencode_error(
+        :event_stream_timeout,
+        :event_stream,
+        "OpenCode event stream did not deliver data before read_timeout_ms elapsed",
+        Map.merge(session_context(session), %{
+          method: "GET",
+          path: "/global/event",
+          transport_reason: transport_reason,
+          cause: preview_value(reason),
+          hint: "Increase opencode.read_timeout_ms or verify the model starts streaming within that window."
+        })
+      )
+    else
+      opencode_error(
+        :event_stream_failed,
+        :event_stream,
+        "OpenCode event stream failed while reading or parsing SSE events",
+        Map.merge(session_context(session), %{
+          method: "GET",
+          path: "/global/event",
+          transport_reason: transport_reason,
+          cause: preview_value(reason),
+          hint: "Check the OpenCode server output above and confirm the event stream stays open."
+        })
+      )
+    end
+  end
+
   defp request_timeout_kind(:create_session), do: :session_create_timeout
   defp request_timeout_kind(:post_turn_message), do: :message_post_timeout
   defp request_timeout_kind(other), do: :"#{other}_timeout"
@@ -1151,6 +1183,9 @@ defmodule SymphonyElixir.OpenCode.AppServer do
 
   defp req_transport_reason(%Req.TransportError{reason: reason}), do: reason
   defp req_transport_reason(_reason), do: nil
+
+  defp mint_transport_reason(%Mint.TransportError{reason: reason}), do: reason
+  defp mint_transport_reason(_reason), do: nil
 
   defp preview_value(value) do
     value

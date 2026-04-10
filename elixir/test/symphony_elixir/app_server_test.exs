@@ -244,6 +244,21 @@ defmodule SymphonyElixir.AppServerTest do
         :stall ->
           Process.sleep(1_000)
           json(conn, 200, %{"info" => %{"id" => "assistant-message-5", "sessionID" => session_id}})
+
+        :message_post_timeout ->
+          Enum.each(1..10, fn step ->
+            FakeOpenCodeState.broadcast(state, "message.part.delta", %{
+              "part" => %{
+                "sessionID" => session_id,
+                "type" => "text",
+                "text" => "Still working #{step}"
+              }
+            })
+
+            Process.sleep(100)
+          end)
+
+          json(conn, 200, %{"info" => %{"id" => "assistant-message-6", "sessionID" => session_id}})
       end
     end
 
@@ -521,7 +536,7 @@ defmodule SymphonyElixir.AppServerTest do
       workspace = Path.join(workspace_root, "MT-105")
       File.mkdir_p!(workspace)
 
-      server = start_fake_opencode_server!(:stall)
+      server = start_fake_opencode_server!(:message_post_timeout)
       launcher = write_launcher_script!(test_root, server.base_url)
       parent = self()
 
@@ -555,6 +570,7 @@ defmodule SymphonyElixir.AppServerTest do
 
       assert_receive {:fake_opencode_request, {:message_post, "session-test", _body}}, 1_000
       assert_receive {:agent_message, %{event: :turn_started, session_id: "session-test"}}, 1_000
+      assert_receive {:agent_message, %{event: "message.part.delta"}}, 1_000
 
       assert_receive {:agent_message, %{event: :turn_ended_with_error, reason: %{kind: :message_post_timeout, message: ^message}}},
                      1_000
