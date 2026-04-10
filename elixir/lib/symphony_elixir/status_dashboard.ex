@@ -17,13 +17,14 @@ defmodule SymphonyElixir.StatusDashboard do
   @sparkline_blocks ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
   @running_id_width 8
   @running_stage_width 14
+  @running_backend_width 8
+  @running_effort_width 8
   @running_pid_width 8
   @running_age_width 12
   @running_tokens_width 10
   @running_session_width 14
   @running_event_default_width 44
   @running_event_min_width 12
-  @running_row_chrome_width 10
   @default_terminal_columns 115
 
   @ansi_reset IO.ANSI.reset()
@@ -393,16 +394,23 @@ defmodule SymphonyElixir.StatusDashboard do
   end
 
   defp format_project_link_lines do
-    project_part =
-      case Config.settings!().tracker.project_slug do
-        project_slug when is_binary(project_slug) and project_slug != "" ->
-          colorize(linear_project_url(project_slug), @ansi_cyan)
+    {project_label, project_part} =
+      case Config.linear_project_routes() do
+        [] ->
+          {"Project", colorize("n/a", @ansi_gray)}
 
-        _ ->
-          colorize("n/a", @ansi_gray)
+        [%{slug: project_slug}] ->
+          {"Project", colorize(linear_project_url(project_slug), @ansi_cyan)}
+
+        routes ->
+          {"Projects",
+           routes
+           |> Enum.map(&linear_project_url(&1.slug))
+           |> Enum.join(", ")
+           |> colorize(@ansi_cyan)}
       end
 
-    project_line = colorize("│ Project: ", @ansi_bold) <> project_part
+    project_line = colorize("│ #{project_label}: ", @ansi_bold) <> project_part
 
     case dashboard_url() do
       url when is_binary(url) ->
@@ -413,14 +421,14 @@ defmodule SymphonyElixir.StatusDashboard do
     end
   end
 
-  defp format_project_refresh_line(%{checking?: true}) do
-    colorize("│ Next refresh: ", @ansi_bold) <> colorize("checking now…", @ansi_cyan)
-  end
-
   defp format_project_refresh_line(%{next_poll_in_ms: due_in_ms}) when is_integer(due_in_ms) do
     due_in_ms = max(due_in_ms, 0)
     seconds = div(due_in_ms + 999, 1000)
     colorize("│ Next refresh: ", @ansi_bold) <> colorize("#{seconds}s", @ansi_cyan)
+  end
+
+  defp format_project_refresh_line(%{checking?: true}) do
+    colorize("│ Next refresh: ", @ansi_bold) <> colorize("checking now…", @ansi_cyan)
   end
 
   defp format_project_refresh_line(_) do
@@ -591,6 +599,8 @@ defmodule SymphonyElixir.StatusDashboard do
     issue = format_cell(running_entry.identifier || "unknown", @running_id_width)
     state = running_entry.state || "unknown"
     state_display = format_cell(to_string(state), @running_stage_width)
+    backend = running_entry |> running_entry_backend_label() |> format_cell(@running_backend_width)
+    effort = running_entry |> running_entry_effort_label() |> format_cell(@running_effort_width)
     session = running_entry.session_id |> compact_session_id() |> format_cell(@running_session_width)
     pid = format_cell(running_entry.agent_server_pid || "n/a", @running_pid_width)
     total_tokens = running_entry.agent_total_tokens || 0
@@ -619,6 +629,10 @@ defmodule SymphonyElixir.StatusDashboard do
       colorize(issue, @ansi_cyan),
       " ",
       colorize(state_display, status_color),
+      " ",
+      colorize(backend, @ansi_blue),
+      " ",
+      colorize(effort, @ansi_magenta),
       " ",
       colorize(pid, @ansi_yellow),
       " ",
@@ -742,6 +756,8 @@ defmodule SymphonyElixir.StatusDashboard do
       [
         format_cell("ID", @running_id_width),
         format_cell("STAGE", @running_stage_width),
+        format_cell("BACKEND", @running_backend_width),
+        format_cell("EFFORT", @running_effort_width),
         format_cell("PID", @running_pid_width),
         format_cell("AGE / TURN", @running_age_width),
         format_cell("TOKENS", @running_tokens_width),
@@ -755,13 +771,7 @@ defmodule SymphonyElixir.StatusDashboard do
 
   defp running_table_separator_row(running_event_width) do
     separator_width =
-      @running_id_width +
-        @running_stage_width +
-        @running_pid_width +
-        @running_age_width +
-        @running_tokens_width +
-        @running_session_width +
-        running_event_width + 6
+      fixed_running_width() + running_event_width + running_table_spacing_width()
 
     "│   " <> colorize(String.duplicate("─", separator_width), @ansi_gray)
   end
@@ -771,18 +781,40 @@ defmodule SymphonyElixir.StatusDashboard do
 
     max(
       @running_event_min_width,
-      terminal_columns - fixed_running_width() - @running_row_chrome_width
+      terminal_columns - fixed_running_width() - running_row_chrome_width()
     )
   end
 
   defp fixed_running_width do
     @running_id_width +
       @running_stage_width +
+      @running_backend_width +
+      @running_effort_width +
       @running_pid_width +
       @running_age_width +
       @running_tokens_width +
       @running_session_width
   end
+
+  defp running_row_chrome_width do
+    4 + running_table_spacing_width()
+  end
+
+  defp running_table_spacing_width do
+    8
+  end
+
+  defp running_entry_backend_label(running_entry) when is_map(running_entry) do
+    Map.get(running_entry, :backend) || Config.agent_backend()
+  end
+
+  defp running_entry_backend_label(_running_entry), do: Config.agent_backend()
+
+  defp running_entry_effort_label(running_entry) when is_map(running_entry) do
+    Map.get(running_entry, :effort) || "default"
+  end
+
+  defp running_entry_effort_label(_running_entry), do: "default"
 
   defp terminal_columns do
     case :io.columns() do
@@ -797,7 +829,7 @@ defmodule SymphonyElixir.StatusDashboard do
   defp terminal_columns_from_env do
     case System.get_env("COLUMNS") do
       nil ->
-        fixed_running_width() + @running_row_chrome_width + @running_event_default_width
+        fixed_running_width() + running_row_chrome_width() + @running_event_default_width
 
       value ->
         case Integer.parse(String.trim(value)) do
@@ -1128,8 +1160,12 @@ defmodule SymphonyElixir.StatusDashboard do
         map_path(payload, [:payload, :properties, :status, :type])
 
     case status do
-      "busy" -> "session busy"
-      "idle" -> "session idle"
+      "busy" ->
+        "session busy"
+
+      "idle" ->
+        "session idle"
+
       "retry" ->
         attempt =
           map_path(payload, ["payload", "properties", "status", "attempt"]) ||
@@ -1137,7 +1173,8 @@ defmodule SymphonyElixir.StatusDashboard do
 
         if is_integer(attempt), do: "session retrying (attempt #{attempt})", else: "session retrying"
 
-      _ -> "session status updated"
+      _ ->
+        "session status updated"
     end
   end
 
@@ -1821,7 +1858,7 @@ defmodule SymphonyElixir.StatusDashboard do
         ])
       )
 
-    total = total || ((input || 0) + (output || 0) + (reasoning || 0))
+    total = total || (input || 0) + (output || 0) + (reasoning || 0)
 
     parts =
       []

@@ -24,7 +24,17 @@ defmodule SymphonyElixir.AgentRouteTest do
     assert AgentRoute.resolve(issue_fixture(["opencode"])).backend == "opencode"
   end
 
-  test "effort labels override the configured fallback effort" do
+  test "thinking labels override the configured fallback effort" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      agent_backend: "codex",
+      default_effort: "low"
+    )
+
+    assert AgentRoute.resolve(issue_fixture(["thinking/high"])).effort == "high"
+    assert AgentRoute.resolve(issue_fixture(["THINKING/MAX"])).effort == "max"
+  end
+
+  test "legacy effort labels still resolve for compatibility" do
     write_workflow_file!(Workflow.workflow_file_path(),
       agent_backend: "codex",
       default_effort: "low"
@@ -47,19 +57,19 @@ defmodule SymphonyElixir.AgentRouteTest do
            ]
   end
 
-  test "conflicting effort labels warn and fall back to configured effort" do
+  test "conflicting thinking labels warn and fall back to configured effort" do
     write_workflow_file!(Workflow.workflow_file_path(),
       agent_backend: "codex",
       default_effort: "medium"
     )
 
-    route = AgentRoute.resolve(issue_fixture(["effort/low", "effort/max"]))
+    route = AgentRoute.resolve(issue_fixture(["thinking/low", "thinking/max"]))
 
     assert route.backend == "codex"
     assert route.effort == "medium"
 
     assert route.warnings == [
-             "multiple effort labels (low, max) found; falling back to default effort medium"
+             "multiple thinking labels (low, max) found; falling back to default effort medium"
            ]
   end
 

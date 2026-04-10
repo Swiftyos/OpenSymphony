@@ -9,12 +9,13 @@ defmodule SymphonyElixir.ClaudeCode.Tooling do
   @mcp_config_path @bundle_root ++ ["mcp.json"]
   @git_exclude_entry ".symphony/"
 
-  @spec bootstrap_workspace(Path.t(), String.t() | nil) :: :ok | {:error, term()}
-  def bootstrap_workspace(workspace, worker_host \\ nil) when is_binary(workspace) do
+  @spec bootstrap_workspace(Path.t(), String.t() | nil, keyword()) :: :ok | {:error, term()}
+  def bootstrap_workspace(workspace, worker_host \\ nil, opts \\ []) when is_binary(workspace) do
     linear_enabled? = Config.settings!().tracker.kind == "linear"
+    timeout = Keyword.get(opts, :timeout_ms, Config.settings!().hooks.timeout_ms)
 
     if is_binary(worker_host) do
-      bootstrap_remote_workspace(workspace, worker_host, linear_enabled?)
+      bootstrap_remote_workspace(workspace, worker_host, linear_enabled?, timeout)
     else
       bootstrap_local_workspace(workspace, linear_enabled?)
     end
@@ -39,9 +40,8 @@ defmodule SymphonyElixir.ClaudeCode.Tooling do
     end
   end
 
-  defp bootstrap_remote_workspace(workspace, worker_host, linear_enabled?) do
+  defp bootstrap_remote_workspace(workspace, worker_host, linear_enabled?, timeout) do
     script = remote_bootstrap_script(workspace, linear_enabled?)
-    timeout = Config.settings!().hooks.timeout_ms
 
     case SSH.run(worker_host, script, stderr_to_stdout: true, timeout: timeout) do
       {:ok, {_output, 0}} -> :ok

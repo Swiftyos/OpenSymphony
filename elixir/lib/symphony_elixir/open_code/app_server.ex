@@ -39,6 +39,7 @@ defmodule SymphonyElixir.OpenCode.AppServer do
           agent: String.t(),
           model: String.t() | nil,
           variant: String.t() | nil,
+          read_timeout_ms: pos_integer(),
           turn_timeout_ms: pos_integer(),
           stall_timeout_ms: non_neg_integer()
         }
@@ -63,12 +64,14 @@ defmodule SymphonyElixir.OpenCode.AppServer do
          {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
          {:ok, port} <- start_port(expanded_workspace, worker_host, settings.command) do
       metadata = port_metadata(port)
+      startup_context = startup_context(expanded_workspace, settings, metadata)
       read_timeout_ms = settings.read_timeout_ms
 
-      with {:ok, base_url} <- await_server_url(port, read_timeout_ms, ""),
+      with {:ok, base_url} <- await_server_url(port, startup_context, ""),
+           request_context <- Map.put(startup_context, :base_url, base_url),
            request <- build_request(base_url, read_timeout_ms),
-           :ok <- await_health(request, read_timeout_ms),
-           {:ok, session_id} <- create_session(request, expanded_workspace) do
+           :ok <- await_health(request, request_context),
+           {:ok, session_id} <- create_session(request, expanded_workspace, request_context) do
         {:ok,
          %{
            port: port,
@@ -80,6 +83,7 @@ defmodule SymphonyElixir.OpenCode.AppServer do
            agent: settings.agent,
            model: settings.model,
            variant: settings.variant,
+           read_timeout_ms: read_timeout_ms,
            turn_timeout_ms: settings.turn_timeout_ms,
            stall_timeout_ms: settings.stall_timeout_ms
          }}
@@ -114,7 +118,7 @@ defmodule SymphonyElixir.OpenCode.AppServer do
 
     message_task =
       Task.Supervisor.async_nolink(SymphonyElixir.TaskSupervisor, fn ->
-        post_turn_message(session, prompt, session)
+        post_turn_message(session, prompt)
       end)
 
     started_at_ms = System.monotonic_time(:millisecond)
@@ -178,29 +182,20 @@ defmodule SymphonyElixir.OpenCode.AppServer do
   end
 
   defp validate_workspace_cwd(workspace, nil) when is_binary(workspace) do
-    expanded_workspace = Path.expand(workspace)
-    expanded_root = Path.expand(Config.settings!().workspace.root)
-    expanded_root_prefix = expanded_root <> "/"
+    case Config.validate_workspace_path(workspace) do
+      {:ok, canonical_workspace} ->
+        {:ok, canonical_workspace}
 
-    with {:ok, canonical_workspace} <- PathSafety.canonicalize(expanded_workspace),
-         {:ok, canonical_root} <- PathSafety.canonicalize(expanded_root) do
-      canonical_root_prefix = canonical_root <> "/"
+      {:error, {:workspace_root, canonical_workspace, _canonical_root}} ->
+        {:error, {:invalid_workspace_cwd, :workspace_root, canonical_workspace}}
 
-      cond do
-        canonical_workspace == canonical_root ->
-          {:error, {:invalid_workspace_cwd, :workspace_root, canonical_workspace}}
+      {:error, {:symlink_escape, expanded_workspace, canonical_root}} ->
+        {:error, {:invalid_workspace_cwd, :symlink_escape, expanded_workspace, canonical_root}}
 
-        String.starts_with?(canonical_workspace <> "/", canonical_root_prefix) ->
-          {:ok, canonical_workspace}
+      {:error, {:outside_workspace_root, canonical_workspace, canonical_root}} ->
+        {:error, {:invalid_workspace_cwd, :outside_workspace_root, canonical_workspace, canonical_root}}
 
-        String.starts_with?(expanded_workspace <> "/", expanded_root_prefix) ->
-          {:error, {:invalid_workspace_cwd, :symlink_escape, expanded_workspace, canonical_root}}
-
-        true ->
-          {:error, {:invalid_workspace_cwd, :outside_workspace_root, canonical_workspace, canonical_root}}
-      end
-    else
-      {:error, {:path_canonicalize_failed, path, reason}} ->
+      {:error, {:path_unreadable, path, reason}} ->
         {:error, {:invalid_workspace_cwd, :path_unreadable, path, reason}}
     end
   end
@@ -250,6 +245,40 @@ defmodule SymphonyElixir.OpenCode.AppServer do
   defp maybe_put_env(entries, _key, false), do: entries
   defp maybe_put_env(entries, key, value), do: [{key, value} | entries]
 
+  defp startup_context(workspace, settings, metadata) do
+    metadata
+    |> Map.take([:agent_server_pid])
+    |> Map.merge(%{
+      backend: "opencode",
+      workspace: workspace,
+      agent: settings.agent,
+      model: settings.model,
+      variant: settings.variant,
+      read_timeout_ms: settings.read_timeout_ms,
+      turn_timeout_ms: settings.turn_timeout_ms,
+      stall_timeout_ms: settings.stall_timeout_ms
+    })
+    |> compact_details()
+  end
+
+  defp session_context(session) do
+    session.metadata
+    |> Map.take([:agent_server_pid])
+    |> Map.merge(%{
+      backend: "opencode",
+      workspace: session.workspace,
+      base_url: session.base_url,
+      session_id: session.session_id,
+      agent: session.agent,
+      model: session.model,
+      variant: session.variant,
+      read_timeout_ms: session.read_timeout_ms,
+      turn_timeout_ms: session.turn_timeout_ms,
+      stall_timeout_ms: session.stall_timeout_ms
+    })
+    |> compact_details()
+  end
+
   defp port_metadata(port) when is_port(port) do
     case :erlang.port_info(port, :os_pid) do
       {:os_pid, os_pid} ->
@@ -260,7 +289,7 @@ defmodule SymphonyElixir.OpenCode.AppServer do
     end
   end
 
-  defp await_server_url(port, timeout_ms, pending_line) when is_port(port) do
+  defp await_server_url(port, context, pending_line) when is_port(port) do
     receive do
       {^port, {:data, {:eol, chunk}}} ->
         complete_line = pending_line <> IO.chardata_to_string(chunk)
@@ -271,17 +300,36 @@ defmodule SymphonyElixir.OpenCode.AppServer do
 
           :nomatch ->
             log_port_output("server startup", complete_line)
-            await_server_url(port, timeout_ms, "")
+            await_server_url(port, context, "")
         end
 
       {^port, {:data, {:noeol, chunk}}} ->
-        await_server_url(port, timeout_ms, pending_line <> IO.chardata_to_string(chunk))
+        await_server_url(port, context, pending_line <> IO.chardata_to_string(chunk))
 
       {^port, {:exit_status, status}} ->
-        {:error, {:port_exit, status}}
+        {:error,
+         opencode_error(
+           :server_start_port_exit,
+           :server_startup,
+           "OpenCode exited before announcing its listening URL",
+           Map.merge(context, %{
+             exit_status: status,
+             hint: "Check the OpenCode startup output above for config or provider errors."
+           })
+         )}
     after
-      timeout_ms ->
-        {:error, :server_start_timeout}
+      Map.fetch!(context, :read_timeout_ms) ->
+        {:error,
+         opencode_error(
+           :server_start_timeout,
+           :server_startup,
+           "OpenCode did not announce its listening URL before read_timeout_ms elapsed",
+           Map.put(
+             context,
+             :hint,
+             "Verify the opencode command starts correctly from this workspace and check the startup output above."
+           )
+         )}
     end
   end
 
@@ -304,42 +352,58 @@ defmodule SymphonyElixir.OpenCode.AppServer do
     )
   end
 
-  defp await_health(request, timeout_ms) do
-    deadline = System.monotonic_time(:millisecond) + timeout_ms
-    await_health_until(request, deadline)
+  defp await_health(request, context) do
+    deadline = System.monotonic_time(:millisecond) + Map.fetch!(context, :read_timeout_ms)
+    await_health_until(request, deadline, context)
   end
 
-  defp await_health_until(request, deadline_ms) do
+  defp await_health_until(request, deadline_ms, context) do
     case Req.get(request, url: "/global/health") do
       {:ok, %{status: 200, body: %{"healthy" => true}}} ->
         :ok
 
-      {:ok, _response} ->
-        sleep_or_timeout(deadline_ms, :healthcheck_timeout, fn ->
-          await_health_until(request, deadline_ms)
-        end)
+      {:ok, response} ->
+        sleep_or_timeout(
+          deadline_ms,
+          fn ->
+            healthcheck_response_error(context, response)
+          end,
+          fn ->
+            await_health_until(request, deadline_ms, context)
+          end
+        )
 
-      {:error, _reason} ->
-        sleep_or_timeout(deadline_ms, :healthcheck_timeout, fn ->
-          await_health_until(request, deadline_ms)
-        end)
+      {:error, reason} ->
+        sleep_or_timeout(
+          deadline_ms,
+          fn ->
+            healthcheck_transport_error(context, reason)
+          end,
+          fn ->
+            await_health_until(request, deadline_ms, context)
+          end
+        )
     end
   end
 
-  defp create_session(request, workspace) do
+  defp create_session(request, workspace, context) do
+    path = "/session"
+
     case Req.post(request, url: "/session", json: %{"title" => Path.basename(workspace)}) do
       {:ok, %{status: status, body: %{"id" => session_id}}} when status in 200..299 and is_binary(session_id) ->
         {:ok, session_id}
 
       {:ok, %{status: status, body: body}} ->
-        {:error, {:session_create_failed, status, body}}
+        {:error, request_http_error(:create_session, "POST", path, status, body, context)}
 
       {:error, reason} ->
-        {:error, {:session_create_failed, reason}}
+        {:error, request_transport_error(:create_session, "POST", path, reason, context)}
     end
   end
 
-  defp post_turn_message(session, prompt, _settings) do
+  defp post_turn_message(session, prompt) do
+    path = "/session/#{session.session_id}/message"
+
     payload =
       %{
         "agent" => session.agent,
@@ -354,17 +418,32 @@ defmodule SymphonyElixir.OpenCode.AppServer do
       |> maybe_put_variant(session.variant)
 
     case Req.post(session.request,
-           url: "/session/#{session.session_id}/message",
+           url: path,
            json: payload
          ) do
       {:ok, %{status: status, body: body}} when status in 200..299 and is_map(body) ->
         {:ok, body}
 
       {:ok, %{status: status, body: body}} ->
-        {:error, {:message_post_failed, status, body}}
+        {:error,
+         request_http_error(
+           :post_turn_message,
+           "POST",
+           path,
+           status,
+           body,
+           Map.put(session_context(session), :prompt_bytes, byte_size(prompt))
+         )}
 
       {:error, reason} ->
-        {:error, {:message_post_failed, reason}}
+        {:error,
+         request_transport_error(
+           :post_turn_message,
+           "POST",
+           path,
+           reason,
+           Map.put(session_context(session), :prompt_bytes, byte_size(prompt))
+         )}
     end
   end
 
@@ -439,7 +518,17 @@ defmodule SymphonyElixir.OpenCode.AppServer do
 
       {:DOWN, ref, :process, _pid, reason} when ref == message_task.ref ->
         stop_async_task(listener_task)
-        {:error, {:message_task_exit, reason}}
+
+        {:error,
+         opencode_error(
+           :message_task_exit,
+           :post_turn_message,
+           "OpenCode message task exited unexpectedly while waiting for the turn response",
+           Map.merge(session_context(session), %{
+             cause: preview_value(reason),
+             hint: "Check the OpenCode server output above and the Elixir crash reason for this worker."
+           })
+         )}
 
       {:DOWN, ref, :process, _pid, _reason} when ref == listener_task.ref ->
         await_turn_result(
@@ -482,7 +571,16 @@ defmodule SymphonyElixir.OpenCode.AppServer do
         )
 
       {port, {:exit_status, status}} when port == session.port ->
-        {:error, {:port_exit, status}}
+        {:error,
+         opencode_error(
+           :port_exit,
+           :turn_runtime,
+           "OpenCode server exited while the turn was still in progress",
+           Map.merge(session_context(session), %{
+             exit_status: status,
+             hint: "Check the OpenCode server output above for the process exit reason."
+           })
+         )}
     after
       @poll_interval_ms ->
         now_ms = System.monotonic_time(:millisecond)
@@ -888,12 +986,17 @@ defmodule SymphonyElixir.OpenCode.AppServer do
 
   defp sleep_or_timeout(deadline_ms, timeout_reason, next_fun) do
     if System.monotonic_time(:millisecond) >= deadline_ms do
-      {:error, timeout_reason}
+      {:error, resolve_timeout_reason(timeout_reason)}
     else
       Process.sleep(@poll_interval_ms)
       next_fun.()
     end
   end
+
+  defp resolve_timeout_reason(timeout_reason) when is_function(timeout_reason, 0),
+    do: timeout_reason.()
+
+  defp resolve_timeout_reason(timeout_reason), do: timeout_reason
 
   defp stop_port(port) when is_port(port) do
     Port.close(port)
@@ -919,6 +1022,149 @@ defmodule SymphonyElixir.OpenCode.AppServer do
   end
 
   defp truncate_output(text), do: text
+
+  defp opencode_error(kind, phase, message, details) when is_binary(message) and is_map(details) do
+    details
+    |> compact_details()
+    |> Map.merge(%{
+      backend: "opencode",
+      kind: kind,
+      phase: phase,
+      message: message
+    })
+  end
+
+  defp request_http_error(phase, method, path, status, body, context) do
+    opencode_error(
+      request_http_error_kind(phase),
+      phase,
+      "OpenCode returned HTTP #{status} for #{method} #{path}",
+      Map.merge(context, %{
+        method: method,
+        path: path,
+        response_status: status,
+        response_body: preview_value(body)
+      })
+    )
+  end
+
+  defp request_transport_error(phase, method, path, reason, context) do
+    transport_reason = req_transport_reason(reason)
+
+    if transport_reason == :timeout do
+      opencode_error(
+        request_timeout_kind(phase),
+        phase,
+        "OpenCode did not respond to #{method} #{path} before read_timeout_ms elapsed",
+        Map.merge(context, %{
+          method: method,
+          path: path,
+          transport_reason: transport_reason,
+          hint: "Increase opencode.read_timeout_ms or verify the provider/model can answer within that window."
+        })
+      )
+    else
+      opencode_error(
+        request_transport_error_kind(phase),
+        phase,
+        "OpenCode request failed for #{method} #{path}",
+        Map.merge(context, %{
+          method: method,
+          path: path,
+          transport_reason: transport_reason,
+          cause: preview_value(reason),
+          hint: "Check the OpenCode server output above and verify provider connectivity."
+        })
+      )
+    end
+  end
+
+  defp healthcheck_response_error(context, %{status: status, body: body}) do
+    opencode_error(
+      :healthcheck_timeout,
+      :healthcheck,
+      "OpenCode never reported healthy before read_timeout_ms elapsed",
+      Map.merge(context, %{
+        method: "GET",
+        path: "/global/health",
+        response_status: status,
+        response_body: preview_value(body),
+        hint: "Verify the OpenCode server can answer GET /global/health successfully before starting a turn."
+      })
+    )
+  end
+
+  defp healthcheck_response_error(context, response) do
+    opencode_error(
+      :healthcheck_timeout,
+      :healthcheck,
+      "OpenCode never reported healthy before read_timeout_ms elapsed",
+      Map.merge(context, %{
+        method: "GET",
+        path: "/global/health",
+        response_body: preview_value(response),
+        hint: "Verify the OpenCode server can answer GET /global/health successfully before starting a turn."
+      })
+    )
+  end
+
+  defp healthcheck_transport_error(context, reason) do
+    transport_reason = req_transport_reason(reason)
+
+    kind =
+      case transport_reason do
+        :timeout -> :healthcheck_timeout
+        _ -> :healthcheck_failed
+      end
+
+    message =
+      case transport_reason do
+        :timeout -> "OpenCode did not respond to GET /global/health before read_timeout_ms elapsed"
+        _ -> "OpenCode healthcheck request failed"
+      end
+
+    opencode_error(
+      kind,
+      :healthcheck,
+      message,
+      Map.merge(context, %{
+        method: "GET",
+        path: "/global/health",
+        transport_reason: transport_reason,
+        cause: preview_value(reason),
+        hint: "Check the OpenCode startup output above and verify the local server stays reachable."
+      })
+    )
+  end
+
+  defp request_timeout_kind(:create_session), do: :session_create_timeout
+  defp request_timeout_kind(:post_turn_message), do: :message_post_timeout
+  defp request_timeout_kind(other), do: :"#{other}_timeout"
+
+  defp request_http_error_kind(:create_session), do: :session_create_http_error
+  defp request_http_error_kind(:post_turn_message), do: :message_post_http_error
+  defp request_http_error_kind(other), do: :"#{other}_http_error"
+
+  defp request_transport_error_kind(:create_session), do: :session_create_transport_error
+  defp request_transport_error_kind(:post_turn_message), do: :message_post_transport_error
+  defp request_transport_error_kind(other), do: :"#{other}_transport_error"
+
+  defp req_transport_reason(%Req.TransportError{reason: reason}), do: reason
+  defp req_transport_reason(_reason), do: nil
+
+  defp preview_value(value) do
+    value
+    |> inspect(limit: 10, printable_limit: 300)
+    |> truncate_output()
+  end
+
+  defp compact_details(details) when is_map(details) do
+    Enum.reduce(details, %{}, fn
+      {_key, nil}, acc -> acc
+      {_key, ""}, acc -> acc
+      {key, value}, acc -> Map.put(acc, key, value)
+    end)
+  end
 
   defp emit_message(on_message, event, payload, metadata) do
     message =

@@ -1,10 +1,11 @@
 defmodule SymphonyElixir.Config do
   @moduledoc """
-  Runtime configuration loaded from `WORKFLOW.md`.
+  Runtime configuration loaded from `symphony.yml` or legacy `WORKFLOW.md`.
   """
 
   alias SymphonyElixir.Config.Schema
-  alias SymphonyElixir.Workflow
+  alias SymphonyElixir.PathSafety
+  alias SymphonyElixir.{SymphonyConfig, Workflow}
 
   @default_prompt_template """
   You are working on a Linear issue.
@@ -46,14 +47,70 @@ defmodule SymphonyElixir.Config do
           stall_timeout_ms: non_neg_integer()
         }
 
+  @type linear_project_route :: %{
+          slug: String.t(),
+          repo: String.t() | nil,
+          workflow: String.t() | nil,
+          backend: String.t() | nil,
+          default_branch: String.t() | nil,
+          workspace_root: String.t() | nil
+        }
+
+  @type repo_source_kind :: :local_path | :github_slug | :remote_url
+
+  @type repo_source :: %{
+          raw: String.t(),
+          clone_url: String.t(),
+          cache_key: String.t(),
+          display: String.t(),
+          kind: repo_source_kind()
+        }
+
+  @github_repo_pattern ~r/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
+
+  @spec startup_mode() :: :legacy | :global
+  def startup_mode do
+    case Application.get_env(:symphony_elixir, :startup_mode) do
+      mode when mode in [:legacy, :global] ->
+        mode
+
+      _ ->
+        if File.regular?(SymphonyConfig.config_file_path()), do: :global, else: :legacy
+    end
+  end
+
+  @spec global_mode?() :: boolean()
+  def global_mode?, do: startup_mode() == :global
+
+  @spec default_prompt_template() :: String.t()
+  def default_prompt_template, do: @default_prompt_template
+
   @spec settings() :: {:ok, Schema.t()} | {:error, term()}
   def settings do
-    case Workflow.current() do
-      {:ok, %{config: config}} when is_map(config) ->
-        Schema.parse(config)
+    case startup_mode() do
+      :global ->
+        case SymphonyConfig.current() do
+          {:ok, %{config: config}} when is_map(config) ->
+            Schema.parse(config,
+              mode: :global,
+              base_dir: Path.dirname(SymphonyConfig.config_file_path())
+            )
 
-      {:error, reason} ->
-        {:error, reason}
+          {:error, reason} ->
+            {:error, reason}
+        end
+
+      _ ->
+        case Workflow.current() do
+          {:ok, %{config: config}} when is_map(config) ->
+            Schema.parse(config,
+              mode: :legacy,
+              base_dir: Path.dirname(Workflow.workflow_file_path())
+            )
+
+          {:error, reason} ->
+            {:error, reason}
+        end
     end
   end
 
@@ -64,9 +121,29 @@ defmodule SymphonyElixir.Config do
         settings
 
       {:error, reason} ->
-        raise ArgumentError, message: format_config_error(reason)
+        raise ArgumentError, message: format_error(reason)
     end
   end
+
+  @spec validated_settings!() :: Schema.t()
+  def validated_settings! do
+    case settings() do
+      {:ok, %Schema{} = settings} ->
+        with :ok <- validate_semantics(settings),
+             :ok <- validate_project_route_semantics(settings) do
+          settings
+        else
+          {:error, reason} ->
+            raise ArgumentError, message: format_error(reason)
+        end
+
+      {:error, reason} ->
+        raise ArgumentError, message: format_error(reason)
+    end
+  end
+
+  @spec format_error(term()) :: String.t()
+  def format_error(reason), do: format_config_error(reason)
 
   @spec max_concurrent_agents_for_state(term()) :: pos_integer()
   def max_concurrent_agents_for_state(state_name) when is_binary(state_name) do
@@ -124,12 +201,16 @@ defmodule SymphonyElixir.Config do
 
   @spec workflow_prompt() :: String.t()
   def workflow_prompt do
-    case Workflow.current() do
-      {:ok, %{prompt_template: prompt}} ->
-        if String.trim(prompt) == "", do: @default_prompt_template, else: prompt
+    if global_mode?() do
+      @default_prompt_template
+    else
+      case Workflow.current() do
+        {:ok, %{prompt_template: prompt}} ->
+          if String.trim(prompt) == "", do: @default_prompt_template, else: prompt
 
-      _ ->
-        @default_prompt_template
+        _ ->
+          @default_prompt_template
+      end
     end
   end
 
@@ -143,8 +224,231 @@ defmodule SymphonyElixir.Config do
 
   @spec validate!() :: :ok | {:error, term()}
   def validate! do
-    with {:ok, settings} <- settings() do
-      validate_semantics(settings)
+    with {:ok, settings} <- settings(),
+         :ok <- validate_semantics(settings),
+         :ok <- validate_project_route_semantics(settings) do
+      :ok
+    end
+  end
+
+  @spec linear_project_routes() :: [linear_project_route()]
+  def linear_project_routes, do: linear_project_routes(settings!())
+
+  @spec linear_project_routes(Schema.t()) :: [linear_project_route()]
+  def linear_project_routes(%Schema{} = settings) do
+    routes =
+      settings.tracker.projects
+      |> List.wrap()
+      |> Enum.filter(&(is_binary(&1.slug) and String.trim(&1.slug) != ""))
+
+    case routes do
+      [] ->
+        case settings.tracker.project_slug do
+          project_slug when is_binary(project_slug) ->
+            [%{slug: project_slug, repo: nil, workflow: nil, backend: nil, workspace_root: nil}]
+
+          _ ->
+            []
+        end
+
+      _ ->
+        routes
+    end
+  end
+
+  @spec workspace_roots() :: [Path.t()]
+  def workspace_roots, do: workspace_roots(settings!())
+
+  @spec workspace_roots(Schema.t()) :: [Path.t()]
+  def workspace_roots(%Schema{} = settings) do
+    [settings.workspace.root | Enum.map(linear_project_routes(settings), & &1.workspace_root)]
+    |> Enum.filter(&(is_binary(&1) and String.trim(&1) != ""))
+    |> Enum.uniq()
+  end
+
+  @spec project_workspace_roots() :: [Path.t()]
+  def project_workspace_roots, do: project_workspace_roots(settings!())
+
+  @spec project_workspace_roots(Schema.t()) :: [Path.t()]
+  def project_workspace_roots(%Schema{} = settings) do
+    routes = linear_project_routes(settings)
+
+    case routes do
+      [] ->
+        [settings.workspace.root]
+
+      _ ->
+        route_count = length(routes)
+
+        routes
+        |> Enum.map(&workspace_root_for_route(&1, settings, route_count))
+        |> Enum.uniq()
+    end
+  end
+
+  @spec workspace_root_for_issue(map() | String.t() | nil) :: Path.t()
+  def workspace_root_for_issue(issue_or_identifier), do: workspace_root_for_issue(issue_or_identifier, settings!())
+
+  @spec workspace_root_for_issue(map() | String.t() | nil, Schema.t()) :: Path.t()
+  def workspace_root_for_issue(issue_or_identifier, %Schema{} = settings) do
+    routes = linear_project_routes(settings)
+    route_count = length(routes)
+
+    case linear_project_route(issue_or_identifier, settings) do
+      %{workspace_root: workspace_root} when is_binary(workspace_root) and workspace_root != "" ->
+        workspace_root
+
+      %{slug: slug} when is_binary(slug) and route_count > 1 ->
+        Path.join(settings.workspace.root, safe_workspace_segment(slug))
+
+      _ ->
+        settings.workspace.root
+    end
+  end
+
+  @spec project_repo_for_issue(map() | String.t() | nil) :: String.t() | nil
+  def project_repo_for_issue(issue_or_identifier), do: project_repo_for_issue(issue_or_identifier, settings!())
+
+  @spec project_repo_for_issue(map() | String.t() | nil, Schema.t()) :: String.t() | nil
+  def project_repo_for_issue(issue_or_identifier, %Schema{} = settings) do
+    case linear_project_route(issue_or_identifier, settings) do
+      %{repo: repo} when is_binary(repo) and repo != "" -> repo
+      _ -> nil
+    end
+  end
+
+  @spec project_repo_source_for_issue(map() | String.t() | nil) :: repo_source() | nil
+  def project_repo_source_for_issue(issue_or_identifier),
+    do: project_repo_source_for_issue(issue_or_identifier, settings!())
+
+  @spec project_repo_source_for_issue(map() | String.t() | nil, Schema.t()) :: repo_source() | nil
+  def project_repo_source_for_issue(issue_or_identifier, %Schema{} = settings) do
+    issue_or_identifier
+    |> project_repo_for_issue(settings)
+    |> case do
+      repo when is_binary(repo) -> repo_source(repo)
+      _ -> nil
+    end
+  end
+
+  @spec project_default_branch_for_issue(map() | String.t() | nil) :: String.t() | nil
+  def project_default_branch_for_issue(issue_or_identifier),
+    do: project_default_branch_for_issue(issue_or_identifier, settings!())
+
+  @spec project_default_branch_for_issue(map() | String.t() | nil, Schema.t()) :: String.t() | nil
+  def project_default_branch_for_issue(issue_or_identifier, %Schema{} = settings) do
+    case linear_project_route(issue_or_identifier, settings) do
+      %{default_branch: default_branch} when is_binary(default_branch) and default_branch != "" ->
+        default_branch
+
+      _ ->
+        nil
+    end
+  end
+
+  @spec repo_source(String.t()) :: repo_source()
+  def repo_source(repo) when is_binary(repo) do
+    normalized_repo = String.trim(repo)
+
+    cond do
+      local_repo_path?(normalized_repo) ->
+        build_repo_source(:local_path, normalized_repo, normalized_repo, normalized_repo)
+
+      github_repo_slug?(normalized_repo) ->
+        build_repo_source(
+          :github_slug,
+          normalized_repo,
+          "https://github.com/#{normalized_repo}.git",
+          normalized_repo
+        )
+
+      true ->
+        build_repo_source(:remote_url, normalized_repo, normalized_repo, normalized_repo)
+    end
+  end
+
+  @spec resolve_project_workflow_path(Path.t(), String.t()) :: {:ok, Path.t()} | {:error, term()}
+  def resolve_project_workflow_path(repo_root, workflow_ref)
+      when is_binary(repo_root) and is_binary(workflow_ref) do
+    normalized_workflow_ref = String.trim(workflow_ref)
+
+    cond do
+      normalized_workflow_ref == "" ->
+        {:error, {:invalid_workflow_config, "project workflow path must not be blank"}}
+
+      not repo_relative_workflow_path?(normalized_workflow_ref) ->
+        {:error, {:invalid_workflow_config, "project workflow path must be relative to the repo root: #{workflow_ref}"}}
+
+      true ->
+        expanded_repo_root = Path.expand(repo_root)
+        resolved_path = Path.expand(normalized_workflow_ref, expanded_repo_root)
+
+        if path_within_root_or_equal?(resolved_path, expanded_repo_root) do
+          {:ok, resolved_path}
+        else
+          {:error, {:invalid_workflow_config, "project workflow path escapes the repo root: #{workflow_ref}"}}
+        end
+    end
+  end
+
+  @spec linear_project_route(map() | String.t() | nil) :: linear_project_route() | nil
+  def linear_project_route(issue_or_identifier), do: linear_project_route(issue_or_identifier, settings!())
+
+  @spec linear_project_route(map() | String.t() | nil, Schema.t()) :: linear_project_route() | nil
+  def linear_project_route(issue_or_identifier, %Schema{} = settings) do
+    project_slug = issue_project_slug(issue_or_identifier)
+
+    Enum.find(linear_project_routes(settings), fn route ->
+      route_matches_project_slug?(route, project_slug)
+    end)
+  end
+
+  @spec workspace_root_for_route(linear_project_route(), Schema.t()) :: Path.t()
+  def workspace_root_for_route(route, %Schema{} = settings) when is_map(route) do
+    workspace_root_for_route(route, settings, length(linear_project_routes(settings)))
+  end
+
+  @type workspace_path_error ::
+          {:workspace_root, Path.t(), Path.t()}
+          | {:symlink_escape, Path.t(), Path.t()}
+          | {:outside_workspace_root, Path.t(), Path.t() | [Path.t()]}
+          | {:path_unreadable, Path.t(), term()}
+
+  @spec validate_workspace_path(Path.t()) :: {:ok, Path.t()} | {:error, workspace_path_error()}
+  def validate_workspace_path(workspace), do: validate_workspace_path(workspace, settings!())
+
+  @spec validate_workspace_path(Path.t(), Schema.t()) ::
+          {:ok, Path.t()} | {:error, workspace_path_error()}
+  def validate_workspace_path(workspace, %Schema{} = settings) when is_binary(workspace) do
+    expanded_workspace = Path.expand(workspace)
+    expanded_roots = Enum.map(workspace_roots(settings), &Path.expand/1)
+
+    with {:ok, canonical_workspace} <- PathSafety.canonicalize(expanded_workspace),
+         {:ok, canonical_roots} <- canonicalize_workspace_roots(expanded_roots) do
+      cond do
+        matching_root = Enum.find(canonical_roots, &(canonical_workspace == &1)) ->
+          {:error, {:workspace_root, canonical_workspace, matching_root}}
+
+        Enum.any?(canonical_roots, &path_within_root?(canonical_workspace, &1)) ->
+          {:ok, canonical_workspace}
+
+        symlink_root =
+            Enum.zip(expanded_roots, canonical_roots)
+            |> Enum.find_value(fn {expanded_root, canonical_root} ->
+              if path_within_root?(expanded_workspace, expanded_root) and
+                   not path_within_root?(canonical_workspace, canonical_root) and
+                     canonical_workspace != canonical_root do
+                canonical_root
+              end
+            end) ->
+          {:error, {:symlink_escape, expanded_workspace, symlink_root}}
+
+        true ->
+          {:error, {:outside_workspace_root, canonical_workspace, root_error_context(canonical_roots)}}
+      end
+    else
+      {:error, {:path_canonicalize_failed, path, reason}} ->
+        {:error, {:path_unreadable, path, reason}}
     end
   end
 
@@ -207,8 +511,40 @@ defmodule SymphonyElixir.Config do
       settings.tracker.kind == "linear" and not is_binary(settings.tracker.api_key) ->
         {:error, :missing_linear_api_token}
 
-      settings.tracker.kind == "linear" and not is_binary(settings.tracker.project_slug) ->
+      settings.tracker.kind == "linear" and linear_project_routes(settings) == [] ->
         {:error, :missing_linear_project_slug}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_project_route_semantics(%Schema{} = settings) do
+    if global_mode?() do
+      Enum.reduce_while(linear_project_routes(settings), :ok, fn route, :ok ->
+        case validate_global_project_route(route) do
+          :ok -> {:cont, :ok}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      end)
+    else
+      :ok
+    end
+  end
+
+  defp validate_global_project_route(%{slug: slug, workflow: workflow_path} = route) do
+    cond do
+      not (is_binary(workflow_path) and String.trim(workflow_path) != "") ->
+        {:error, {:invalid_workflow_config, "projects #{inspect(slug)} must set an explicit workflow path"}}
+
+      not (is_binary(route.repo) and String.trim(route.repo) != "") ->
+        {:error, {:invalid_workflow_config, "projects #{inspect(slug)} must set an explicit repo"}}
+
+      local_repo_path?(route.repo) and not File.exists?(route.repo) ->
+        {:error, {:invalid_workflow_config, "projects #{inspect(slug)} repo path does not exist: #{route.repo}"}}
+
+      not repo_relative_workflow_path?(workflow_path) ->
+        {:error, {:invalid_workflow_config, "projects #{inspect(slug)} workflow must be relative to the repo root: #{workflow_path}"}}
 
       true ->
         :ok
@@ -217,11 +553,26 @@ defmodule SymphonyElixir.Config do
 
   defp format_config_error(reason) do
     case reason do
+      :missing_linear_api_token ->
+        "Linear API token missing in #{config_source_name()}. Export `LINEAR_API_KEY` in the shell where Symphony starts or set `tracker.api_key` explicitly."
+
+      :missing_linear_project_slug ->
+        "Linear project slug missing in #{config_source_name()}"
+
+      :missing_tracker_kind ->
+        "Tracker kind missing in #{config_source_name()}"
+
+      {:unsupported_tracker_kind, kind} ->
+        "Unsupported tracker kind in #{config_source_name()}: #{inspect(kind)}"
+
       {:invalid_workflow_config, message} ->
-        "Invalid WORKFLOW.md config: #{message}"
+        "Invalid #{config_source_name()} config: #{message}"
 
       {:missing_workflow_file, path, raw_reason} ->
         "Missing WORKFLOW.md at #{path}: #{inspect(raw_reason)}"
+
+      {:missing_symphony_config_file, path, raw_reason} ->
+        "Missing symphony.yml at #{path}: #{inspect(raw_reason)}"
 
       {:workflow_parse_error, raw_reason} ->
         "Failed to parse WORKFLOW.md: #{inspect(raw_reason)}"
@@ -229,8 +580,136 @@ defmodule SymphonyElixir.Config do
       :workflow_front_matter_not_a_map ->
         "Failed to parse WORKFLOW.md: workflow front matter must decode to a map"
 
+      {:symphony_config_parse_error, raw_reason} ->
+        "Failed to parse symphony.yml: #{inspect(raw_reason)}"
+
+      :symphony_config_not_a_map ->
+        "Failed to parse symphony.yml: config must decode to a map"
+
       other ->
-        "Invalid WORKFLOW.md config: #{inspect(other)}"
+        "Invalid #{config_source_name()} config: #{inspect(other)}"
     end
   end
+
+  defp issue_project_slug(%{project_slug: project_slug}) when is_binary(project_slug), do: project_slug
+  defp issue_project_slug(%{"project_slug" => project_slug}) when is_binary(project_slug), do: project_slug
+  defp issue_project_slug(_issue_or_identifier), do: nil
+
+  defp route_matches_project_slug?(%{slug: route_slug}, project_slug)
+       when is_binary(route_slug) and is_binary(project_slug) do
+    normalize_linear_project_slug(route_slug) == normalize_linear_project_slug(project_slug)
+  end
+
+  defp route_matches_project_slug?(_route, _project_slug), do: false
+
+  defp normalize_linear_project_slug(value) when is_binary(value) do
+    normalized_value = String.downcase(String.trim(value))
+
+    case Regex.run(~r/(?:^|[-_])([0-9a-f]{12,})$/, normalized_value, capture: :all_but_first) do
+      [slug_id] -> slug_id
+      _ -> normalized_value
+    end
+  end
+
+  defp workspace_root_for_route(route, settings, route_count) do
+    case route.workspace_root do
+      workspace_root when is_binary(workspace_root) and workspace_root != "" ->
+        workspace_root
+
+      _ when route_count > 1 ->
+        Path.join(settings.workspace.root, safe_workspace_segment(route.slug))
+
+      _ ->
+        settings.workspace.root
+    end
+  end
+
+  defp safe_workspace_segment(segment) when is_binary(segment) do
+    String.replace(segment, ~r/[^a-zA-Z0-9._-]/, "_")
+  end
+
+  defp path_within_root?(path, root)
+       when is_binary(path) and is_binary(root) and path != root do
+    String.starts_with?(path <> "/", root <> "/")
+  end
+
+  defp path_within_root?(_path, _root), do: false
+
+  defp path_within_root_or_equal?(path, root)
+       when is_binary(path) and is_binary(root) do
+    path == root or path_within_root?(path, root)
+  end
+
+  defp path_within_root_or_equal?(_path, _root), do: false
+
+  defp canonicalize_workspace_roots(expanded_roots) when is_list(expanded_roots) do
+    Enum.reduce_while(expanded_roots, {:ok, []}, fn root, {:ok, acc} ->
+      case PathSafety.canonicalize(root) do
+        {:ok, canonical_root} ->
+          {:cont, {:ok, [canonical_root | acc]}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, roots} -> {:ok, roots |> Enum.reverse() |> Enum.uniq()}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp root_error_context([root]), do: root
+  defp root_error_context(roots), do: roots
+
+  defp config_source_name do
+    if global_mode?(), do: "symphony.yml", else: "WORKFLOW.md"
+  end
+
+  defp build_repo_source(kind, raw, clone_url, display) do
+    %{
+      raw: raw,
+      clone_url: clone_url,
+      cache_key: repo_cache_key(kind, clone_url),
+      display: display,
+      kind: kind
+    }
+  end
+
+  defp repo_cache_key(kind, clone_url) do
+    prefix =
+      case kind do
+        :local_path -> Path.basename(clone_url)
+        :github_slug -> clone_url |> String.replace_prefix("https://github.com/", "") |> String.replace_suffix(".git", "")
+        :remote_url -> clone_url
+      end
+      |> String.replace(~r/[^A-Za-z0-9._-]+/, "_")
+      |> String.trim("_")
+      |> case do
+        "" -> "repo"
+        value -> String.slice(value, 0, 64)
+      end
+
+    digest =
+      :crypto.hash(:sha256, clone_url)
+      |> Base.encode16(case: :lower)
+      |> binary_part(0, 12)
+
+    prefix <> "-" <> digest
+  end
+
+  defp github_repo_slug?(value) when is_binary(value), do: String.match?(value, @github_repo_pattern)
+  defp github_repo_slug?(_value), do: false
+
+  defp repo_relative_workflow_path?(value) when is_binary(value) do
+    trimmed_value = String.trim(value)
+    trimmed_value != "" and Path.type(trimmed_value) == :relative and not String.starts_with?(trimmed_value, "~")
+  end
+
+  defp repo_relative_workflow_path?(_value), do: false
+
+  defp local_repo_path?(value) when is_binary(value) do
+    value in [".", "..", "~"] or String.starts_with?(value, ["./", "../", "/", "~/"])
+  end
+
+  defp local_repo_path?(_value), do: false
 end

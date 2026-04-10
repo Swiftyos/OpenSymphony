@@ -9,9 +9,9 @@
 │ Next refresh: n/a
 ├─ Running
 │
-│   ID       STAGE          PID      AGE / TURN   TOKENS     SESSION        EVENT                                  
+│   ID       STAGE          BACKEND  EFFORT   PID      AGE / TURN   TOKENS     SESSION        EVENT                
 │   ───────────────────────────────────────────────────────────────────────────────────────────────────────────────
-│ ● MT-777   running        4242     1m 15s / 7        3,200 thre...567890  thread token usage updated (in 90, o...
+│ ● MT-777   running        opencode default  4242     1m 15s / 7        3,200 thre...567890  thread token usage...
 │
 ├─ Backoff queue
 │

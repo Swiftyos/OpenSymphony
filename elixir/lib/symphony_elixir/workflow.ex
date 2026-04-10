@@ -16,6 +16,7 @@ defmodule SymphonyElixir.Workflow do
   @spec set_workflow_file_path(Path.t()) :: :ok
   def set_workflow_file_path(path) when is_binary(path) do
     Application.put_env(:symphony_elixir, :workflow_file_path, path)
+    Application.put_env(:symphony_elixir, :startup_mode, :legacy)
     maybe_reload_store()
     :ok
   end
@@ -23,6 +24,7 @@ defmodule SymphonyElixir.Workflow do
   @spec clear_workflow_file_path() :: :ok
   def clear_workflow_file_path do
     Application.delete_env(:symphony_elixir, :workflow_file_path)
+    Application.put_env(:symphony_elixir, :startup_mode, :legacy)
     maybe_reload_store()
     :ok
   end

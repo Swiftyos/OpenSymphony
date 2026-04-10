@@ -7,44 +7,52 @@ defmodule SymphonyElixir.AgentRunner do
   alias SymphonyElixir.AgentRoute
   alias SymphonyElixir.ClaudeCode.Tooling, as: ClaudeCodeTooling
   alias SymphonyElixir.Codex.AppServer, as: CodexAppServer
-  alias SymphonyElixir.{AppServer, Config, Linear.Issue, OpenCode.Tooling, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.{AppServer, Config, IssueConfig, Linear.Issue, OpenCode.Tooling, PromptBuilder, Tracker, Workspace}
 
   @type worker_host :: String.t() | nil
 
   @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
   def run(issue, agent_update_recipient \\ nil, opts \\ []) do
-    route = Keyword.get(opts, :route) || AgentRoute.resolve(issue)
+    issue_config = Keyword.get(opts, :issue_config) || resolve_issue_config!(issue)
+    route = Keyword.get(opts, :route) || AgentRoute.resolve(issue, issue_config.settings)
     # The orchestrator owns host retries so one worker lifetime never hops machines.
-    worker_host = selected_worker_host(Keyword.get(opts, :worker_host), Config.settings!().worker.ssh_hosts)
+    worker_host = selected_worker_host(Keyword.get(opts, :worker_host), issue_config.settings.worker.ssh_hosts)
 
     Logger.info("Starting agent run for #{issue_context(issue)} backend=#{route.backend} effort=#{route.effort || "default"} worker_host=#{worker_host_for_log(worker_host)}")
 
-    case run_on_worker_host(issue, agent_update_recipient, Keyword.put(opts, :route, route), worker_host) do
+    run_opts =
+      opts
+      |> Keyword.put(:route, route)
+      |> Keyword.put(:issue_config, issue_config)
+
+    case run_on_worker_host(issue, agent_update_recipient, run_opts, worker_host) do
       :ok ->
         :ok
 
       {:error, reason} ->
-        Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
-        raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
+        formatted_reason = format_run_failure(reason)
+        Logger.error("Agent run failed for #{issue_context(issue)}: #{formatted_reason}")
+        raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{formatted_reason}"
     end
   end
 
   defp run_on_worker_host(issue, agent_update_recipient, opts, worker_host) do
     route = Keyword.fetch!(opts, :route)
+    issue_config = Keyword.fetch!(opts, :issue_config)
 
     Logger.info("Starting worker attempt for #{issue_context(issue)} backend=#{route.backend} effort=#{route.effort || "default"} worker_host=#{worker_host_for_log(worker_host)}")
 
-    case Workspace.create_for_issue(issue, worker_host) do
+    case Workspace.create_for_issue(issue, worker_host, settings: issue_config.settings) do
       {:ok, workspace} ->
         send_worker_runtime_info(agent_update_recipient, issue, worker_host, workspace)
 
         try do
-          with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host),
-               :ok <- prepare_workspace_for_backend(workspace, worker_host, route.backend) do
+          with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host, settings: issue_config.settings),
+               :ok <- prepare_workspace_for_backend(workspace, worker_host, route.backend, issue_config) do
             run_backend_turns(workspace, issue, agent_update_recipient, opts, worker_host, route)
           end
         after
-          Workspace.run_after_run_hook(workspace, issue, worker_host)
+          Workspace.run_after_run_hook(workspace, issue, worker_host, settings: issue_config.settings)
         end
 
       {:error, reason} ->
@@ -104,7 +112,8 @@ defmodule SymphonyElixir.AgentRunner do
   defp send_worker_runtime_info(_recipient, _issue, _worker_host, _workspace), do: :ok
 
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host, route) do
-    max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
+    issue_config = Keyword.fetch!(opts, :issue_config)
+    max_turns = Keyword.get(opts, :max_turns, issue_config.settings.agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
 
     with {:ok, session} <-
@@ -159,7 +168,8 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp run_agent_turns(workspace, issue, agent_update_recipient, opts, worker_host, route) do
-    max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
+    issue_config = Keyword.fetch!(opts, :issue_config)
+    max_turns = Keyword.get(opts, :max_turns, issue_config.settings.agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
 
     session_opts = [
@@ -257,11 +267,21 @@ defmodule SymphonyElixir.AgentRunner do
     """
   end
 
-  defp prepare_workspace_for_backend(workspace, worker_host, backend) do
+  defp prepare_workspace_for_backend(workspace, worker_host, backend, issue_config) do
     case backend do
       "opencode" -> Tooling.bootstrap_workspace(workspace)
-      "claude" -> ClaudeCodeTooling.bootstrap_workspace(workspace, worker_host)
+      "claude" -> ClaudeCodeTooling.bootstrap_workspace(workspace, worker_host, timeout_ms: issue_config.settings.hooks.timeout_ms)
       _ -> :ok
+    end
+  end
+
+  defp resolve_issue_config!(issue) do
+    case IssueConfig.resolve(issue) do
+      {:ok, issue_config} ->
+        issue_config
+
+      {:error, reason} ->
+        raise ArgumentError, message: "Invalid issue config for #{issue_context(issue)}: #{inspect(reason)}"
     end
   end
 
@@ -321,4 +341,26 @@ defmodule SymphonyElixir.AgentRunner do
   defp issue_context(%Issue{id: issue_id, identifier: identifier}) do
     "issue_id=#{issue_id} issue_identifier=#{identifier}"
   end
+
+  defp format_run_failure(%{message: message} = reason) when is_binary(message) do
+    case Map.drop(reason, [:message]) do
+      details when map_size(details) == 0 ->
+        message
+
+      details ->
+        "#{message} details=#{inspect(details, limit: 10)}"
+    end
+  end
+
+  defp format_run_failure(%{"message" => message} = reason) when is_binary(message) do
+    case Map.drop(reason, ["message"]) do
+      details when map_size(details) == 0 ->
+        message
+
+      details ->
+        "#{message} details=#{inspect(details, limit: 10)}"
+    end
+  end
+
+  defp format_run_failure(reason), do: inspect(reason, limit: 10)
 end

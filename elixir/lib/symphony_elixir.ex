@@ -22,11 +22,16 @@ defmodule SymphonyElixir.Application do
   @impl true
   def start(_type, _args) do
     :ok = SymphonyElixir.LogFile.configure()
+    config_store =
+      case Application.get_env(:symphony_elixir, :startup_mode, :legacy) do
+        :global -> SymphonyElixir.SymphonyConfigStore
+        _ -> SymphonyElixir.WorkflowStore
+      end
 
     children = [
       {Phoenix.PubSub, name: SymphonyElixir.PubSub},
       {Task.Supervisor, name: SymphonyElixir.TaskSupervisor},
-      SymphonyElixir.WorkflowStore,
+      config_store,
       SymphonyElixir.Orchestrator,
       SymphonyElixir.HttpServer,
       SymphonyElixir.StatusDashboard
