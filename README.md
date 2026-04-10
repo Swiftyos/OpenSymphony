@@ -10,6 +10,20 @@ _In this [demo video](.github/media/symphony-demo.mp4), Symphony monitors a Line
 > [!WARNING]
 > Symphony is a low-key engineering preview for testing in trusted environments.
 
+## Current capabilities
+
+The experimental Elixir implementation currently supports:
+
+- Codex, Claude Code, and OpenCode as unattended agent backends.
+- Multi-project routing from one Symphony instance across multiple repos.
+- Repo-local `WORKFLOW.md` files with a global `symphony.yml` runtime config.
+- Linear label-based backend switching with labels like `codex`, `claude`, and `opencode`.
+- Linear label-based thinking/effort switching with labels like `thinking/high` and
+  `thinking/max`.
+
+If you want to try those features, start with [elixir/README.md](elixir/README.md), which now
+documents backend support, multi-project setup, and label-routing behavior in detail.
+
 ## Running Symphony
 
 ### Requirements
@@ -28,8 +42,9 @@ Tell your favorite coding agent to build Symphony in a programming language of y
 ### Option 2. Use our experimental reference implementation
 
 Check out [elixir/README.md](elixir/README.md) for instructions on how to set up your environment
-and run the Elixir-based Symphony implementation. You can also ask your favorite coding agent to
-help with the setup:
+and run the Elixir-based Symphony implementation. It includes setup guidance for OpenCode, Claude
+Code, multi-project routing, and Linear label-based backend and effort switching. You can also ask
+your favorite coding agent to help with the setup:
 
 > Set up Symphony for my repository based on
 > https://github.com/openai/symphony/blob/main/elixir/README.md
