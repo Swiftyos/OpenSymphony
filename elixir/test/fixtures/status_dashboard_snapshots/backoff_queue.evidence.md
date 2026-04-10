@@ -9,9 +9,9 @@
 │ Next refresh: n/a
 ├─ Running
 │
-│   ID       STAGE          PID      AGE / TURN   TOKENS     SESSION        EVENT                                  
+│   ID       STAGE          BACKEND  EFFORT   PID      AGE / TURN   TOKENS     SESSION        EVENT                
 │   ───────────────────────────────────────────────────────────────────────────────────────────────────────────────
-│ ● MT-638   retrying       4242     20m 25s / 7      14,200 thre...567890  agent message streaming: waiting on ...
+│ ● MT-638   retrying       opencode default  4242     20m 25s / 7      14,200 thre...567890  agent message stre...
 │
 ├─ Backoff queue
 │

@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.CLI do
   @moduledoc """
-  Escript entrypoint for running Symphony with an explicit WORKFLOW.md path.
+  Escript entrypoint for running Symphony with `symphony.yml` or legacy `WORKFLOW.md`.
   """
 
   alias SymphonyElixir.LogFile
@@ -12,6 +12,8 @@ defmodule SymphonyElixir.CLI do
   @type deps :: %{
           file_regular?: (String.t() -> boolean()),
           set_workflow_file_path: (String.t() -> :ok | {:error, term()}),
+          set_symphony_config_file_path: (String.t() -> :ok | {:error, term()}),
+          validate_config: (-> :ok | {:error, term()}),
           set_logs_root: (String.t() -> :ok | {:error, term()}),
           set_server_port_override: (non_neg_integer() | nil -> :ok | {:error, term()}),
           ensure_all_started: (-> ensure_started_result())
@@ -36,14 +38,14 @@ defmodule SymphonyElixir.CLI do
         with :ok <- require_guardrails_acknowledgement(opts),
              :ok <- maybe_set_logs_root(opts, deps),
              :ok <- maybe_set_server_port(opts, deps) do
-          run(Path.expand("WORKFLOW.md"), deps)
+          run(Path.expand("symphony.yml"), deps)
         end
 
-      {opts, [workflow_path], []} ->
+      {opts, [config_path], []} ->
         with :ok <- require_guardrails_acknowledgement(opts),
              :ok <- maybe_set_logs_root(opts, deps),
              :ok <- maybe_set_server_port(opts, deps) do
-          run(workflow_path, deps)
+          run(config_path, deps)
         end
 
       _ ->
@@ -52,27 +54,36 @@ defmodule SymphonyElixir.CLI do
   end
 
   @spec run(String.t(), deps()) :: :ok | {:error, String.t()}
-  def run(workflow_path, deps) do
-    expanded_path = Path.expand(workflow_path)
+  def run(config_path, deps) do
+    expanded_path = Path.expand(config_path)
+    mode = startup_mode_for_path(expanded_path)
 
     if deps.file_regular?.(expanded_path) do
-      :ok = deps.set_workflow_file_path.(expanded_path)
+      case mode do
+        :legacy ->
+          :ok = deps.set_workflow_file_path.(expanded_path)
 
-      case deps.ensure_all_started.() do
-        {:ok, _started_apps} ->
-          :ok
+        :global ->
+          :ok = deps.set_symphony_config_file_path.(expanded_path)
+      end
 
-        {:error, reason} ->
-          {:error, "Failed to start Symphony with workflow #{expanded_path}: #{inspect(reason)}"}
+      with :ok <- validate_config(expanded_path, deps) do
+        case deps.ensure_all_started.() do
+          {:ok, _started_apps} ->
+            :ok
+
+          {:error, reason} ->
+            {:error, "Failed to start Symphony with config #{expanded_path}: #{inspect(reason)}"}
+        end
       end
     else
-      {:error, "Workflow file not found: #{expanded_path}"}
+      {:error, "Config file not found: #{expanded_path}"}
     end
   end
 
   @spec usage_message() :: String.t()
   defp usage_message do
-    "Usage: symphony [--logs-root <path>] [--port <port>] [path-to-WORKFLOW.md]"
+    "Usage: symphony [--logs-root <path>] [--port <port>] [path-to-symphony.yml|path-to-WORKFLOW.md]"
   end
 
   @spec runtime_deps() :: deps()
@@ -80,10 +91,30 @@ defmodule SymphonyElixir.CLI do
     %{
       file_regular?: &File.regular?/1,
       set_workflow_file_path: &SymphonyElixir.Workflow.set_workflow_file_path/1,
+      set_symphony_config_file_path: &SymphonyElixir.SymphonyConfig.set_config_file_path/1,
+      validate_config: &SymphonyElixir.Config.validate!/0,
       set_logs_root: &set_logs_root/1,
       set_server_port_override: &set_server_port_override/1,
       ensure_all_started: fn -> Application.ensure_all_started(:symphony_elixir) end
     }
+  end
+
+  defp validate_config(expanded_path, deps) do
+    case deps.validate_config.() do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        {:error, "Invalid Symphony config #{expanded_path}: #{SymphonyElixir.Config.format_error(reason)}"}
+    end
+  end
+
+  defp startup_mode_for_path(path) when is_binary(path) do
+    if String.downcase(Path.extname(path)) == ".md" do
+      :legacy
+    else
+      :global
+    end
   end
 
   defp maybe_set_logs_root(opts, deps) do

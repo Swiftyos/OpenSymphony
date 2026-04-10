@@ -1005,6 +1005,24 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     snapshot = GenServer.call(pid, :snapshot)
     assert %{polling: %{checking?: true, next_poll_in_ms: nil}} = snapshot
+
+    :sys.replace_state(pid, fn state ->
+      %{state | poll_check_in_progress: true, next_poll_due_at_ms: now_ms + 2_000}
+    end)
+
+    snapshot = GenServer.call(pid, :snapshot)
+
+    assert %{
+             polling: %{
+               checking?: false,
+               poll_interval_ms: 30_000,
+               next_poll_in_ms: mixed_due_in_ms
+             }
+           } = snapshot
+
+    assert is_integer(mixed_due_in_ms)
+    assert mixed_due_in_ms >= 0
+    assert mixed_due_in_ms <= 2_000
   end
 
   test "orchestrator triggers an immediate poll cycle shortly after startup" do
@@ -1448,6 +1466,20 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     checking_rendered = StatusDashboard.format_snapshot_content_for_test(checking_snapshot, 0.0)
     assert checking_rendered =~ "checking now…"
+
+    mixed_snapshot =
+      {:ok,
+       %{
+         running: [],
+         retrying: [],
+         agent_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+         rate_limits: nil,
+         polling: %{checking?: true, next_poll_in_ms: 2_000, poll_interval_ms: 30_000}
+       }}
+
+    mixed_rendered = StatusDashboard.format_snapshot_content_for_test(mixed_snapshot, 0.0)
+    assert mixed_rendered =~ "2s"
+    refute mixed_rendered =~ "checking now…"
   end
 
   test "status dashboard adds a spacer line before backoff queue when no agents are active" do
@@ -1673,6 +1705,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       StatusDashboard.format_running_summary_for_test(%{
         identifier: "MT-233",
         state: "running",
+        backend: "claude",
+        effort: "high",
         session_id: "thread-1234567890",
         agent_server_pid: "4242",
         agent_total_tokens: 12,
@@ -1690,8 +1724,31 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     plain = Regex.replace(~r/\e\[[\\d;]*m/, row, "")
 
     assert plain =~ "turn completed (completed)"
+    assert plain =~ "claude"
+    assert plain =~ "high"
     assert (String.split(plain, "turn completed (completed)") |> length()) - 1 == 1
     refute plain =~ " notification "
+  end
+
+  test "status dashboard renders default effort label when route effort is absent" do
+    row =
+      StatusDashboard.format_running_summary_for_test(%{
+        identifier: "MT-899",
+        state: "running",
+        backend: "codex",
+        effort: nil,
+        session_id: "thread-1234567890",
+        agent_server_pid: "4242",
+        agent_total_tokens: 12,
+        runtime_seconds: 15,
+        last_agent_event: :notification,
+        last_agent_message: "hello"
+      })
+
+    plain = Regex.replace(~r/\e\[[0-9;]*m/, row, "")
+
+    assert plain =~ "codex"
+    assert plain =~ "default"
   end
 
   test "status dashboard strips ANSI and control bytes from last codex message" do

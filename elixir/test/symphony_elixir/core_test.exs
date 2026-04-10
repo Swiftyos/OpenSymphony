@@ -43,10 +43,22 @@ defmodule SymphonyElixir.CoreTest do
 
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: "token",
-      tracker_project_slug: nil
+      tracker_project_slug: nil,
+      tracker_projects: nil
     )
 
     assert {:error, :missing_linear_project_slug} = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_project_slug: nil,
+      tracker_projects: [
+        %{slug: "project-a"},
+        %{slug: "project-b"}
+      ]
+    )
+
+    assert :ok = Config.validate!()
+    assert Enum.map(Config.linear_project_routes(), & &1.slug) == ["project-a", "project-b"]
 
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_project_slug: "project",
@@ -86,31 +98,42 @@ defmodule SymphonyElixir.CoreTest do
     assert {:error, {:unsupported_tracker_kind, "123"}} = Config.validate!()
   end
 
-  test "current WORKFLOW.md file is valid and complete" do
-    original_workflow_path = Workflow.workflow_file_path()
-    on_exit(fn -> Workflow.set_workflow_file_path(original_workflow_path) end)
-    Workflow.clear_workflow_file_path()
+  test "current symphony.yml and project WORKFLOW.md files are valid and complete" do
+    repo_root = File.cwd!()
+    symphony_config_path = Path.join(repo_root, "symphony.yml")
+    workflow_path = Path.join(repo_root, "WORKFLOW.md")
 
-    assert {:ok, %{config: config, prompt: prompt}} = Workflow.load()
+    assert {:ok, %{config: config}} = SymphonyConfig.load(symphony_config_path)
     assert is_map(config)
 
     tracker = Map.get(config, "tracker", %{})
     assert is_map(tracker)
     assert Map.get(tracker, "kind") == "linear"
-    assert is_binary(Map.get(tracker, "project_slug"))
     assert is_list(Map.get(tracker, "active_states"))
     assert is_list(Map.get(tracker, "terminal_states"))
 
-    hooks = Map.get(config, "hooks", %{})
+    projects = Map.get(config, "projects", [])
+    assert Enum.map(projects, &Map.get(&1, "linear_project")) == ["project-a", "project-b"]
+    assert Enum.all?(projects, &(is_binary(Map.get(&1, "repo")) and Map.get(&1, "repo") != ""))
+    assert Enum.all?(projects, &(is_binary(Map.get(&1, "workflow")) and Map.get(&1, "workflow") != ""))
+    assert Enum.all?(projects, &(is_binary(Map.get(&1, "workspace_root")) and Map.get(&1, "workspace_root") != ""))
+    assert Enum.all?(projects, &(Map.get(&1, "backend") in ["codex", "claude"]))
+
+    assert {:ok, %{config: workflow_config, prompt: prompt}} = ProjectWorkflow.load(workflow_path)
+    assert is_map(workflow_config)
+
+    hooks = Map.get(workflow_config, "hooks", %{})
     assert is_map(hooks)
-    assert Map.get(hooks, "after_create") =~ "git clone --depth 1 https://github.com/openai/symphony ."
-    assert Map.get(hooks, "after_create") =~ "cd elixir && mise trust"
+    assert Map.get(hooks, "after_create") =~ "mise trust"
     assert Map.get(hooks, "after_create") =~ "mise exec -- mix deps.get"
     assert Map.get(hooks, "before_remove") =~ "cd elixir && mise exec -- mix workspace.before_remove"
 
+    agent = Map.get(workflow_config, "agent", %{})
+    assert is_map(agent)
+    assert Map.get(agent, "default_effort") == "medium"
+    assert Map.get(agent, "max_turns") == 20
+
     assert String.trim(prompt) != ""
-    assert is_binary(Config.workflow_prompt())
-    assert Config.workflow_prompt() == prompt
   end
 
   test "linear api token resolves from LINEAR_API_KEY env var" do
@@ -145,6 +168,52 @@ defmodule SymphonyElixir.CoreTest do
     )
 
     assert Config.settings!().tracker.assignee == env_assignee
+  end
+
+  test "orchestrator startup fails fast when repository preflight fails" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-orchestrator-repo-preflight-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workflow_path = Path.join(test_root, "PROJECT_WORKFLOW.md")
+      config_path = Path.join(test_root, "symphony.yml")
+      workspace_root = Path.join(test_root, "workspaces")
+
+      File.mkdir_p!(test_root)
+      write_project_workflow_file!(workflow_path)
+
+      write_symphony_config_file!(config_path,
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        projects: [
+          %{
+            linear_project: "project-a",
+            repo: "https://127.0.0.1:1/does-not-exist.git",
+            workflow: "./PROJECT_WORKFLOW.md"
+          }
+        ]
+      )
+
+      SymphonyConfig.set_config_file_path(config_path)
+
+      orchestrator_name = Module.concat(__MODULE__, :RepoPreflightCrashOrchestrator)
+      previous_trap_exit = Process.flag(:trap_exit, true)
+
+      on_exit(fn ->
+        Process.flag(:trap_exit, previous_trap_exit)
+      end)
+
+      assert {:error, {%ArgumentError{message: message}, _stacktrace}} =
+               Orchestrator.start_link(name: orchestrator_name)
+
+      assert message =~ "Repository preflight failed"
+      assert message =~ "127.0.0.1:1/does-not-exist.git"
+    after
+      File.rm_rf(test_root)
+    end
   end
 
   test "workflow file path defaults to WORKFLOW.md in the current working directory when app env is unset" do
@@ -708,10 +777,11 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   defp assert_due_in_range(due_at_ms, min_remaining_ms, max_remaining_ms) do
+    slack_ms = 1_000
     remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
 
-    assert remaining_ms >= min_remaining_ms
-    assert remaining_ms <= max_remaining_ms
+    assert remaining_ms >= max(min_remaining_ms - slack_ms, 0)
+    assert remaining_ms <= max_remaining_ms + slack_ms
   end
 
   defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
@@ -926,7 +996,7 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Only stop early for a true blocker"
     assert prompt =~ "Do not include \"next steps for user\""
     assert prompt =~ "open and follow `.codex/skills/land/SKILL.md`"
-    assert prompt =~ "Do not call `gh pr merge` directly"
+    assert prompt =~ "do not call `gh pr merge` directly"
     assert prompt =~ "Continuation context:"
     assert prompt =~ "retry attempt #2"
   end

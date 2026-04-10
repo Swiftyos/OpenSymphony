@@ -37,10 +37,57 @@ defmodule SymphonyElixir.Config.Schema do
     def dump(_value), do: :error
   end
 
+  defmodule TrackerProject do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    alias SymphonyElixir.Config.Schema
+
+    @primary_key false
+
+    embedded_schema do
+      field(:slug, :string)
+      field(:repo, :string)
+      field(:workflow, :string)
+      field(:backend, :string)
+      field(:default_branch, :string)
+      field(:workspace_root, :string)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:slug, :repo, :workflow, :backend, :default_branch, :workspace_root], empty_values: [])
+      |> update_change(:slug, &Schema.normalize_optional_string/1)
+      |> update_change(:repo, &Schema.normalize_optional_string/1)
+      |> update_change(:workflow, &Schema.normalize_optional_string/1)
+      |> update_change(:backend, &Schema.normalize_optional_string/1)
+      |> update_change(:default_branch, &Schema.normalize_optional_string/1)
+      |> update_change(:workspace_root, &Schema.normalize_optional_string/1)
+      |> validate_change(:backend, fn :backend, value ->
+        cond do
+          is_nil(value) ->
+            []
+
+          value in ["codex", "opencode", "claude"] ->
+            []
+
+          true ->
+            [backend: "must be one of: codex, opencode, claude"]
+        end
+      end)
+      |> validate_required([:slug])
+    end
+  end
+
   defmodule Tracker do
     @moduledoc false
     use Ecto.Schema
     import Ecto.Changeset
+
+    alias SymphonyElixir.Config.Schema
+    alias SymphonyElixir.Config.Schema.TrackerProject
 
     @primary_key false
 
@@ -52,6 +99,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:assignee, :string)
       field(:active_states, {:array, :string}, default: ["Todo", "In Progress"])
       field(:terminal_states, {:array, :string}, default: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"])
+      embeds_many(:projects, TrackerProject, on_replace: :delete)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -62,6 +110,11 @@ defmodule SymphonyElixir.Config.Schema do
         [:kind, :endpoint, :api_key, :project_slug, :assignee, :active_states, :terminal_states],
         empty_values: []
       )
+      |> update_change(:kind, &Schema.normalize_optional_string/1)
+      |> update_change(:project_slug, &Schema.normalize_optional_string/1)
+      |> update_change(:assignee, &Schema.normalize_optional_string/1)
+      |> cast_embed(:projects, with: &TrackerProject.changeset/2)
+      |> Schema.validate_unique_tracker_projects()
     end
   end
 
@@ -410,17 +463,21 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
   end
 
-  @spec parse(map()) :: {:ok, %__MODULE__{}} | {:error, {:invalid_workflow_config, String.t()}}
-  def parse(config) when is_map(config) do
+  @spec parse(map(), keyword()) :: {:ok, %__MODULE__{}} | {:error, {:invalid_workflow_config, String.t()}}
+  def parse(config, opts \\ []) when is_map(config) do
+    mode = Keyword.get(opts, :mode, :legacy)
+
     normalized_config =
       config
       |> normalize_keys()
       |> drop_nil_values()
+      |> normalize_global_projects()
+      |> normalize_tracker_project_aliases()
 
-    with :ok <- validate_unsupported_config(normalized_config),
+    with :ok <- validate_unsupported_config(normalized_config, mode),
          changeset <- changeset(normalized_config),
          {:ok, settings} <- apply_action(changeset, :validate),
-         finalized_settings <- finalize_settings(settings, normalized_config),
+         finalized_settings <- finalize_settings(settings, normalized_config, opts),
          :ok <- validate_open_code_local_only(finalized_settings) do
       {:ok, finalized_settings}
     else
@@ -497,6 +554,21 @@ defmodule SymphonyElixir.Config.Schema do
     end)
   end
 
+  @doc false
+  @spec validate_unique_tracker_projects(Ecto.Changeset.t()) :: Ecto.Changeset.t()
+  def validate_unique_tracker_projects(changeset) do
+    duplicates =
+      changeset
+      |> get_field(:projects, [])
+      |> Enum.map(&normalize_optional_string(&1.slug))
+      |> Enum.reject(&is_nil/1)
+      |> duplicate_values()
+
+    Enum.reduce(duplicates, changeset, fn slug, acc ->
+      add_error(acc, :projects, "contains duplicate project slug #{inspect(slug)}")
+    end)
+  end
+
   defp changeset(attrs) do
     %__MODULE__{}
     |> cast(attrs, [])
@@ -513,16 +585,25 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:server, with: &Server.changeset/2)
   end
 
-  defp finalize_settings(settings, raw_config) do
+  defp finalize_settings(settings, raw_config, opts) do
+    base_dir = Keyword.get(opts, :base_dir, File.cwd!())
+    resolved_workspace_root = resolve_path_value(settings.workspace.root, Path.join(System.tmp_dir!(), "symphony_workspaces"), base_dir)
+
+    tracker_projects =
+      settings.tracker.projects
+      |> Enum.map(&finalize_tracker_project(&1, resolved_workspace_root, base_dir))
+
     tracker = %{
       settings.tracker
       | api_key: resolve_secret_setting(settings.tracker.api_key, System.get_env("LINEAR_API_KEY")),
-        assignee: resolve_secret_setting(settings.tracker.assignee, System.get_env("LINEAR_ASSIGNEE"))
+        project_slug: normalize_optional_string(settings.tracker.project_slug),
+        assignee: resolve_secret_setting(settings.tracker.assignee, System.get_env("LINEAR_ASSIGNEE")),
+        projects: tracker_projects
     }
 
     workspace = %{
       settings.workspace
-      | root: resolve_path_value(settings.workspace.root, Path.join(System.tmp_dir!(), "symphony_workspaces"))
+      | root: resolved_workspace_root
     }
 
     agent = %{
@@ -548,6 +629,18 @@ defmodule SymphonyElixir.Config.Schema do
     }
 
     %{settings | tracker: tracker, workspace: workspace, agent: agent, codex: codex, opencode: opencode, claude: claude}
+  end
+
+  defp finalize_tracker_project(project, default_workspace_root, base_dir) do
+    %{
+      project
+      | slug: normalize_optional_string(project.slug),
+        repo: resolve_repo_value(project.repo, base_dir),
+        workflow: resolve_optional_workflow_path_value(project.workflow, base_dir),
+        backend: normalize_optional_string(project.backend),
+        default_branch: normalize_optional_string(project.default_branch),
+        workspace_root: resolve_optional_path_value(project.workspace_root, default_workspace_root, base_dir)
+    }
   end
 
   defp normalize_keys(value) when is_map(value) do
@@ -599,6 +692,54 @@ defmodule SymphonyElixir.Config.Schema do
   defp drop_nil_values(value) when is_list(value), do: Enum.map(value, &drop_nil_values/1)
   defp drop_nil_values(value), do: value
 
+  defp normalize_global_projects(config) when is_map(config) do
+    case Map.get(config, "projects") do
+      projects when is_list(projects) ->
+        tracker =
+          config
+          |> Map.get("tracker", %{})
+          |> case do
+            tracker when is_map(tracker) -> tracker
+            _tracker -> %{}
+          end
+
+        config
+        |> Map.delete("projects")
+        |> Map.put("tracker", Map.put(tracker, "projects", projects))
+
+      _ ->
+        config
+    end
+  end
+
+  defp normalize_tracker_project_aliases(config) when is_map(config) do
+    case get_in(config, ["tracker", "projects"]) do
+      projects when is_list(projects) ->
+        put_in(
+          config,
+          ["tracker", "projects"],
+          Enum.map(projects, fn
+            %{} = project -> normalize_tracker_project_alias(project)
+            other -> other
+          end)
+        )
+
+      _ ->
+        config
+    end
+  end
+
+  defp normalize_tracker_project_alias(project) when is_map(project) do
+    slug = Map.get(project, "slug") || Map.get(project, "linear_project")
+
+    project
+    |> Map.delete("linear_project")
+    |> maybe_put_slug(slug)
+  end
+
+  defp maybe_put_slug(project, nil), do: project
+  defp maybe_put_slug(project, slug), do: Map.put(project, "slug", slug)
+
   defp resolve_secret_setting(nil, fallback), do: normalize_secret_value(fallback)
 
   defp resolve_secret_setting(value, fallback) when is_binary(value) do
@@ -608,7 +749,7 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
-  defp resolve_path_value(value, default) when is_binary(value) do
+  defp resolve_path_value(value, default, base_dir) when is_binary(value) do
     case normalize_path_token(value) do
       :missing ->
         default
@@ -617,7 +758,48 @@ defmodule SymphonyElixir.Config.Schema do
         default
 
       path ->
-        path
+        maybe_expand_local_path_value(path, base_dir)
+    end
+  end
+
+  defp resolve_optional_path_value(nil, _default, _base_dir), do: nil
+
+  defp resolve_optional_path_value(value, default, base_dir) when is_binary(value) do
+    case resolve_path_value(value, default, base_dir) do
+      nil -> nil
+      resolved when is_binary(resolved) -> normalize_optional_string(resolved)
+      _ -> nil
+    end
+  end
+
+  defp resolve_optional_workflow_path_value(nil, _base_dir), do: nil
+
+  defp resolve_optional_workflow_path_value(value, _base_dir) when is_binary(value) do
+    value
+    |> resolve_env_value(nil)
+    |> case do
+      nil -> nil
+      resolved when is_binary(resolved) -> normalize_optional_string(resolved)
+      _ -> nil
+    end
+  end
+
+  defp resolve_repo_value(nil, _base_dir), do: nil
+
+  defp resolve_repo_value(value, base_dir) when is_binary(value) do
+    value
+    |> resolve_env_value(nil)
+    |> case do
+      nil ->
+        nil
+
+      resolved when is_binary(resolved) ->
+        resolved
+        |> normalize_optional_string()
+        |> maybe_expand_local_repo_path(base_dir)
+
+      _ ->
+        nil
     end
   end
 
@@ -665,6 +847,38 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp normalize_secret_value(_value), do: nil
 
+  defp maybe_expand_local_repo_path(nil, _base_dir), do: nil
+
+  defp maybe_expand_local_repo_path(value, base_dir) when is_binary(value) do
+    if local_repo_path?(value) do
+      expand_local_path(value, base_dir)
+    else
+      value
+    end
+  end
+
+  defp expand_local_path(value, base_dir) when is_binary(value) do
+    Path.expand(value, base_dir || File.cwd!())
+  end
+
+  defp maybe_expand_local_path_value(value, base_dir) when is_binary(value) do
+    if local_path_token?(value) do
+      expand_local_path(value, base_dir)
+    else
+      value
+    end
+  end
+
+  defp local_repo_path?(value) when is_binary(value) do
+    value in [".", "..", "~"] or String.starts_with?(value, ["./", "../", "/", "~/"])
+  end
+
+  defp local_path_token?(value) when is_binary(value) do
+    value == "." or value == ".." or value == "~" or
+      String.starts_with?(value, ["./", "../", "/", "~/"]) or
+      !String.match?(value, ~r/^[A-Za-z][A-Za-z0-9+.-]*:/)
+  end
+
   defp default_turn_sandbox_policy(workspace) do
     %{
       "type" => "workspaceWrite",
@@ -707,6 +921,16 @@ defmodule SymphonyElixir.Config.Schema do
     Path.expand(Path.join(System.tmp_dir!(), "symphony_workspaces"))
   end
 
+  defp duplicate_values(values) when is_list(values) do
+    values
+    |> Enum.frequencies()
+    |> Enum.reduce([], fn
+      {value, count}, acc when count > 1 -> [value | acc]
+      {_value, _count}, acc -> acc
+    end)
+    |> Enum.reverse()
+  end
+
   defp format_errors(changeset) do
     changeset
     |> traverse_errors(&translate_error/1)
@@ -714,17 +938,29 @@ defmodule SymphonyElixir.Config.Schema do
     |> Enum.join(", ")
   end
 
-  defp validate_unsupported_config(config) when is_map(config) do
-    case unsupported_opencode_key(config) do
-      nil ->
-        :ok
+  defp validate_unsupported_config(config, mode) when is_map(config) do
+    with :ok <- validate_global_only_config(config, mode) do
+      case unsupported_opencode_key(config) do
+        nil ->
+          :ok
 
-      unsupported_opencode_key ->
-        {:error, {:invalid_workflow_config, "`opencode.#{unsupported_opencode_key}` is no longer supported. OpenCode v1 uses `command`, `agent`, `model`, and timeout settings only."}}
+        unsupported_opencode_key ->
+          {:error, {:invalid_workflow_config, "`opencode.#{unsupported_opencode_key}` is no longer supported. OpenCode v1 uses `command`, `agent`, `model`, and timeout settings only."}}
+      end
     end
   end
 
-  defp validate_unsupported_config(_config), do: :ok
+  defp validate_unsupported_config(_config, _mode), do: :ok
+
+  defp validate_global_only_config(config, :global) when is_map(config) do
+    if Map.has_key?(config, "hooks") do
+      {:error, {:invalid_workflow_config, "`hooks` must be defined in repo-local WORKFLOW.md files when using symphony.yml"}}
+    else
+      :ok
+    end
+  end
+
+  defp validate_global_only_config(_config, _mode), do: :ok
 
   defp unsupported_opencode_key(config) when is_map(config) do
     config

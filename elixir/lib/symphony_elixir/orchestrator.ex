@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRoute, AgentRunner, Config, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRoute, AgentRunner, Config, IssueConfig, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Linear.Issue
 
   @continuation_retry_delay_ms 1_000
@@ -35,6 +35,7 @@ defmodule SymphonyElixir.Orchestrator do
     defstruct [
       :poll_interval_ms,
       :max_concurrent_agents,
+      :config_fingerprint,
       :next_poll_due_at_ms,
       :poll_check_in_progress,
       :tick_timer_ref,
@@ -59,12 +60,14 @@ defmodule SymphonyElixir.Orchestrator do
   @impl true
   def init(_opts) do
     now_ms = System.monotonic_time(:millisecond)
-    config = Config.settings!()
+    config = Config.validated_settings!()
+    :ok = Workspace.preflight_repo_setup!(config)
 
     state =
       %State{
         poll_interval_ms: config.polling.interval_ms,
         max_concurrent_agents: config.agent.max_concurrent_agents,
+        config_fingerprint: config_fingerprint(config),
         next_poll_due_at_ms: now_ms,
         poll_check_in_progress: false,
         tick_timer_ref: nil,
@@ -255,45 +258,10 @@ defmodule SymphonyElixir.Orchestrator do
   defp maybe_dispatch(%State{} = state) do
     state = reconcile_running_issues(state)
 
-    with :ok <- Config.validate!(),
-         {:ok, issues} <- Tracker.fetch_candidate_issues(),
+    with {:ok, issues} <- Tracker.fetch_candidate_issues(),
          true <- available_slots(state) > 0 do
       choose_issues(issues, state)
     else
-      {:error, :missing_linear_api_token} ->
-        Logger.error("Linear API token missing in WORKFLOW.md")
-        state
-
-      {:error, :missing_linear_project_slug} ->
-        Logger.error("Linear project slug missing in WORKFLOW.md")
-        state
-
-      {:error, :missing_tracker_kind} ->
-        Logger.error("Tracker kind missing in WORKFLOW.md")
-
-        state
-
-      {:error, {:unsupported_tracker_kind, kind}} ->
-        Logger.error("Unsupported tracker kind in WORKFLOW.md: #{inspect(kind)}")
-
-        state
-
-      {:error, {:invalid_workflow_config, message}} ->
-        Logger.error("Invalid WORKFLOW.md config: #{message}")
-        state
-
-      {:error, {:missing_workflow_file, path, reason}} ->
-        Logger.error("Missing WORKFLOW.md at #{path}: #{inspect(reason)}")
-        state
-
-      {:error, :workflow_front_matter_not_a_map} ->
-        Logger.error("Failed to parse WORKFLOW.md: workflow front matter must decode to a map")
-        state
-
-      {:error, {:workflow_parse_error, reason}} ->
-        Logger.error("Failed to parse WORKFLOW.md: #{inspect(reason)}")
-        state
-
       {:error, reason} ->
         Logger.error("Failed to fetch from Linear: #{inspect(reason)}")
         state
@@ -454,7 +422,7 @@ defmodule SymphonyElixir.Orchestrator do
         worker_host = Map.get(running_entry, :worker_host)
 
         if cleanup_workspace do
-          cleanup_issue_workspace(identifier, worker_host)
+          cleanup_issue_workspace(Map.get(running_entry, :issue, identifier), worker_host)
         end
 
         if is_pid(pid) do
@@ -596,15 +564,19 @@ defmodule SymphonyElixir.Orchestrator do
          active_states,
          terminal_states
        ) do
-    route = AgentRoute.resolve(issue)
+    case resolve_issue_dispatch(issue) do
+      {:ok, _issue_config, route} ->
+        candidate_issue?(issue, active_states, terminal_states) and
+          !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
+          !MapSet.member?(claimed, issue.id) and
+          !Map.has_key?(running, issue.id) and
+          available_slots(state) > 0 and
+          state_slots_available?(issue, running) and
+          worker_slots_available?(state, nil, route.backend)
 
-    candidate_issue?(issue, active_states, terminal_states) and
-      !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
-      !MapSet.member?(claimed, issue.id) and
-      !Map.has_key?(running, issue.id) and
-      available_slots(state) > 0 and
-      state_slots_available?(issue, running) and
-      worker_slots_available?(state, nil, route.backend)
+      {:error, _reason} ->
+        false
+    end
   end
 
   defp should_dispatch_issue?(_issue, _state, _active_states, _terminal_states), do: false
@@ -720,31 +692,38 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp do_dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host) do
     recipient = self()
-    route = AgentRoute.resolve(issue)
 
-    Enum.each(route.warnings, fn warning ->
-      Logger.warning("Issue route warning for #{issue_context(issue)}: #{warning}")
-    end)
+    case resolve_issue_dispatch(issue) do
+      {:ok, issue_config, route} ->
+        Enum.each(route.warnings, fn warning ->
+          Logger.warning("Issue route warning for #{issue_context(issue)}: #{warning}")
+        end)
 
-    case select_worker_host(state, preferred_worker_host, route.backend) do
-      :no_worker_capacity ->
-        Logger.debug("No worker slots available for #{issue_context(issue)} backend=#{route.backend} preferred_worker_host=#{inspect(preferred_worker_host)}")
+        case select_worker_host(state, preferred_worker_host, route.backend) do
+          :no_worker_capacity ->
+            Logger.debug("No worker slots available for #{issue_context(issue)} backend=#{route.backend} preferred_worker_host=#{inspect(preferred_worker_host)}")
 
+            state
+
+          worker_host ->
+            spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host, route, issue_config)
+        end
+
+      {:error, reason} ->
+        Logger.error("Skipping dispatch; issue config resolution failed for #{issue_context(issue)}: #{inspect(reason)}")
         state
-
-      worker_host ->
-        spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host, route)
     end
   end
 
-  defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host, route) do
+  defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host, route, issue_config) do
     case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
            AgentRunner.run(
              issue,
              recipient,
              attempt: attempt,
              worker_host: worker_host,
-             route: route
+             route: route,
+             issue_config: issue_config
            )
          end) do
       {:ok, pid} ->
@@ -939,7 +918,7 @@ defmodule SymphonyElixir.Orchestrator do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue state is terminal: issue_id=#{issue_id} issue_identifier=#{issue.identifier} state=#{issue.state}; removing associated workspace")
 
-        cleanup_issue_workspace(issue.identifier, metadata[:worker_host])
+        cleanup_issue_workspace(issue, metadata[:worker_host])
         {:noreply, release_issue_claim(state, issue_id)}
 
       retry_candidate_issue?(issue, terminal_states) ->
@@ -957,21 +936,19 @@ defmodule SymphonyElixir.Orchestrator do
     {:noreply, release_issue_claim(state, issue_id)}
   end
 
-  defp cleanup_issue_workspace(identifier, worker_host \\ nil)
+  defp cleanup_issue_workspace(issue_or_identifier, worker_host \\ nil)
 
-  defp cleanup_issue_workspace(identifier, worker_host) when is_binary(identifier) do
-    Workspace.remove_issue_workspaces(identifier, worker_host)
+  defp cleanup_issue_workspace(issue_or_identifier, worker_host) do
+    Workspace.remove_issue_workspaces(issue_or_identifier, worker_host)
   end
-
-  defp cleanup_issue_workspace(_identifier, _worker_host), do: :ok
 
   defp run_terminal_workspace_cleanup do
     case Tracker.fetch_issues_by_states(Config.settings!().tracker.terminal_states) do
       {:ok, issues} ->
         issues
         |> Enum.each(fn
-          %Issue{identifier: identifier} when is_binary(identifier) ->
-            cleanup_issue_workspace(identifier)
+          %Issue{} = issue ->
+            cleanup_issue_workspace(issue)
 
           _ ->
             :ok
@@ -987,25 +964,30 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_active_retry(state, issue, attempt, metadata) do
-    route = AgentRoute.resolve(issue)
+    case resolve_issue_dispatch(issue) do
+      {:ok, _issue_config, route} ->
+        if retry_candidate_issue?(issue, terminal_state_set()) and
+             dispatch_slots_available?(issue, state) and
+             worker_slots_available?(state, metadata[:worker_host], route.backend) do
+          {:noreply, dispatch_issue(state, issue, attempt, metadata[:worker_host])}
+        else
+          Logger.debug("No available slots for retrying #{issue_context(issue)}; retrying again")
 
-    if retry_candidate_issue?(issue, terminal_state_set()) and
-         dispatch_slots_available?(issue, state) and
-         worker_slots_available?(state, metadata[:worker_host], route.backend) do
-      {:noreply, dispatch_issue(state, issue, attempt, metadata[:worker_host])}
-    else
-      Logger.debug("No available slots for retrying #{issue_context(issue)}; retrying again")
+          {:noreply,
+           schedule_issue_retry(
+             state,
+             issue.id,
+             attempt + 1,
+             Map.merge(metadata, %{
+               identifier: issue.identifier,
+               error: "no available orchestrator slots"
+             })
+           )}
+        end
 
-      {:noreply,
-       schedule_issue_retry(
-         state,
-         issue.id,
-         attempt + 1,
-         Map.merge(metadata, %{
-           identifier: issue.identifier,
-           error: "no available orchestrator slots"
-         })
-       )}
+      {:error, reason} ->
+        Logger.error("Skipping retry dispatch; issue config resolution failed for #{issue_context(issue)}: #{inspect(reason)}")
+        {:noreply, release_issue_claim(state, issue.id)}
     end
   end
 
@@ -1146,6 +1128,12 @@ defmodule SymphonyElixir.Orchestrator do
     "issue_id=#{issue_id} issue_identifier=#{identifier}"
   end
 
+  defp resolve_issue_dispatch(%Issue{} = issue) do
+    with {:ok, issue_config} <- IssueConfig.resolve(issue) do
+      {:ok, issue_config, AgentRoute.resolve(issue, issue_config.settings)}
+    end
+  end
+
   defp available_slots(%State{} = state) do
     max(
       (state.max_concurrent_agents || Config.settings!().agent.max_concurrent_agents) -
@@ -1216,7 +1204,7 @@ defmodule SymphonyElixir.Orchestrator do
        agent_totals: snapshot_agent_totals(state),
        rate_limits: snapshot_rate_limits(state),
        polling: %{
-         checking?: state.poll_check_in_progress == true,
+         checking?: poll_check_in_progress?(state),
          next_poll_in_ms: next_poll_in_ms(state.next_poll_due_at_ms, now_ms),
          poll_interval_ms: state.poll_interval_ms
        }
@@ -1521,6 +1509,10 @@ defmodule SymphonyElixir.Orchestrator do
     max(0, next_poll_due_at_ms - now_ms)
   end
 
+  defp poll_check_in_progress?(%State{} = state) do
+    state.poll_check_in_progress == true and not is_integer(state.next_poll_due_at_ms)
+  end
+
   defp pop_running_entry(state, issue_id) do
     {Map.get(state.running, issue_id), %{state | running: Map.delete(state.running, issue_id)}}
   end
@@ -1555,14 +1547,22 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp refresh_runtime_config(%State{} = state) do
-    config = Config.settings!()
+    config = Config.validated_settings!()
+    config_fingerprint = config_fingerprint(config)
+
+    if state.config_fingerprint != config_fingerprint do
+      :ok = Workspace.preflight_repo_setup!(config)
+    end
 
     %{
       state
       | poll_interval_ms: config.polling.interval_ms,
-        max_concurrent_agents: config.agent.max_concurrent_agents
+        max_concurrent_agents: config.agent.max_concurrent_agents,
+        config_fingerprint: config_fingerprint
     }
   end
+
+  defp config_fingerprint(config), do: :erlang.phash2(config)
 
   defp retry_candidate_issue?(%Issue{} = issue, terminal_states) do
     candidate_issue?(issue, active_state_set(), terminal_states) and

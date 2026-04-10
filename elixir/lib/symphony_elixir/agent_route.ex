@@ -13,12 +13,22 @@ defmodule SymphonyElixir.AgentRoute do
     "opencode" => "opencode"
   }
 
-  @effort_labels %{
+  @thinking_labels %{
+    "thinking/low" => "low",
+    "thinking/medium" => "medium",
+    "thinking/high" => "high",
+    "thinking/max" => "max"
+  }
+
+  # Preserve existing tickets that still carry the old Linear label prefix.
+  @legacy_effort_labels %{
     "effort/low" => "low",
     "effort/medium" => "medium",
     "effort/high" => "high",
     "effort/max" => "max"
   }
+
+  @effort_labels Map.merge(@thinking_labels, @legacy_effort_labels)
 
   @effort_values ["low", "medium", "high", "max"]
 
@@ -79,13 +89,13 @@ defmodule SymphonyElixir.AgentRoute do
         conflicts when is_binary(default_effort) ->
           {default_effort,
            [
-             "multiple effort labels (#{Enum.join(conflicts, ", ")}) found; falling back to default effort #{default_effort}"
+             "multiple thinking labels (#{Enum.join(conflicts, ", ")}) found; falling back to default effort #{default_effort}"
            ]}
 
         conflicts ->
           {nil,
            [
-             "multiple effort labels (#{Enum.join(conflicts, ", ")}) found; ignoring effort override"
+             "multiple thinking labels (#{Enum.join(conflicts, ", ")}) found; ignoring effort override"
            ]}
       end
 
@@ -100,7 +110,7 @@ defmodule SymphonyElixir.AgentRoute do
   def backend_labels, do: Map.keys(@backend_labels)
 
   @spec effort_labels() :: [String.t()]
-  def effort_labels, do: Map.keys(@effort_labels)
+  def effort_labels, do: Map.keys(@thinking_labels)
 
   @spec effort_values() :: [String.t()]
   def effort_values, do: @effort_values

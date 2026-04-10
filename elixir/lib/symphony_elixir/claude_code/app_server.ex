@@ -6,7 +6,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
   require Logger
 
   alias SymphonyElixir.ClaudeCode.Tooling
-  alias SymphonyElixir.{Config, PathSafety, SSH}
+  alias SymphonyElixir.{Config, SSH}
 
   @poll_interval_ms 250
   @port_line_bytes 1_048_576
@@ -122,29 +122,20 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
   end
 
   defp validate_workspace_cwd(workspace, nil) when is_binary(workspace) do
-    expanded_workspace = Path.expand(workspace)
-    expanded_root = Path.expand(Config.settings!().workspace.root)
-    expanded_root_prefix = expanded_root <> "/"
+    case Config.validate_workspace_path(workspace) do
+      {:ok, canonical_workspace} ->
+        {:ok, canonical_workspace}
 
-    with {:ok, canonical_workspace} <- PathSafety.canonicalize(expanded_workspace),
-         {:ok, canonical_root} <- PathSafety.canonicalize(expanded_root) do
-      canonical_root_prefix = canonical_root <> "/"
+      {:error, {:workspace_root, canonical_workspace, _canonical_root}} ->
+        {:error, {:invalid_workspace_cwd, :workspace_root, canonical_workspace}}
 
-      cond do
-        canonical_workspace == canonical_root ->
-          {:error, {:invalid_workspace_cwd, :workspace_root, canonical_workspace}}
+      {:error, {:symlink_escape, expanded_workspace, canonical_root}} ->
+        {:error, {:invalid_workspace_cwd, :symlink_escape, expanded_workspace, canonical_root}}
 
-        String.starts_with?(canonical_workspace <> "/", canonical_root_prefix) ->
-          {:ok, canonical_workspace}
+      {:error, {:outside_workspace_root, canonical_workspace, canonical_root}} ->
+        {:error, {:invalid_workspace_cwd, :outside_workspace_root, canonical_workspace, canonical_root}}
 
-        String.starts_with?(expanded_workspace <> "/", expanded_root_prefix) ->
-          {:error, {:invalid_workspace_cwd, :symlink_escape, expanded_workspace, canonical_root}}
-
-        true ->
-          {:error, {:invalid_workspace_cwd, :outside_workspace_root, canonical_workspace, canonical_root}}
-      end
-    else
-      {:error, {:path_canonicalize_failed, path, reason}} ->
+      {:error, {:path_unreadable, path, reason}} ->
         {:error, {:invalid_workspace_cwd, :path_unreadable, path, reason}}
     end
   end

@@ -3,15 +3,14 @@ defmodule SymphonyElixir.PromptBuilder do
   Builds agent prompts from Linear issue data.
   """
 
-  alias SymphonyElixir.{Config, Workflow}
+  alias SymphonyElixir.{Config, IssueConfig, Workflow}
 
   @render_opts [strict_variables: true, strict_filters: true]
 
   @spec build_prompt(SymphonyElixir.Linear.Issue.t(), keyword()) :: String.t()
   def build_prompt(issue, opts \\ []) do
     template =
-      Workflow.current()
-      |> prompt_template!()
+      resolve_prompt_template(issue, opts)
       |> parse_template!()
 
     template
@@ -23,6 +22,24 @@ defmodule SymphonyElixir.PromptBuilder do
       @render_opts
     )
     |> IO.iodata_to_binary()
+  end
+
+  defp resolve_prompt_template(issue, opts) do
+    case Keyword.get(opts, :issue_config) do
+      %IssueConfig{prompt_template: prompt_template} ->
+        default_prompt(prompt_template)
+
+      _ ->
+        if Config.global_mode?() do
+          case IssueConfig.resolve(issue) do
+            {:ok, %IssueConfig{prompt_template: prompt_template}} -> default_prompt(prompt_template)
+            {:error, reason} -> raise RuntimeError, "workflow_unavailable: #{inspect(reason)}"
+          end
+        else
+          Workflow.current()
+          |> prompt_template!()
+        end
+    end
   end
 
   defp prompt_template!({:ok, %{prompt_template: prompt}}), do: default_prompt(prompt)
@@ -56,7 +73,7 @@ defmodule SymphonyElixir.PromptBuilder do
 
   defp default_prompt(prompt) when is_binary(prompt) do
     if String.trim(prompt) == "" do
-      Config.workflow_prompt()
+      Config.default_prompt_template()
     else
       prompt
     end

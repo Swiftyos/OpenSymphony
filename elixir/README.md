@@ -28,21 +28,38 @@ gets a generated custom tool, and Claude Code gets a generated workspace-local M
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
 Symphony stops the active agent for that issue and cleans up matching workspaces.
 
+## Features
+
+- Multi-backend orchestration with Codex, OpenCode, and Claude Code.
+- Multi-project routing from one Symphony instance to multiple repos and repo-local `WORKFLOW.md`
+  files.
+- Per-project backend defaults in `symphony.yml`.
+- Per-ticket backend switching through Linear labels like `codex`, `claude`, and `opencode`.
+- Per-ticket thinking/effort switching through Linear labels like `thinking/high` and
+  `thinking/max`.
+- Repo-local workflow prompts and hooks, with global runtime settings kept in `symphony.yml`.
+- Workspace-local Linear tooling so agents can comment on issues and run GraphQL operations without
+  committing secrets into the repo.
+
 ## How to use it
 
 1. Make sure your codebase is set up to work well with agents: see
    [Harness engineering](https://openai.com/index/harness-engineering/).
 2. Get a new personal token in Linear via Settings → Security & access → Personal API keys, and
    set it as the `LINEAR_API_KEY` environment variable.
-3. Copy this directory's `WORKFLOW.md` to your repo.
+3. Copy this directory's `symphony.yml` somewhere outside your repo or into an ops/config repo.
+4. Copy this directory's `WORKFLOW.md` into each repo Symphony should operate on.
 4. Optionally copy the `commit`, `push`, `pull`, `land`, and `linear` skills to your repo.
    - The `linear` skill expects Symphony's `linear_graphql` app-server tool for raw Linear GraphQL
      operations such as comment editing or upload flows.
-5. Customize the copied `WORKFLOW.md` file for your project.
-   - To get your project's slug, right-click the project and copy its URL. The slug is part of the
-     URL.
+5. Customize `symphony.yml` with your Linear, backend, and project-routing config.
+6. Customize each copied repo-local `WORKFLOW.md` with that repo's hooks, prompt, and local agent
+   overrides.
+   - To get a Linear project's slug, right-click the project and copy its URL. The slug is part of
+     the URL.
    - Configure the exact Linear workflow states listed in the `Linear setup` section below.
-6. Follow the instructions below to install the required runtime dependencies and start the service.
+7. Follow the instructions below to install the required runtime dependencies and start the service.
+8. For a concrete two-project walkthrough, see [`SETUP.md`](./SETUP.md).
 
 ## Prerequisites
 
@@ -62,39 +79,37 @@ mise trust
 mise install
 mise exec -- mix setup
 mise exec -- mix build
-mise exec -- ./bin/symphony ./WORKFLOW.md
+mise exec -- ./bin/symphony ./symphony.yml
 ```
 
 ## Configuration
 
-Pass a custom workflow file path to `./bin/symphony` when starting the service:
+Pass a custom config path to `./bin/symphony` when starting the service:
 
 ```bash
-./bin/symphony /path/to/custom/WORKFLOW.md
+./bin/symphony /path/to/custom/symphony.yml
 ```
 
-If no path is passed, Symphony defaults to `./WORKFLOW.md`.
+If no path is passed, Symphony defaults to `./symphony.yml`.
+
+Passing a `WORKFLOW.md` path explicitly still works as a legacy single-project mode.
 
 Optional flags:
 
 - `--logs-root` tells Symphony to write logs under a different directory (default: `./log`)
 - `--port` also starts the Phoenix observability service (default: disabled)
 
-The `WORKFLOW.md` file uses YAML front matter for configuration, plus a Markdown body used as the
-agent session prompt.
+`symphony.yml` is the global runtime config. Repo-local `WORKFLOW.md` files contain YAML front
+matter for project-local workflow settings plus a Markdown body used as the agent session prompt.
 
 Minimal example:
 
-```md
----
+```yaml
 tracker:
   kind: linear
-  project_slug: "..."
+  api_key: $LINEAR_API_KEY
 workspace:
   root: ~/code/workspaces
-hooks:
-  after_create: |
-    git clone git@github.com:your-org/your-repo.git .
 agent:
   backend: codex
   default_effort: medium
@@ -108,6 +123,21 @@ claude:
 opencode:
   command: opencode serve --hostname 127.0.0.1 --port 0
   agent: build
+projects:
+  - linear_project: "project-a"
+    repo: git@github.com:your-org/project-a.git
+    workflow: /absolute/path/to/project-a/WORKFLOW.md
+```
+
+```md
+---
+hooks:
+  after_create: |
+    mise trust
+    mise exec -- mix deps.get
+agent:
+  default_effort: medium
+  max_turns: 20
 ---
 
 You are working on a Linear issue {{ issue.identifier }}.
@@ -115,9 +145,66 @@ You are working on a Linear issue {{ issue.identifier }}.
 Title: {{ issue.title }} Body: {{ issue.description }}
 ```
 
+Multi-project routing example:
+
+```yaml
+tracker:
+  kind: linear
+  api_key: $LINEAR_API_KEY
+workspace:
+  root: ~/code/workspaces
+agent:
+  backend: codex
+codex:
+  command: codex app-server
+claude:
+  command: claude
+  permission_mode: bypassPermissions
+opencode:
+  command: opencode serve --hostname 127.0.0.1 --port 0
+  agent: build
+projects:
+  - linear_project: "project-a"
+    repo: ./dev/project-a
+    workflow: ./dev/project-a/WORKFLOW.md
+    workspace_root: ./dev/project-a-workspaces
+    backend: codex
+  - linear_project: "project-b"
+    repo: ./dev/project-b
+    workflow: ./dev/project-b/WORKFLOW.md
+    backend: claude
+```
+
+Provider switching example:
+
+```text
+Default config:
+- agent.backend: codex
+- projects["project-b"].backend: claude
+
+Per-ticket behavior:
+- no backend label on a project-b issue -> Claude Code
+- label the same issue with `codex` -> Codex
+- label the same issue with `opencode` -> OpenCode
+```
+
 Notes:
 
 - If a value is missing, defaults are used.
+- `projects` lets Symphony poll multiple Linear projects and route each issue by its
+  `project.slugId`.
+- `projects[].repo` is optional. When set, Symphony clones that repo into a brand-new workspace
+  before running `hooks.after_create`.
+- `projects[].workflow` is required in `symphony.yml` and must point at the repo-local
+  `WORKFLOW.md` Symphony should use for that Linear project.
+- `projects[].workspace_root` is optional. When omitted, Symphony uses
+  `workspace.root/<project-slug>/<issue-identifier>` for multi-project workflows so different
+  projects do not collide under the shared root.
+- `projects[].backend` is optional. When omitted, Symphony falls back to `agent.backend`.
+- In multi-project mode, repo-local `WORKFLOW.md` files may define `hooks.*`,
+  `agent.default_effort`, `agent.max_turns`, and the prompt body only.
+- `tracker.project_slug` remains the legacy single-project shorthand when you explicitly start
+  Symphony with a `WORKFLOW.md` path.
 - `agent.backend` accepts `codex`, `opencode`, or `claude`. If omitted, Symphony infers the
   backend from a single configured provider block; ambiguous or empty provider config falls back to
   `codex`.
@@ -144,8 +231,9 @@ Notes:
   interactive questions are rejected.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
   identifier, title, and body.
-- Use `hooks.after_create` to bootstrap a fresh workspace. For a Git-backed repo, you can run
-  `git clone ... .` there, along with any other setup commands you need.
+- Use repo-local `hooks.after_create` to bootstrap a fresh workspace after Symphony clones the
+  configured repo. You can also omit `projects[].repo` and do the clone inside `hooks.after_create`
+  yourself if that fits your setup better.
 - If a hook needs `mise exec` inside a freshly cloned workspace, trust the repo config and fetch
   the project dependencies in `hooks.after_create` before invoking `mise` later from other hooks.
 - `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`.
@@ -159,20 +247,42 @@ tracker:
   api_key: $LINEAR_API_KEY
 workspace:
   root: $SYMPHONY_WORKSPACE_ROOT
-hooks:
-  after_create: |
-    git clone --depth 1 "$SOURCE_REPO_URL" .
 opencode:
   command: "$OPENCODE_BIN serve --hostname 127.0.0.1 --port 0"
   agent: build
   model: openai/gpt-5.3
+projects:
+  - linear_project: project-a
+    workflow: $PROJECT_A_WORKFLOW
 ```
 
-- If `WORKFLOW.md` is missing or has invalid YAML at startup, Symphony does not boot.
-- If a later reload fails, Symphony keeps running with the last known good workflow and logs the
+- If `symphony.yml` is missing or has invalid YAML at startup, Symphony does not boot.
+- In multi-project mode, if a route's `WORKFLOW.md` is missing or invalid, Symphony does not boot.
+- If a later reload fails, Symphony keeps running with the last known good config and logs the
   reload error until the file is fixed.
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
   `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
+
+## Backend support
+
+### Codex
+
+- Supports unattended work through the Codex app server.
+- Uses the public `low`, `medium`, `high`, and `max` effort settings; `max` maps to Codex's
+  launcher-specific `xhigh` setting internally.
+
+### Claude Code
+
+- Supports local runs and SSH worker hosts.
+- Boots a workspace-local MCP server so repo skills can talk to Linear safely during agent runs.
+- Uses `claude.command`, optional `claude.model`, and `claude.permission_mode`.
+
+### OpenCode
+
+- Supports unattended work through `opencode serve`.
+- Runs local-only in Symphony today, even if other backends use SSH workers.
+- Gets a generated workspace-local Linear tool for issue comments and GraphQL operations.
+- Uses `opencode.command`, `opencode.agent`, and optional `opencode.model`.
 
 ## Linear setup
 
@@ -186,7 +296,7 @@ Configure these exact Linear workflow states for the team:
 - `Rework`
 - `Done`
 
-For the sample `WORKFLOW.md`, `tracker.active_states` should contain:
+For the sample `symphony.yml`, `tracker.active_states` should contain:
 
 - `Todo`
 - `In Progress`
@@ -212,22 +322,36 @@ Built-in backend routing labels:
 - `claude`
 - `opencode`
 
-Built-in effort routing labels:
+Built-in thinking routing labels:
 
-- `effort/low`
-- `effort/medium`
-- `effort/high`
-- `effort/max`
+- `thinking/low`
+- `thinking/medium`
+- `thinking/high`
+- `thinking/max`
 
 Routing behavior:
 
 - If exactly one backend label is present, Symphony uses that backend for the ticket.
 - If no backend label is present, Symphony falls back to `agent.backend`.
 - If multiple backend labels are present, Symphony logs a warning and falls back to `agent.backend`.
-- If exactly one effort label is present, Symphony uses that effort for the ticket.
-- If no effort label is present, Symphony falls back to `agent.default_effort`.
-- If multiple effort labels are present, Symphony logs a warning and falls back to
+- If exactly one thinking label is present, Symphony uses that effort for the ticket.
+- If no thinking label is present, Symphony falls back to `agent.default_effort`.
+- If multiple thinking labels are present, Symphony logs a warning and falls back to
   `agent.default_effort` when set.
+- Legacy `effort/*` labels are still accepted for compatibility.
+
+Selection precedence:
+
+- Backend precedence is `agent.backend`, then `projects[].backend`, then a backend label on the
+  Linear issue.
+- Effort precedence is global `agent.default_effort`, then repo-local `WORKFLOW.md`
+  `agent.default_effort`, then a Linear thinking label.
+
+Example:
+
+- A `project-b` issue can default to Claude Code because `projects[].backend` is `claude`.
+- Adding a `codex` label switches just that one ticket to Codex.
+- Adding `thinking/max` keeps the same ticket on its chosen backend but increases reasoning effort.
 
 ## Web dashboard
 
@@ -242,7 +366,8 @@ The observability UI now runs on a minimal Phoenix stack:
 
 - `lib/`: application code and Mix tasks
 - `test/`: ExUnit coverage for runtime behavior
-- `WORKFLOW.md`: in-repo workflow contract used by local runs
+- `symphony.yml`: global runtime config and Linear project routing
+- `WORKFLOW.md`: repo-local workflow contract for a single routed project
 - `../.codex/`: repository-local skills and setup helpers used by the workflow
 
 ## Testing
@@ -266,9 +391,10 @@ Optional environment variables:
 
 `make e2e` currently targets the local-only OpenCode flow.
 
-The live test creates a temporary Linear project and issue, writes a temporary `WORKFLOW.md`, runs
-a real agent turn, verifies the workspace side effect, requires OpenCode to comment on and close the
-Linear issue, then marks the project completed so the run remains visible in Linear.
+The live test creates a temporary Linear project and issue, writes a temporary `symphony.yml` plus
+repo-local `WORKFLOW.md`, runs a real agent turn, verifies the workspace side effect, requires
+OpenCode to comment on and close the Linear issue, then marks the project completed so the run
+remains visible in Linear.
 
 ## FAQ
 

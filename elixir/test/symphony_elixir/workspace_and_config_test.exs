@@ -40,6 +40,119 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "workspace routes issues into project-specific repos and roots" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-project-routing-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      product_repo = Path.join(test_root, "product-source")
+      agent_repo = Path.join(test_root, "agent-source")
+      default_workspace_root = Path.join(test_root, "workspaces")
+      product_workspace_root = Path.join(test_root, "product-workspaces")
+
+      init_repo!(product_repo, "project a\n")
+      init_repo!(agent_repo, "project b\n")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_project_slug: nil,
+        tracker_projects: [
+          %{
+            slug: "project-a",
+            repo: product_repo,
+            workspace_root: product_workspace_root
+          },
+          %{
+            slug: "project-b",
+            repo: agent_repo
+          }
+        ],
+        workspace_root: default_workspace_root
+      )
+
+      product_issue = %Issue{identifier: "PI-1", project_slug: "project-a"}
+      agent_issue = %Issue{identifier: "AP-1", project_slug: "project-b"}
+
+      assert {:ok, product_workspace} = Workspace.create_for_issue(product_issue)
+      assert {:ok, agent_workspace} = Workspace.create_for_issue(agent_issue)
+
+      assert {:ok, expected_product_workspace} =
+               SymphonyElixir.PathSafety.canonicalize(Path.join(product_workspace_root, "PI-1"))
+
+      assert {:ok, expected_agent_workspace} =
+               SymphonyElixir.PathSafety.canonicalize(Path.join([default_workspace_root, "project-b", "AP-1"]))
+
+      assert product_workspace == expected_product_workspace
+      assert agent_workspace == expected_agent_workspace
+
+      assert File.read!(Path.join(product_workspace, "README.md")) == "project a\n"
+      assert File.read!(Path.join(agent_workspace, "README.md")) == "project b\n"
+
+      assert Config.workspace_root_for_issue(product_issue) == product_workspace_root
+      assert Config.workspace_root_for_issue(agent_issue) == Path.join(default_workspace_root, "project-b")
+      assert Config.project_repo_for_issue(product_issue) == product_repo
+      assert Config.project_repo_for_issue(agent_issue) == agent_repo
+
+      assert {:ok, ^expected_product_workspace} = Config.validate_workspace_path(product_workspace)
+      assert {:ok, ^expected_agent_workspace} = Config.validate_workspace_path(agent_workspace)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "workspace bootstraps issue worktrees from a cached repo checkout" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-cache-bootstrap-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      source_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+
+      init_repo!(source_repo, "cached bootstrap\n")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_project_slug: nil,
+        tracker_projects: [
+          %{
+            slug: "project-a",
+            repo: source_repo
+          }
+        ],
+        workspace_root: workspace_root
+      )
+
+      issue = %Issue{identifier: "PI-1", project_slug: "project-a"}
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert File.read!(Path.join(workspace, "README.md")) == "cached bootstrap\n"
+      assert File.regular?(Path.join(workspace, ".git"))
+
+      {branch_name, 0} = System.cmd("git", ["-C", workspace, "branch", "--show-current"])
+      assert String.trim(branch_name) == "symphony/PI-1"
+
+      repo_source = Config.project_repo_source_for_issue(issue)
+      cache_repo = Path.join(Config.workspace_root_for_issue(issue), ".symphony-cache/#{repo_source.cache_key}")
+
+      assert File.dir?(cache_repo)
+
+      {worktree_list, 0} = System.cmd("git", ["-C", cache_repo, "worktree", "list", "--porcelain"])
+      assert worktree_list =~ workspace
+
+      assert :ok = Workspace.remove_issue_workspaces(issue)
+      refute File.exists?(workspace)
+
+      {worktree_list_after_remove, 0} = System.cmd("git", ["-C", cache_repo, "worktree", "list", "--porcelain"])
+      refute worktree_list_after_remove =~ workspace
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "workspace path is deterministic per issue identifier" do
     workspace_root =
       Path.join(
@@ -315,6 +428,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       "description" => "Needs dependency",
       "priority" => 2,
       "state" => %{"name" => "Todo"},
+      "project" => %{
+        "id" => "project-1",
+        "slugId" => "project-a",
+        "name" => "Project A"
+      },
       "branchName" => "mt-1",
       "url" => "https://example.org/issues/MT-1",
       "assignee" => %{
@@ -351,8 +469,47 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert issue.labels == ["backend"]
     assert issue.priority == 2
     assert issue.state == "Todo"
+    assert issue.project_id == "project-1"
+    assert issue.project_slug == "project-a"
+    assert issue.project_name == "Project A"
     assert issue.assignee_id == "user-1"
     assert issue.assigned_to_worker
+  end
+
+  test "linear client preserves grouped label namespace for routing labels" do
+    raw_issue = %{
+      "id" => "issue-2",
+      "identifier" => "MT-2",
+      "title" => "Grouped labels",
+      "description" => "Needs grouped labels",
+      "priority" => 2,
+      "state" => %{"name" => "Todo"},
+      "project" => %{
+        "id" => "project-1",
+        "slugId" => "project-a",
+        "name" => "Project A"
+      },
+      "branchName" => "mt-2",
+      "url" => "https://example.org/issues/MT-2",
+      "assignee" => %{
+        "id" => "user-1"
+      },
+      "labels" => %{
+        "nodes" => [
+          %{"name" => "Claude"},
+          %{"name" => "Low", "parent" => %{"name" => "Thinking"}}
+        ]
+      },
+      "inverseRelations" => %{"nodes" => []},
+      "createdAt" => "2026-01-01T00:00:00Z",
+      "updatedAt" => "2026-01-02T00:00:00Z"
+    }
+
+    issue = Client.normalize_issue_for_test(raw_issue, "user-1")
+
+    assert issue.labels == ["claude", "thinking/low"]
+    assert SymphonyElixir.AgentRoute.resolve(issue).backend == "claude"
+    assert SymphonyElixir.AgentRoute.resolve(issue).effort == "low"
   end
 
   test "linear client marks explicitly unassigned issues as not routed to worker" do
@@ -1230,5 +1387,384 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
     assert Config.workflow_prompt() == workflow_prompt
+  end
+
+  test "symphony config parses top-level projects and resolves relative paths" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-global-config-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      repo_root = Path.join(test_root, "repos/product")
+      _workflow_path = Path.join(repo_root, "PRODUCT_WORKFLOW.md")
+      config_path = Path.join(test_root, "symphony.yml")
+      workspace_root = Path.join(test_root, "workspaces")
+      project_workspace_root = Path.join(test_root, "project-workspaces")
+
+      init_repo!(repo_root, "product repo\n")
+      write_project_workflow_repo_file!(repo_root, "PRODUCT_WORKFLOW.md")
+
+      write_symphony_config_file!(config_path,
+        workspace_root: workspace_root,
+        projects: [
+          %{
+            linear_project: "project-a",
+            repo: "./repos/product",
+            workflow: "./PRODUCT_WORKFLOW.md",
+            workspace_root: "./project-workspaces",
+            backend: "claude"
+          }
+        ]
+      )
+
+      SymphonyConfig.set_config_file_path(config_path)
+
+      settings = Config.settings!()
+      assert [%{slug: "project-a"} = route] = Config.linear_project_routes(settings)
+      assert route.repo == repo_root
+      assert route.workflow == "./PRODUCT_WORKFLOW.md"
+      assert route.workspace_root == project_workspace_root
+      assert route.backend == "claude"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "config resolves GitHub repo slugs into cloneable repo sources" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-global-config-github-slug-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      config_path = Path.join(test_root, "symphony.yml")
+
+      File.mkdir_p!(test_root)
+
+      write_symphony_config_file!(config_path,
+        tracker_kind: "memory",
+        projects: [
+          %{
+            linear_project: "project-a",
+            repo: "openai/symphony",
+            workflow: "WORKFLOW.md"
+          }
+        ]
+      )
+
+      SymphonyConfig.set_config_file_path(config_path)
+
+      issue = %Issue{identifier: "PI-22", project_slug: "project-a"}
+
+      assert :ok = Config.validate!()
+
+      assert %{
+               kind: :github_slug,
+               clone_url: "https://github.com/openai/symphony.git",
+               display: "openai/symphony"
+             } = Config.project_repo_source_for_issue(issue)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "config validate rejects duplicate symphony project slugs" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-global-config-dupes-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workflow_path = Path.join(test_root, "PROJECT_WORKFLOW.md")
+      config_path = Path.join(test_root, "symphony.yml")
+
+      File.mkdir_p!(test_root)
+      write_project_workflow_file!(workflow_path)
+
+      write_symphony_config_file!(config_path,
+        projects: [
+          %{linear_project: "duplicate", workflow: "./PROJECT_WORKFLOW.md"},
+          %{linear_project: "duplicate", workflow: "./PROJECT_WORKFLOW.md"}
+        ]
+      )
+
+      SymphonyConfig.set_config_file_path(config_path)
+
+      assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+      assert message =~ "duplicate project slug"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "config route lookup matches bare Linear slugId against url-style project slug" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-global-config-route-normalization-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      repo_root = Path.join(test_root, "repo")
+      _workflow_path = Path.join(repo_root, "PROJECT_WORKFLOW.md")
+      config_path = Path.join(test_root, "symphony.yml")
+
+      init_repo!(repo_root, "route normalization\n")
+      write_project_workflow_repo_file!(repo_root, "PROJECT_WORKFLOW.md")
+
+      write_symphony_config_file!(config_path,
+        projects: [
+          %{
+            linear_project: "project-a-1a2b3c4d5e6f",
+            repo: repo_root,
+            workflow: "./PROJECT_WORKFLOW.md"
+          }
+        ]
+      )
+
+      SymphonyConfig.set_config_file_path(config_path)
+
+      settings = Config.settings!()
+      issue = %Issue{identifier: "PI-22", project_slug: "1a2b3c4d5e6f"}
+
+      assert %{slug: "project-a-1a2b3c4d5e6f"} = Config.linear_project_route(issue, settings)
+      assert {:ok, issue_config} = SymphonyElixir.IssueConfig.resolve(issue)
+      assert issue_config.project_route.slug == "project-a-1a2b3c4d5e6f"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "project workflow accepts legacy runtime keys and partial provider overrides" do
+    workflow_path =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-project-workflow-legacy-#{System.unique_integer([:positive])}.md"
+      )
+
+    try do
+      File.write!(
+        workflow_path,
+        """
+        ---
+        tracker:
+          kind: linear
+        workspace:
+          root: /tmp/ignored
+        codex:
+          command: codex app-server --model gpt-5.4
+        agent:
+          max_concurrent_agents: 5
+          max_turns: 7
+        ---
+        Legacy-compatible project workflow
+        """
+      )
+
+      assert {:ok, workflow} = ProjectWorkflow.load(workflow_path)
+
+      assert workflow.codex.command == "codex app-server --model gpt-5.4"
+      assert workflow.agent.max_concurrent_agents == 5
+      assert workflow.agent.max_turns == 7
+    after
+      File.rm_rf(workflow_path)
+    end
+  end
+
+  test "project workflow rejects unknown runtime keys in multi-project mode" do
+    workflow_path =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-project-workflow-invalid-#{System.unique_integer([:positive])}.md"
+      )
+
+    try do
+      File.write!(
+        workflow_path,
+        """
+        ---
+        bananas:
+          kind: linear
+        ---
+        Invalid project workflow
+        """
+      )
+
+      assert {:error, {:invalid_project_workflow_config, message}} =
+               ProjectWorkflow.load(workflow_path)
+
+      assert message =~ "unsupported key"
+      assert message =~ "bananas"
+    after
+      File.rm_rf(workflow_path)
+    end
+  end
+
+  test "issue config resolves project workflow prompt and backend precedence" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-issue-config-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      repo_root = Path.join(test_root, "project-b")
+      _workflow_path = Path.join(repo_root, "CLAUDE_WORKFLOW.md")
+      config_path = Path.join(test_root, "symphony.yml")
+
+      init_repo!(repo_root, "project b\n")
+
+      write_project_workflow_repo_file!(repo_root, "CLAUDE_WORKFLOW.md",
+        default_effort: "high",
+        max_turns: 7,
+        prompt: "Project-specific prompt for {{ issue.identifier }}"
+      )
+
+      write_symphony_config_file!(config_path,
+        default_effort: "low",
+        max_turns: 20,
+        projects: [
+          %{
+            linear_project: "project-b",
+            repo: repo_root,
+            workflow: "./CLAUDE_WORKFLOW.md",
+            backend: "claude"
+          }
+        ]
+      )
+
+      SymphonyConfig.set_config_file_path(config_path)
+
+      issue =
+        %Issue{
+          identifier: "AP-42",
+          title: "Route through project workflow",
+          project_slug: "project-b",
+          labels: ["codex", "thinking/max"]
+        }
+
+      assert {:ok, issue_config} = SymphonyElixir.IssueConfig.resolve(issue)
+      assert issue_config.settings.agent.backend == "claude"
+      assert issue_config.settings.agent.default_effort == "high"
+      assert issue_config.settings.agent.max_turns == 7
+      assert PromptBuilder.build_prompt(issue, issue_config: issue_config) == "Project-specific prompt for AP-42"
+
+      route = SymphonyElixir.AgentRoute.resolve(issue, issue_config.settings)
+      assert route.backend == "codex"
+      assert route.effort == "max"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "issue config and workspace honor a project's configured default branch" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-project-default-branch-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      repo_root = Path.join(test_root, "project-b")
+      config_path = Path.join(test_root, "symphony.yml")
+      workspace_root = Path.join(test_root, "workspaces")
+
+      init_repo!(repo_root, "project b\n")
+      System.cmd("git", ["-C", repo_root, "checkout", "-b", "feature/example-branch"])
+      File.write!(Path.join(repo_root, "ONLY_SWITCH_TO_TS"), "branch-specific\n")
+      write_project_workflow_file!(Path.join(repo_root, "WORKFLOW.md"), prompt: "Branch workflow for {{ issue.identifier }}")
+      System.cmd("git", ["-C", repo_root, "add", "WORKFLOW.md", "ONLY_SWITCH_TO_TS"])
+      System.cmd("git", ["-C", repo_root, "commit", "-m", "Add branch workflow"])
+      System.cmd("git", ["-C", repo_root, "checkout", "main"])
+
+      write_symphony_config_file!(config_path,
+        tracker_kind: "memory",
+        workspace_root: workspace_root,
+        projects: [
+          %{
+            linear_project: "project-b",
+            repo: repo_root,
+            workflow: "./WORKFLOW.md",
+            default_branch: "feature/example-branch"
+          }
+        ]
+      )
+
+      SymphonyConfig.set_config_file_path(config_path)
+
+      settings = Config.settings!()
+      issue = %Issue{identifier: "AP-42", project_slug: "project-b"}
+
+      assert [%{default_branch: "feature/example-branch"}] = Config.linear_project_routes(settings)
+      assert {:ok, issue_config} = SymphonyElixir.IssueConfig.resolve(issue)
+      assert PromptBuilder.build_prompt(issue, issue_config: issue_config) == "Branch workflow for AP-42"
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert File.read!(Path.join(workspace, "ONLY_SWITCH_TO_TS")) == "branch-specific\n"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "workspace auto-resolves project workflow hooks in symphony config mode" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-global-workspace-hooks-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      repo_root = Path.join(test_root, "product-source")
+      _workflow_path = Path.join(repo_root, "PRODUCT_WORKFLOW.md")
+      config_path = Path.join(test_root, "symphony.yml")
+      workspace_root = Path.join(test_root, "workspaces")
+
+      init_repo!(repo_root, "global workflow routing\n")
+
+      write_project_workflow_repo_file!(repo_root, "PRODUCT_WORKFLOW.md", hook_after_create: "printf project-hook > .project-hook.txt")
+
+      write_symphony_config_file!(config_path,
+        workspace_root: workspace_root,
+        projects: [
+          %{
+            linear_project: "project-a",
+            repo: repo_root,
+            workflow: "./PRODUCT_WORKFLOW.md"
+          }
+        ]
+      )
+
+      SymphonyConfig.set_config_file_path(config_path)
+
+      issue = %Issue{identifier: "PI-22", project_slug: "project-a"}
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert File.read!(Path.join(workspace, "README.md")) == "global workflow routing\n"
+      assert File.read!(Path.join(workspace, ".project-hook.txt")) == "project-hook"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  defp init_repo!(path, readme_contents) do
+    File.mkdir_p!(path)
+    File.write!(Path.join(path, "README.md"), readme_contents)
+    System.cmd("git", ["-C", path, "init", "-b", "main"])
+    System.cmd("git", ["-C", path, "config", "user.name", "Test User"])
+    System.cmd("git", ["-C", path, "config", "user.email", "test@example.com"])
+    System.cmd("git", ["-C", path, "add", "README.md"])
+    System.cmd("git", ["-C", path, "commit", "-m", "initial"])
+  end
+
+  defp write_project_workflow_repo_file!(repo_path, relative_path, overrides \\ []) do
+    workflow_path = Path.join(repo_path, relative_path)
+    write_project_workflow_file!(workflow_path, overrides)
+    System.cmd("git", ["-C", repo_path, "add", relative_path])
+    System.cmd("git", ["-C", repo_path, "commit", "-m", "Add #{relative_path}"])
+    workflow_path
   end
 end
