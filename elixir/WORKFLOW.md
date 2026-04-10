@@ -27,8 +27,14 @@ hooks:
     cd elixir && mise exec -- mix workspace.before_remove
 agent:
   backend: opencode
+  default_effort: medium
   max_concurrent_agents: 10
   max_turns: 20
+codex:
+  command: codex app-server
+claude:
+  command: claude
+  permission_mode: bypassPermissions
 opencode:
   command: opencode serve --hostname 127.0.0.1 --port 0
   agent: build

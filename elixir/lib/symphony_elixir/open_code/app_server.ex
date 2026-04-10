@@ -35,7 +35,12 @@ defmodule SymphonyElixir.OpenCode.AppServer do
           base_url: String.t(),
           session_id: String.t(),
           metadata: map(),
-          workspace: Path.t()
+          workspace: Path.t(),
+          agent: String.t(),
+          model: String.t() | nil,
+          variant: String.t() | nil,
+          turn_timeout_ms: pos_integer(),
+          stall_timeout_ms: non_neg_integer()
         }
 
   @spec run(Path.t(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
@@ -52,11 +57,13 @@ defmodule SymphonyElixir.OpenCode.AppServer do
   @spec start_session(Path.t(), keyword()) :: {:ok, session()} | {:error, term()}
   def start_session(workspace, opts \\ []) do
     worker_host = Keyword.get(opts, :worker_host)
+    variant = Keyword.get(opts, :variant)
 
-    with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
-         {:ok, port} <- start_port(expanded_workspace, worker_host) do
+    with {:ok, settings} <- Config.opencode_runtime_settings(variant: variant),
+         {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
+         {:ok, port} <- start_port(expanded_workspace, worker_host, settings.command) do
       metadata = port_metadata(port)
-      read_timeout_ms = Config.settings!().opencode.read_timeout_ms
+      read_timeout_ms = settings.read_timeout_ms
 
       with {:ok, base_url} <- await_server_url(port, read_timeout_ms, ""),
            request <- build_request(base_url, read_timeout_ms),
@@ -69,7 +76,12 @@ defmodule SymphonyElixir.OpenCode.AppServer do
            base_url: base_url,
            session_id: session_id,
            metadata: metadata,
-           workspace: expanded_workspace
+           workspace: expanded_workspace,
+           agent: settings.agent,
+           model: settings.model,
+           variant: settings.variant,
+           turn_timeout_ms: settings.turn_timeout_ms,
+           stall_timeout_ms: settings.stall_timeout_ms
          }}
       else
         {:error, reason} ->
@@ -82,7 +94,6 @@ defmodule SymphonyElixir.OpenCode.AppServer do
   @spec run_turn(session(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def run_turn(%{} = session, prompt, issue, opts \\ []) do
     on_message = Keyword.get(opts, :on_message, &default_on_message/1)
-    settings = Config.settings!().opencode
     turn_ref = make_ref()
     owner = self()
 
@@ -103,7 +114,7 @@ defmodule SymphonyElixir.OpenCode.AppServer do
 
     message_task =
       Task.Supervisor.async_nolink(SymphonyElixir.TaskSupervisor, fn ->
-        post_turn_message(session, prompt, settings)
+        post_turn_message(session, prompt, session)
       end)
 
     started_at_ms = System.monotonic_time(:millisecond)
@@ -116,8 +127,8 @@ defmodule SymphonyElixir.OpenCode.AppServer do
         listener_task,
         started_at_ms,
         started_at_ms,
-        settings.turn_timeout_ms,
-        settings.stall_timeout_ms
+        session.turn_timeout_ms,
+        session.stall_timeout_ms
       )
 
     stop_async_task(listener_task)
@@ -198,7 +209,7 @@ defmodule SymphonyElixir.OpenCode.AppServer do
     {:error, {:opencode_local_only, worker_host}}
   end
 
-  defp start_port(workspace, nil) do
+  defp start_port(workspace, nil, command) do
     executable = System.find_executable("bash")
 
     if is_nil(executable) do
@@ -211,7 +222,7 @@ defmodule SymphonyElixir.OpenCode.AppServer do
            :binary,
            :exit_status,
            :stderr_to_stdout,
-           args: [~c"-lc", String.to_charlist(Config.settings!().opencode.command)],
+           args: [~c"-lc", String.to_charlist(command)],
            env: port_environment(),
            cd: String.to_charlist(workspace),
            line: @port_line_bytes
@@ -220,7 +231,7 @@ defmodule SymphonyElixir.OpenCode.AppServer do
     end
   end
 
-  defp start_port(_workspace, worker_host) when is_binary(worker_host) do
+  defp start_port(_workspace, worker_host, _command) when is_binary(worker_host) do
     {:error, {:opencode_local_only, worker_host}}
   end
 
@@ -328,10 +339,10 @@ defmodule SymphonyElixir.OpenCode.AppServer do
     end
   end
 
-  defp post_turn_message(session, prompt, settings) do
+  defp post_turn_message(session, prompt, _settings) do
     payload =
       %{
-        "agent" => settings.agent,
+        "agent" => session.agent,
         "parts" => [
           %{
             "type" => "text",
@@ -339,7 +350,8 @@ defmodule SymphonyElixir.OpenCode.AppServer do
           }
         ]
       }
-      |> maybe_put_model(settings.model)
+      |> maybe_put_model(session.model)
+      |> maybe_put_variant(session.variant)
 
     case Req.post(session.request,
            url: "/session/#{session.session_id}/message",
@@ -367,6 +379,12 @@ defmodule SymphonyElixir.OpenCode.AppServer do
   end
 
   defp maybe_put_model(payload, _model), do: payload
+
+  defp maybe_put_variant(payload, variant) when is_binary(variant) and variant != "" do
+    Map.put(payload, "variant", variant)
+  end
+
+  defp maybe_put_variant(payload, _variant), do: payload
 
   defp await_turn_result(
          session,

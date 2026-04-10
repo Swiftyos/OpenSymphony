@@ -10,27 +10,27 @@ defmodule SymphonyElixir.AppServer do
 
   @spec run(Path.t(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def run(workspace, prompt, issue, opts \\ []) do
-    backend_module().run(workspace, prompt, issue, opts)
+    backend_module(Keyword.get(opts, :backend)).run(workspace, prompt, issue, opts)
   end
 
   @spec start_session(Path.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def start_session(workspace, opts \\ []) do
-    backend_module().start_session(workspace, opts)
+    backend_module(Keyword.get(opts, :backend)).start_session(workspace, opts)
   end
 
   @spec run_turn(map(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def run_turn(session, prompt, issue, opts \\ []) do
-    backend_module().run_turn(session, prompt, issue, opts)
+    backend_module(Keyword.get(opts, :backend)).run_turn(session, prompt, issue, opts)
   end
 
-  @spec stop_session(map()) :: :ok
-  def stop_session(session) do
-    backend_module().stop_session(session)
+  @spec stop_session(map(), keyword()) :: :ok
+  def stop_session(session, opts \\ []) do
+    backend_module(Keyword.get(opts, :backend)).stop_session(session)
   end
 
-  @spec backend_module() :: module()
-  def backend_module do
-    case Config.agent_backend() do
+  @spec backend_module(String.t() | nil) :: module()
+  def backend_module(backend \\ nil) do
+    case backend || Config.agent_backend() do
       "opencode" -> OpenCodeAppServer
       "claude" -> ClaudeCodeAppServer
       _ -> CodexAppServer

@@ -4,6 +4,7 @@ defmodule SymphonyElixir.AgentRunner do
   """
 
   require Logger
+  alias SymphonyElixir.AgentRoute
   alias SymphonyElixir.ClaudeCode.Tooling, as: ClaudeCodeTooling
   alias SymphonyElixir.Codex.AppServer, as: CodexAppServer
   alias SymphonyElixir.{AppServer, Config, Linear.Issue, OpenCode.Tooling, PromptBuilder, Tracker, Workspace}
@@ -12,12 +13,13 @@ defmodule SymphonyElixir.AgentRunner do
 
   @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
   def run(issue, agent_update_recipient \\ nil, opts \\ []) do
+    route = Keyword.get(opts, :route) || AgentRoute.resolve(issue)
     # The orchestrator owns host retries so one worker lifetime never hops machines.
     worker_host = selected_worker_host(Keyword.get(opts, :worker_host), Config.settings!().worker.ssh_hosts)
 
-    Logger.info("Starting agent run for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
+    Logger.info("Starting agent run for #{issue_context(issue)} backend=#{route.backend} effort=#{route.effort || "default"} worker_host=#{worker_host_for_log(worker_host)}")
 
-    case run_on_worker_host(issue, agent_update_recipient, opts, worker_host) do
+    case run_on_worker_host(issue, agent_update_recipient, Keyword.put(opts, :route, route), worker_host) do
       :ok ->
         :ok
 
@@ -28,7 +30,9 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp run_on_worker_host(issue, agent_update_recipient, opts, worker_host) do
-    Logger.info("Starting worker attempt for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
+    route = Keyword.fetch!(opts, :route)
+
+    Logger.info("Starting worker attempt for #{issue_context(issue)} backend=#{route.backend} effort=#{route.effort || "default"} worker_host=#{worker_host_for_log(worker_host)}")
 
     case Workspace.create_for_issue(issue, worker_host) do
       {:ok, workspace} ->
@@ -36,8 +40,8 @@ defmodule SymphonyElixir.AgentRunner do
 
         try do
           with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host),
-               :ok <- prepare_workspace_for_backend(workspace, worker_host) do
-            run_backend_turns(workspace, issue, agent_update_recipient, opts, worker_host)
+               :ok <- prepare_workspace_for_backend(workspace, worker_host, route.backend) do
+            run_backend_turns(workspace, issue, agent_update_recipient, opts, worker_host, route)
           end
         after
           Workspace.run_after_run_hook(workspace, issue, worker_host)
@@ -48,10 +52,10 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp run_backend_turns(workspace, issue, update_recipient, opts, worker_host) do
-    case Config.agent_backend() do
-      "codex" -> run_codex_turns(workspace, issue, update_recipient, opts, worker_host)
-      _ -> run_agent_turns(workspace, issue, update_recipient, opts, worker_host)
+  defp run_backend_turns(workspace, issue, update_recipient, opts, worker_host, route) do
+    case route.backend do
+      "codex" -> run_codex_turns(workspace, issue, update_recipient, opts, worker_host, route)
+      _ -> run_agent_turns(workspace, issue, update_recipient, opts, worker_host, route)
     end
   end
 
@@ -99,11 +103,12 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp send_worker_runtime_info(_recipient, _issue, _worker_host, _workspace), do: :ok
 
-  defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
+  defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host, route) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
 
-    with {:ok, session} <- CodexAppServer.start_session(workspace, worker_host: worker_host) do
+    with {:ok, session} <-
+           CodexAppServer.start_session(workspace, worker_host: worker_host, effort: AgentRoute.codex_effort(route.effort)) do
       try do
         do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
       after
@@ -153,15 +158,31 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp run_agent_turns(workspace, issue, agent_update_recipient, opts, worker_host) do
+  defp run_agent_turns(workspace, issue, agent_update_recipient, opts, worker_host, route) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
 
-    with {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host) do
+    session_opts = [
+      worker_host: worker_host,
+      backend: route.backend,
+      effort: AgentRoute.claude_effort(route.effort),
+      variant: AgentRoute.opencode_variant(route.effort)
+    ]
+
+    with {:ok, session} <- AppServer.start_session(workspace, session_opts) do
       try do
-        do_run_agent_turns(session, workspace, issue, agent_update_recipient, opts, issue_state_fetcher, 1, max_turns)
+        do_run_agent_turns(
+          session,
+          workspace,
+          issue,
+          agent_update_recipient,
+          Keyword.put(opts, :backend, route.backend),
+          issue_state_fetcher,
+          1,
+          max_turns
+        )
       after
-        AppServer.stop_session(session)
+        AppServer.stop_session(session, backend: route.backend)
       end
     end
   end
@@ -174,6 +195,7 @@ defmodule SymphonyElixir.AgentRunner do
              app_session,
              prompt,
              issue,
+             backend: Keyword.get(opts, :backend),
              on_message: agent_message_handler(agent_update_recipient, issue)
            ) do
       Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
@@ -235,8 +257,8 @@ defmodule SymphonyElixir.AgentRunner do
     """
   end
 
-  defp prepare_workspace_for_backend(workspace, worker_host) do
-    case Config.agent_backend() do
+  defp prepare_workspace_for_backend(workspace, worker_host, backend) do
+    case backend do
       "opencode" -> Tooling.bootstrap_workspace(workspace)
       "claude" -> ClaudeCodeTooling.bootstrap_workspace(workspace, worker_host)
       _ -> :ok

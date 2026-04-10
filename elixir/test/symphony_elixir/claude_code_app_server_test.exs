@@ -42,6 +42,7 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
                  workspace,
                  "Ship the change",
                  issue_fixture("MT-CLAUDE-101", "Ship the change"),
+                 effort: "max",
                  on_message: &send(parent, {:agent_message, &1})
                )
 
@@ -119,6 +120,7 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
       assert trace =~ "--mcp-config .symphony/claude/mcp.json"
       assert trace =~ "--permission-mode dontAsk"
       assert trace =~ "--model sonnet"
+      assert trace =~ "--effort max"
       assert trace =~ "ENV:SYMPHONY_LINEAR_API_KEY=token"
       assert trace =~ "\"content\":\"Ship the change\""
     after

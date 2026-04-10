@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRoute, AgentRunner, Config, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Linear.Issue
 
   @continuation_retry_delay_ms 1_000
@@ -359,9 +359,10 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
-  @spec select_worker_host_for_test(term(), String.t() | nil) :: String.t() | nil | :no_worker_capacity
-  def select_worker_host_for_test(%State{} = state, preferred_worker_host) do
-    select_worker_host(state, preferred_worker_host)
+  @spec select_worker_host_for_test(term(), String.t() | nil, String.t() | nil) ::
+          String.t() | nil | :no_worker_capacity
+  def select_worker_host_for_test(%State{} = state, preferred_worker_host, backend \\ nil) do
+    select_worker_host(state, preferred_worker_host, backend)
   end
 
   defp reconcile_running_issue_states([], state, _active_states, _terminal_states), do: state
@@ -477,21 +478,20 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_stalled_running_issues(%State{} = state) do
-    timeout_ms = Config.agent_stall_timeout_ms()
+    if map_size(state.running) == 0 do
+      state
+    else
+      now = DateTime.utc_now()
 
-    cond do
-      timeout_ms <= 0 ->
-        state
+      Enum.reduce(state.running, state, fn {issue_id, running_entry}, state_acc ->
+        case running_entry_stall_timeout_ms(running_entry) do
+          timeout_ms when is_integer(timeout_ms) and timeout_ms > 0 ->
+            restart_stalled_issue(state_acc, issue_id, running_entry, now, timeout_ms)
 
-      map_size(state.running) == 0 ->
-        state
-
-      true ->
-        now = DateTime.utc_now()
-
-        Enum.reduce(state.running, state, fn {issue_id, running_entry}, state_acc ->
-          restart_stalled_issue(state_acc, issue_id, running_entry, now, timeout_ms)
-        end)
+          _ ->
+            state_acc
+        end
+      end)
     end
   end
 
@@ -538,7 +538,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp last_activity_timestamp(_running_entry), do: nil
 
   defp stall_activity_label(running_entry) when is_map(running_entry) do
-    if codex_running_entry?(running_entry), do: "codex", else: "agent"
+    if running_entry_backend(running_entry) == "codex", do: "codex", else: "agent"
   end
 
   defp stall_activity_label(_running_entry), do: "agent"
@@ -596,13 +596,15 @@ defmodule SymphonyElixir.Orchestrator do
          active_states,
          terminal_states
        ) do
+    route = AgentRoute.resolve(issue)
+
     candidate_issue?(issue, active_states, terminal_states) and
       !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
       !MapSet.member?(claimed, issue.id) and
       !Map.has_key?(running, issue.id) and
       available_slots(state) > 0 and
       state_slots_available?(issue, running) and
-      worker_slots_available?(state)
+      worker_slots_available?(state, nil, route.backend)
   end
 
   defp should_dispatch_issue?(_issue, _state, _active_states, _terminal_states), do: false
@@ -718,27 +720,46 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp do_dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host) do
     recipient = self()
+    route = AgentRoute.resolve(issue)
 
-    case select_worker_host(state, preferred_worker_host) do
+    Enum.each(route.warnings, fn warning ->
+      Logger.warning("Issue route warning for #{issue_context(issue)}: #{warning}")
+    end)
+
+    case select_worker_host(state, preferred_worker_host, route.backend) do
       :no_worker_capacity ->
-        Logger.debug("No SSH worker slots available for #{issue_context(issue)} preferred_worker_host=#{inspect(preferred_worker_host)}")
+        Logger.debug("No worker slots available for #{issue_context(issue)} backend=#{route.backend} preferred_worker_host=#{inspect(preferred_worker_host)}")
+
         state
 
       worker_host ->
-        spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host)
+        spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host, route)
     end
   end
 
-  defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host) do
+  defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host, route) do
     case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
-           AgentRunner.run(issue, recipient, attempt: attempt, worker_host: worker_host)
+           AgentRunner.run(
+             issue,
+             recipient,
+             attempt: attempt,
+             worker_host: worker_host,
+             route: route
+           )
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
 
-        Logger.info("Dispatching issue to agent: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)} worker_host=#{worker_host || "local"}")
+        Logger.info(
+          "Dispatching issue to agent: #{issue_context(issue)} backend=#{route.backend} effort=#{route.effort || "default"} pid=#{inspect(pid)} attempt=#{inspect(attempt)} worker_host=#{worker_host || "local"}"
+        )
 
-        running = Map.put(state.running, issue.id, new_running_entry(issue, pid, ref, worker_host, attempt))
+        running =
+          Map.put(
+            state.running,
+            issue.id,
+            new_running_entry(issue, pid, ref, worker_host, attempt, route)
+          )
 
         %{
           state
@@ -759,12 +780,15 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp new_running_entry(issue, pid, ref, worker_host, attempt) do
+  defp new_running_entry(issue, pid, ref, worker_host, attempt, route) do
     base = %{
       pid: pid,
       ref: ref,
       identifier: issue.identifier,
       issue: issue,
+      backend: route.backend,
+      effort: route.effort,
+      stall_timeout_ms: Config.agent_stall_timeout_ms(route.backend),
       worker_host: worker_host,
       workspace_path: nil,
       session_id: nil,
@@ -773,7 +797,7 @@ defmodule SymphonyElixir.Orchestrator do
       started_at: DateTime.utc_now()
     }
 
-    case Config.agent_backend() do
+    case route.backend do
       backend when backend in ["opencode", "claude"] ->
         Map.merge(base, %{
           last_agent_message: nil,
@@ -963,9 +987,11 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_active_retry(state, issue, attempt, metadata) do
+    route = AgentRoute.resolve(issue)
+
     if retry_candidate_issue?(issue, terminal_state_set()) and
          dispatch_slots_available?(issue, state) and
-         worker_slots_available?(state, metadata[:worker_host]) do
+         worker_slots_available?(state, metadata[:worker_host], route.backend) do
       {:noreply, dispatch_issue(state, issue, attempt, metadata[:worker_host])}
     else
       Logger.debug("No available slots for retrying #{issue_context(issue)}; retrying again")
@@ -1032,24 +1058,28 @@ defmodule SymphonyElixir.Orchestrator do
     Map.put(running_entry, key, value)
   end
 
-  defp select_worker_host(%State{} = state, preferred_worker_host) do
-    case Config.settings!().worker.ssh_hosts do
-      [] ->
-        nil
+  defp select_worker_host(%State{} = state, preferred_worker_host, backend) do
+    if AgentRoute.local_only_backend?(backend || Config.agent_backend()) do
+      nil
+    else
+      case Config.settings!().worker.ssh_hosts do
+        [] ->
+          nil
 
-      hosts ->
-        available_hosts = Enum.filter(hosts, &worker_host_slots_available?(state, &1))
+        hosts ->
+          available_hosts = Enum.filter(hosts, &worker_host_slots_available?(state, &1))
 
-        cond do
-          available_hosts == [] ->
-            :no_worker_capacity
+          cond do
+            available_hosts == [] ->
+              :no_worker_capacity
 
-          preferred_worker_host_available?(preferred_worker_host, available_hosts) ->
-            preferred_worker_host
+            preferred_worker_host_available?(preferred_worker_host, available_hosts) ->
+              preferred_worker_host
 
-          true ->
-            least_loaded_worker_host(state, available_hosts)
-        end
+            true ->
+              least_loaded_worker_host(state, available_hosts)
+          end
+      end
     end
   end
 
@@ -1076,12 +1106,8 @@ defmodule SymphonyElixir.Orchestrator do
     end)
   end
 
-  defp worker_slots_available?(%State{} = state) do
-    select_worker_host(state, nil) != :no_worker_capacity
-  end
-
-  defp worker_slots_available?(%State{} = state, preferred_worker_host) do
-    select_worker_host(state, preferred_worker_host) != :no_worker_capacity
+  defp worker_slots_available?(%State{} = state, preferred_worker_host, backend) do
+    select_worker_host(state, preferred_worker_host, backend) != :no_worker_capacity
   end
 
   defp worker_host_slots_available?(%State{} = state, worker_host) when is_binary(worker_host) do
@@ -1217,6 +1243,8 @@ defmodule SymphonyElixir.Orchestrator do
       issue_id: issue_id,
       identifier: metadata.identifier,
       state: metadata.issue.state,
+      backend: running_entry_backend(metadata),
+      effort: Map.get(metadata, :effort),
       worker_host: Map.get(metadata, :worker_host),
       workspace_path: Map.get(metadata, :workspace_path),
       session_id: metadata.session_id,
@@ -1234,7 +1262,9 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp snapshot_agent_totals(%State{} = state) do
-    state.agent_totals || state.codex_totals || @empty_agent_totals
+    state.agent_totals
+    |> Kernel.||(@empty_agent_totals)
+    |> apply_token_delta(state.codex_totals || @empty_codex_totals)
   end
 
   defp snapshot_rate_limits(%State{} = state) do
@@ -1284,7 +1314,8 @@ defmodule SymphonyElixir.Orchestrator do
   defp running_entry_last_event(_metadata), do: nil
 
   defp codex_running_entry?(running_entry) when is_map(running_entry) do
-    Map.has_key?(running_entry, :codex_input_tokens) or
+    Map.get(running_entry, :backend) == "codex" or
+      Map.has_key?(running_entry, :codex_input_tokens) or
       Map.has_key?(running_entry, :last_codex_timestamp) or
       Map.has_key?(running_entry, :codex_app_server_pid)
   end
@@ -1504,7 +1535,7 @@ defmodule SymphonyElixir.Orchestrator do
       seconds_running: runtime_seconds
     }
 
-    if codex_running_entry?(running_entry) do
+    if running_entry_backend(running_entry) == "codex" do
       %{state | codex_totals: apply_token_delta(state.codex_totals, token_delta)}
     else
       %{state | agent_totals: apply_token_delta(state.agent_totals, token_delta)}
@@ -1513,14 +1544,14 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp record_session_completion_totals(state, _running_entry), do: state
 
-  defp initialize_backend_totals(%State{} = state, config) do
-    case config.agent.backend do
-      backend when backend in ["opencode", "claude"] ->
-        %{state | agent_totals: @empty_agent_totals, rate_limits: nil}
-
-      _ ->
-        %{state | codex_totals: @empty_codex_totals, codex_rate_limits: nil}
-    end
+  defp initialize_backend_totals(%State{} = state, _config) do
+    %{
+      state
+      | agent_totals: @empty_agent_totals,
+        rate_limits: nil,
+        codex_totals: @empty_codex_totals,
+        codex_rate_limits: nil
+    }
   end
 
   defp refresh_runtime_config(%State{} = state) do
@@ -1541,6 +1572,25 @@ defmodule SymphonyElixir.Orchestrator do
   defp dispatch_slots_available?(%Issue{} = issue, %State{} = state) do
     available_slots(state) > 0 and state_slots_available?(issue, state.running)
   end
+
+  defp running_entry_backend(running_entry) when is_map(running_entry) do
+    Map.get(running_entry, :backend) ||
+      if(codex_running_entry?(running_entry), do: "codex", else: Config.agent_backend())
+  end
+
+  defp running_entry_backend(_running_entry), do: Config.agent_backend()
+
+  defp running_entry_stall_timeout_ms(running_entry) when is_map(running_entry) do
+    case Map.get(running_entry, :stall_timeout_ms) do
+      timeout_ms when is_integer(timeout_ms) ->
+        timeout_ms
+
+      _ ->
+        Config.agent_stall_timeout_ms(running_entry_backend(running_entry))
+    end
+  end
+
+  defp running_entry_stall_timeout_ms(_running_entry), do: Config.agent_stall_timeout_ms()
 
   defp apply_codex_token_delta(
          %{codex_totals: codex_totals} = state,

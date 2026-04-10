@@ -385,7 +385,13 @@ defmodule SymphonyElixir.AppServerTest do
       parent = self()
 
       assert {:ok, result} =
-               AppServer.run(workspace, "Ship the change", issue_fixture(), on_message: &send(parent, {:agent_message, &1}))
+               AppServer.run(
+                 workspace,
+                 "Ship the change",
+                 issue_fixture(),
+                 variant: "max",
+                 on_message: &send(parent, {:agent_message, &1})
+               )
 
       assert result.session_id == "session-test"
       assert result.thread_id == "session-test"
@@ -398,6 +404,7 @@ defmodule SymphonyElixir.AppServerTest do
                        %{
                          "agent" => "build",
                          "model" => %{"providerID" => "openai", "modelID" => "gpt-5.4"},
+                         "variant" => "max",
                          "parts" => [%{"type" => "text", "text" => "Ship the change"}]
                        }}},
                      1_000

@@ -125,10 +125,12 @@ defmodule SymphonyElixir.Config.Schema do
     import Ecto.Changeset
 
     alias SymphonyElixir.Config.Schema
+    @effort_values ["low", "medium", "high", "max"]
 
     @primary_key false
     embedded_schema do
       field(:backend, :string)
+      field(:default_effort, :string)
       field(:max_concurrent_agents, :integer, default: 10)
       field(:max_turns, :integer, default: 20)
       field(:max_retry_backoff_ms, :integer, default: 300_000)
@@ -140,10 +142,11 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:backend, :max_concurrent_agents, :max_turns, :max_retry_backoff_ms, :max_concurrent_agents_by_state],
+        [:backend, :default_effort, :max_concurrent_agents, :max_turns, :max_retry_backoff_ms, :max_concurrent_agents_by_state],
         empty_values: []
       )
       |> update_change(:backend, &Schema.normalize_optional_string/1)
+      |> update_change(:default_effort, &Schema.normalize_optional_effort/1)
       |> validate_change(:backend, fn :backend, value ->
         cond do
           is_nil(value) ->
@@ -154,6 +157,18 @@ defmodule SymphonyElixir.Config.Schema do
 
           true ->
             [backend: "must be one of: codex, opencode, claude"]
+        end
+      end)
+      |> validate_change(:default_effort, fn :default_effort, value ->
+        cond do
+          is_nil(value) ->
+            []
+
+          value in @effort_values ->
+            []
+
+          true ->
+            [default_effort: "must be one of: #{Enum.join(@effort_values, ", ")}"]
         end
       end)
       |> validate_number(:max_concurrent_agents, greater_than: 0)
@@ -554,6 +569,17 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   def normalize_optional_string(value), do: value
+
+  def normalize_optional_effort(nil), do: nil
+
+  def normalize_optional_effort(value) when is_binary(value) do
+    case value |> String.trim() |> String.downcase() do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  def normalize_optional_effort(value), do: value
 
   defp normalize_optional_map(nil), do: nil
   defp normalize_optional_map(value) when is_map(value), do: normalize_keys(value)

@@ -41,9 +41,7 @@ Symphony stops the active agent for that issue and cleans up matching workspaces
 5. Customize the copied `WORKFLOW.md` file for your project.
    - To get your project's slug, right-click the project and copy its URL. The slug is part of the
      URL.
-   - When creating a workflow based on this repo, note that it depends on non-standard Linear
-     issue statuses: "Rework", "Human Review", and "Merging". You can customize them in
-     Team Settings → Workflow in Linear.
+   - Configure the exact Linear workflow states listed in the `Linear setup` section below.
 6. Follow the instructions below to install the required runtime dependencies and start the service.
 
 ## Prerequisites
@@ -98,11 +96,18 @@ hooks:
   after_create: |
     git clone git@github.com:your-org/your-repo.git .
 agent:
-  backend: opencode
+  backend: codex
+  default_effort: medium
   max_concurrent_agents: 10
   max_turns: 20
+codex:
+  command: codex app-server
+claude:
+  command: claude
+  permission_mode: bypassPermissions
 opencode:
   command: opencode serve --hostname 127.0.0.1 --port 0
+  agent: build
 ---
 
 You are working on a Linear issue {{ issue.identifier }}.
@@ -116,6 +121,8 @@ Notes:
 - `agent.backend` accepts `codex`, `opencode`, or `claude`. If omitted, Symphony infers the
   backend from a single configured provider block; ambiguous or empty provider config falls back to
   `codex`.
+- `agent.default_effort` accepts `low`, `medium`, `high`, or `max`. If unset, each backend uses its
+  own default reasoning level.
 - `opencode.command` defaults to `opencode serve --hostname 127.0.0.1 --port 0`.
 - `opencode.agent` defaults to `build`.
 - `opencode.model` is optional and must use `provider/model` format when set.
@@ -125,10 +132,13 @@ Notes:
 - Claude Code supports both local runs and SSH workers. Each local or remote worker must already
   have working Claude credentials, and the first Claude bootstrap assumes `node` is available so
   Symphony can generate a workspace-local MCP server.
+- Codex uses the public `max` effort setting and maps it to Codex's `xhigh` launcher setting.
 - `agent.max_turns` caps how many back-to-back unattended turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
 - OpenCode v1 is local-only in Symphony. `worker.ssh_hosts` and
   `worker.max_concurrent_agents_per_host` are rejected during config validation.
+- OpenCode stays local-only even when other backends use SSH workers. A ticket labeled `opencode`
+  runs locally on the orchestrator host.
 - OpenCode permissions are handled automatically for a limited unattended allowlist inside the
   issue workspace. Requests outside the workspace, `external_directory`, unknown permissions, and
   interactive questions are rejected.
@@ -163,6 +173,61 @@ opencode:
   reload error until the file is fixed.
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
   `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
+
+## Linear setup
+
+Configure these exact Linear workflow states for the team:
+
+- `Backlog`
+- `Todo`
+- `In Progress`
+- `Human Review`
+- `Merging`
+- `Rework`
+- `Done`
+
+For the sample `WORKFLOW.md`, `tracker.active_states` should contain:
+
+- `Todo`
+- `In Progress`
+- `Merging`
+- `Rework`
+
+Default terminal states recognized by Symphony are:
+
+- `Closed`
+- `Cancelled`
+- `Canceled`
+- `Duplicate`
+- `Done`
+
+## Label routing
+
+Symphony lowercases Linear label names before matching, so label routing is case-insensitive even
+though the documented labels below are shown in their exact lowercase form.
+
+Built-in backend routing labels:
+
+- `codex`
+- `claude`
+- `opencode`
+
+Built-in effort routing labels:
+
+- `effort/low`
+- `effort/medium`
+- `effort/high`
+- `effort/max`
+
+Routing behavior:
+
+- If exactly one backend label is present, Symphony uses that backend for the ticket.
+- If no backend label is present, Symphony falls back to `agent.backend`.
+- If multiple backend labels are present, Symphony logs a warning and falls back to `agent.backend`.
+- If exactly one effort label is present, Symphony uses that effort for the ticket.
+- If no effort label is present, Symphony falls back to `agent.default_effort`.
+- If multiple effort labels are present, Symphony logs a warning and falls back to
+  `agent.default_effort` when set.
 
 ## Web dashboard
 

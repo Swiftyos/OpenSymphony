@@ -1172,6 +1172,191 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert remaining_ms <= 10_500
   end
 
+  test "orchestrator uses per-entry stall timeouts for mixed backends" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_api_token: nil,
+      agent_backend: "codex",
+      codex_stall_timeout_ms: 1_000,
+      claude_stall_timeout_ms: 10_000
+    )
+
+    codex_issue_id = "issue-codex-stall"
+    claude_issue_id = "issue-claude-stall"
+    orchestrator_name = Module.concat(__MODULE__, :MixedBackendStallOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    codex_worker =
+      spawn(fn ->
+        receive do
+          :done -> :ok
+        end
+      end)
+
+    claude_worker =
+      spawn(fn ->
+        receive do
+          :done -> :ok
+        end
+      end)
+
+    stale_activity_at = DateTime.add(DateTime.utc_now(), -5, :second)
+    initial_state = :sys.get_state(pid)
+
+    codex_entry = %{
+      pid: codex_worker,
+      ref: make_ref(),
+      identifier: "MT-CODEX-STALL",
+      issue: %Issue{id: codex_issue_id, identifier: "MT-CODEX-STALL", state: "In Progress"},
+      backend: "codex",
+      effort: nil,
+      stall_timeout_ms: 1_000,
+      session_id: "thread-codex-stall",
+      last_codex_message: nil,
+      last_codex_timestamp: stale_activity_at,
+      last_codex_event: :notification,
+      codex_input_tokens: 0,
+      codex_output_tokens: 0,
+      codex_total_tokens: 0,
+      codex_last_reported_input_tokens: 0,
+      codex_last_reported_output_tokens: 0,
+      codex_last_reported_total_tokens: 0,
+      started_at: stale_activity_at
+    }
+
+    claude_entry = %{
+      pid: claude_worker,
+      ref: make_ref(),
+      identifier: "MT-CLAUDE-STALL",
+      issue: %Issue{id: claude_issue_id, identifier: "MT-CLAUDE-STALL", state: "In Progress"},
+      backend: "claude",
+      effort: "high",
+      stall_timeout_ms: 10_000,
+      session_id: "thread-claude-stall",
+      last_agent_message: nil,
+      last_agent_timestamp: stale_activity_at,
+      last_agent_event: :notification,
+      agent_input_tokens: 0,
+      agent_output_tokens: 0,
+      agent_total_tokens: 0,
+      agent_last_reported_input_tokens: 0,
+      agent_last_reported_output_tokens: 0,
+      agent_last_reported_total_tokens: 0,
+      started_at: stale_activity_at
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{codex_issue_id => codex_entry, claude_issue_id => claude_entry})
+      |> Map.put(
+        :claimed,
+        initial_state.claimed |> MapSet.put(codex_issue_id) |> MapSet.put(claude_issue_id)
+      )
+    end)
+
+    send(pid, :tick)
+    Process.sleep(100)
+    state = :sys.get_state(pid)
+
+    refute Process.alive?(codex_worker)
+    assert Process.alive?(claude_worker)
+    refute Map.has_key?(state.running, codex_issue_id)
+    assert Map.has_key?(state.running, claude_issue_id)
+    assert Map.has_key?(state.retry_attempts, codex_issue_id)
+    refute Map.has_key?(state.retry_attempts, claude_issue_id)
+
+    Process.exit(claude_worker, :normal)
+  end
+
+  test "orchestrator snapshot aggregates mixed backend totals and includes routing metadata" do
+    write_workflow_file!(Workflow.workflow_file_path(), agent_backend: "codex")
+
+    codex_issue_id = "issue-codex-mixed"
+    claude_issue_id = "issue-claude-mixed"
+    orchestrator_name = Module.concat(__MODULE__, :MixedBackendSnapshotOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+    started_at = DateTime.utc_now()
+
+    codex_entry = %{
+      pid: self(),
+      ref: make_ref(),
+      identifier: "MT-CODEX-MIXED",
+      issue: %Issue{id: codex_issue_id, identifier: "MT-CODEX-MIXED", state: "In Progress"},
+      backend: "codex",
+      effort: "max",
+      session_id: "thread-codex-mixed",
+      turn_count: 2,
+      last_codex_message: nil,
+      last_codex_timestamp: started_at,
+      last_codex_event: :notification,
+      codex_input_tokens: 10,
+      codex_output_tokens: 20,
+      codex_total_tokens: 30,
+      codex_last_reported_input_tokens: 10,
+      codex_last_reported_output_tokens: 20,
+      codex_last_reported_total_tokens: 30,
+      started_at: started_at
+    }
+
+    claude_entry = %{
+      pid: self(),
+      ref: make_ref(),
+      identifier: "MT-CLAUDE-MIXED",
+      issue: %Issue{id: claude_issue_id, identifier: "MT-CLAUDE-MIXED", state: "In Progress"},
+      backend: "claude",
+      effort: "high",
+      session_id: "thread-claude-mixed",
+      turn_count: 3,
+      last_agent_message: nil,
+      last_agent_timestamp: started_at,
+      last_agent_event: :notification,
+      agent_input_tokens: 1,
+      agent_output_tokens: 2,
+      agent_total_tokens: 3,
+      agent_last_reported_input_tokens: 1,
+      agent_last_reported_output_tokens: 2,
+      agent_last_reported_total_tokens: 3,
+      started_at: started_at
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{codex_issue_id => codex_entry, claude_issue_id => claude_entry})
+      |> Map.put(:agent_totals, %{input_tokens: 1, output_tokens: 2, total_tokens: 3, seconds_running: 4})
+      |> Map.put(:codex_totals, %{input_tokens: 10, output_tokens: 20, total_tokens: 30, seconds_running: 40})
+    end)
+
+    snapshot = GenServer.call(pid, :snapshot)
+
+    assert snapshot.agent_totals == %{
+             input_tokens: 11,
+             output_tokens: 22,
+             total_tokens: 33,
+             seconds_running: 44
+           }
+
+    codex_snapshot = Enum.find(snapshot.running, &(&1.issue_id == codex_issue_id))
+    claude_snapshot = Enum.find(snapshot.running, &(&1.issue_id == claude_issue_id))
+
+    assert codex_snapshot.backend == "codex"
+    assert codex_snapshot.effort == "max"
+    assert claude_snapshot.backend == "claude"
+    assert claude_snapshot.effort == "high"
+  end
+
   test "status dashboard renders offline marker to terminal" do
     rendered =
       ExUnit.CaptureIO.capture_io(fn ->

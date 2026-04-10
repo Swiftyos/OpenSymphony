@@ -745,6 +745,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.worker.max_concurrent_agents_per_host == nil
     assert config.agent.max_concurrent_agents == 10
     assert config.agent.backend == "opencode"
+    assert config.agent.default_effort == nil
     assert config.codex.command == "codex app-server"
     assert config.codex.thread_sandbox == "workspace-write"
     assert config.codex.turn_timeout_ms == 3_600_000
@@ -795,6 +796,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              command: "opencode serve --hostname 127.0.0.1 --port 0",
              agent: "build",
              model: nil,
+             variant: nil,
              turn_timeout_ms: 3_600_000,
              read_timeout_ms: 5_000,
              stall_timeout_ms: 300_000
@@ -805,6 +807,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert claude_runtime_settings == %{
              command: "claude",
              model: nil,
+             effort: nil,
              permission_mode: "bypassPermissions",
              turn_timeout_ms: 3_600_000,
              read_timeout_ms: 5_000,
@@ -1086,6 +1089,28 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert claude_settings.claude.command == "claude"
   end
 
+  test "schema parse accepts valid default effort" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               tracker: %{kind: "memory"},
+               agent: %{backend: "codex", default_effort: " MAX "}
+             })
+
+    assert settings.agent.backend == "codex"
+    assert settings.agent.default_effort == "max"
+  end
+
+  test "schema parse rejects invalid default effort" do
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{
+               tracker: %{kind: "memory"},
+               agent: %{backend: "codex", default_effort: "turbo"}
+             })
+
+    assert message =~ "agent.default_effort"
+    assert message =~ "low, medium, high, max"
+  end
+
   test "schema parse infers backend from a lone provider block" do
     assert {:ok, opencode_settings} =
              Schema.parse(%{
@@ -1175,6 +1200,20 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert :ok = Config.validate!()
     assert Config.agent_backend() == "claude"
     assert Config.agent_stall_timeout_ms() == 123_000
+  end
+
+  test "config runtime helpers preserve existing behavior when default effort is unset" do
+    write_workflow_file!(Workflow.workflow_file_path(), agent_backend: "codex", default_effort: nil)
+
+    assert Config.settings!().agent.default_effort == nil
+    assert Config.codex_command() == "codex app-server"
+    assert Config.codex_command("max") == "codex app-server -c model_reasoning_effort=xhigh"
+
+    assert {:ok, opencode_runtime_settings} = Config.opencode_runtime_settings()
+    assert opencode_runtime_settings.variant == nil
+
+    assert {:ok, claude_runtime_settings} = Config.claude_runtime_settings()
+    assert claude_runtime_settings.effort == nil
   end
 
   test "path safety returns errors for invalid path segments" do

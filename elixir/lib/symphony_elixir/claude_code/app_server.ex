@@ -20,6 +20,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
           worker_host: String.t() | nil,
           permission_mode: String.t(),
           model: String.t() | nil,
+          effort: String.t() | nil,
           turn_timeout_ms: pos_integer(),
           read_timeout_ms: pos_integer(),
           stall_timeout_ms: non_neg_integer()
@@ -39,10 +40,10 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
   @spec start_session(Path.t(), keyword()) :: {:ok, session()} | {:error, term()}
   def start_session(workspace, opts \\ []) do
     worker_host = Keyword.get(opts, :worker_host)
-    settings = Config.settings!().claude
     session_id = Ecto.UUID.generate()
 
-    with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
+    with {:ok, settings} <- Config.claude_runtime_settings(effort: Keyword.get(opts, :effort)),
+         {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
          {:ok, port} <- start_port(expanded_workspace, worker_host, session_id, settings) do
       {:ok,
        %{
@@ -53,6 +54,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
          worker_host: worker_host,
          permission_mode: settings.permission_mode,
          model: settings.model,
+         effort: settings.effort,
          turn_timeout_ms: settings.turn_timeout_ms,
          read_timeout_ms: settings.read_timeout_ms,
          stall_timeout_ms: settings.stall_timeout_ms
@@ -205,6 +207,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
       shell_escape(session_id)
     ]
     |> maybe_append_model(settings.model)
+    |> maybe_append_effort(settings.effort)
     |> Enum.join(" ")
   end
 
@@ -213,6 +216,12 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
   end
 
   defp maybe_append_model(parts, _model), do: parts
+
+  defp maybe_append_effort(parts, effort) when is_binary(effort) and effort != "" do
+    parts ++ ["--effort", shell_escape(effort)]
+  end
+
+  defp maybe_append_effort(parts, _effort), do: parts
 
   defp remote_launch_command(workspace, session_id, settings) when is_binary(workspace) do
     [

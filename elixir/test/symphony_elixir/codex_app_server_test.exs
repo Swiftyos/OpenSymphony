@@ -144,6 +144,71 @@ defmodule SymphonyElixir.CodexAppServerTest do
     end
   end
 
+  test "codex backend appends max effort to the launcher command" do
+    test_root = temp_root!("effort")
+    trace_env = "SYMP_TEST_CODEX_TRACE_#{System.unique_integer([:positive])}"
+    previous_trace = System.get_env(trace_env)
+
+    on_exit(fn -> restore_env(trace_env, previous_trace) end)
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-1001-EFFORT")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-effort.trace")
+      File.mkdir_p!(workspace)
+      System.put_env(trace_env, trace_file)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${#{trace_env}:-/tmp/codex-effort.trace}"
+      count=0
+
+      printf 'ARGV:%s\\n' "$*" >> "$trace_file"
+
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\\n' "$line" >> "$trace_file"
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-effort"}}}'
+            ;;
+          3)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-effort"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        agent_backend: "codex",
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      assert {:ok, _result} =
+               AppServer.run(workspace, "Use maximum effort", issue_fixture("MT-1001-EFFORT", "Maximum effort"), effort: "max")
+
+      trace = File.read!(trace_file)
+      assert trace =~ "ARGV:app-server -c model_reasoning_effort=xhigh"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "codex backend marks request-for-input events as a hard failure" do
     test_root = temp_root!("input")
     trace_env = "SYMP_TEST_CODEX_TRACE_#{System.unique_integer([:positive])}"

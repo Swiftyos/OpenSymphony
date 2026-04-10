@@ -30,6 +30,7 @@ defmodule SymphonyElixir.Config do
           command: String.t(),
           agent: String.t(),
           model: String.t() | nil,
+          variant: String.t() | nil,
           turn_timeout_ms: pos_integer(),
           read_timeout_ms: pos_integer(),
           stall_timeout_ms: non_neg_integer()
@@ -38,6 +39,7 @@ defmodule SymphonyElixir.Config do
   @type claude_runtime_settings :: %{
           command: String.t(),
           model: String.t() | nil,
+          effort: String.t() | nil,
           permission_mode: String.t(),
           turn_timeout_ms: pos_integer(),
           read_timeout_ms: pos_integer(),
@@ -82,14 +84,30 @@ defmodule SymphonyElixir.Config do
   @spec agent_backend() :: String.t()
   def agent_backend, do: settings!().agent.backend
 
-  @spec agent_stall_timeout_ms() :: non_neg_integer()
-  def agent_stall_timeout_ms do
+  @spec agent_stall_timeout_ms(String.t() | nil) :: non_neg_integer()
+  def agent_stall_timeout_ms(backend \\ nil) do
     settings = settings!()
 
-    case settings.agent.backend do
+    case backend || settings.agent.backend do
       "opencode" -> settings.opencode.stall_timeout_ms
       "claude" -> settings.claude.stall_timeout_ms
       _ -> settings.codex.stall_timeout_ms
+    end
+  end
+
+  @spec codex_command(String.t() | nil) :: String.t()
+  def codex_command(effort \\ nil) do
+    command = settings!().codex.command
+
+    case Schema.normalize_optional_effort(effort) do
+      nil ->
+        command
+
+      "max" ->
+        command <> " -c model_reasoning_effort=xhigh"
+
+      normalized_effort ->
+        command <> " -c model_reasoning_effort=" <> normalized_effort
     end
   end
 
@@ -146,14 +164,15 @@ defmodule SymphonyElixir.Config do
     end
   end
 
-  @spec opencode_runtime_settings() :: {:ok, opencode_runtime_settings()} | {:error, term()}
-  def opencode_runtime_settings do
+  @spec opencode_runtime_settings(keyword()) :: {:ok, opencode_runtime_settings()} | {:error, term()}
+  def opencode_runtime_settings(opts \\ []) do
     with {:ok, settings} <- settings() do
       {:ok,
        %{
          command: settings.opencode.command,
          agent: settings.opencode.agent,
          model: settings.opencode.model,
+         variant: Schema.normalize_optional_effort(Keyword.get(opts, :variant)),
          turn_timeout_ms: settings.opencode.turn_timeout_ms,
          read_timeout_ms: settings.opencode.read_timeout_ms,
          stall_timeout_ms: settings.opencode.stall_timeout_ms
@@ -161,13 +180,14 @@ defmodule SymphonyElixir.Config do
     end
   end
 
-  @spec claude_runtime_settings() :: {:ok, claude_runtime_settings()} | {:error, term()}
-  def claude_runtime_settings do
+  @spec claude_runtime_settings(keyword()) :: {:ok, claude_runtime_settings()} | {:error, term()}
+  def claude_runtime_settings(opts \\ []) do
     with {:ok, settings} <- settings() do
       {:ok,
        %{
          command: settings.claude.command,
          model: settings.claude.model,
+         effort: Schema.normalize_optional_effort(Keyword.get(opts, :effort)),
          permission_mode: settings.claude.permission_mode,
          turn_timeout_ms: settings.claude.turn_timeout_ms,
          read_timeout_ms: settings.claude.read_timeout_ms,
