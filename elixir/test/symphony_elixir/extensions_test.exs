@@ -611,6 +611,15 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "snapshot_unavailable"
   end
 
+  test "dashboard liveview includes configured instance name in title and header" do
+    write_workflow_file!(Workflow.workflow_file_path(), instance_name: "Madrid Runner")
+    start_test_endpoint(orchestrator: Module.concat(__MODULE__, :NamedDashboardOrchestrator), snapshot_timeout_ms: 5)
+
+    {:ok, _view, html} = live(build_conn(), "/")
+    assert html =~ "<title>Madrid Runner · Symphony Observability</title>"
+    assert html =~ "Madrid Runner Operations Dashboard"
+  end
+
   test "http server serves embedded assets, accepts form posts, and rejects invalid hosts" do
     spec = HttpServer.child_spec(port: 0)
     assert spec.id == HttpServer

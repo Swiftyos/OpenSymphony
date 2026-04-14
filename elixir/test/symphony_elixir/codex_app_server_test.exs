@@ -166,6 +166,10 @@ defmodule SymphonyElixir.CodexAppServerTest do
 
       printf 'ARGV:%s\\n' "$*" >> "$trace_file"
 
+      if [ -n "${OPENROUTER_API_KEY:-}" ]; then
+        printf 'ENV:OPENROUTER_API_KEY=%s\\n' "$OPENROUTER_API_KEY" >> "$trace_file"
+      fi
+
       while IFS= read -r line; do
         count=$((count + 1))
         printf 'JSON:%s\\n' "$line" >> "$trace_file"
@@ -196,7 +200,8 @@ defmodule SymphonyElixir.CodexAppServerTest do
       write_workflow_file!(Workflow.workflow_file_path(),
         agent_backend: "codex",
         workspace_root: workspace_root,
-        codex_command: "#{codex_binary} app-server"
+        codex_command: "#{codex_binary} app-server",
+        providers_openrouter_api_key: "openrouter-local-token"
       )
 
       assert {:ok, _result} =
@@ -204,6 +209,7 @@ defmodule SymphonyElixir.CodexAppServerTest do
 
       trace = File.read!(trace_file)
       assert trace =~ "ARGV:app-server -c model_reasoning_effort=xhigh"
+      assert trace =~ "ENV:OPENROUTER_API_KEY=openrouter-local-token"
     after
       File.rm_rf(test_root)
     end
@@ -513,7 +519,8 @@ defmodule SymphonyElixir.CodexAppServerTest do
       write_workflow_file!(Workflow.workflow_file_path(),
         agent_backend: "codex",
         workspace_root: "/remote/workspaces",
-        codex_command: "fake-remote-codex app-server"
+        codex_command: "fake-remote-codex app-server",
+        providers_openrouter_api_key: "openrouter-remote-token"
       )
 
       issue = issue_fixture("MT-REMOTE", "Run remote app server")
@@ -535,6 +542,8 @@ defmodule SymphonyElixir.CodexAppServerTest do
       assert argv_line =~ remote_workspace
       assert argv_line =~ "exec "
       assert argv_line =~ "fake-remote-codex app-server"
+      assert argv_line =~ "OPENROUTER_API_KEY"
+      assert argv_line =~ "openrouter-remote-token"
 
       expected_turn_policy = %{
         "type" => "workspaceWrite",

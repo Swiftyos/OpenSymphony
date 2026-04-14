@@ -12,6 +12,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   def mount(_params, _session, socket) do
     socket =
       socket
+      |> assign(:instance_name, SymphonyElixir.Config.instance_name())
       |> assign(:payload, load_payload())
       |> assign(:now, DateTime.utc_now())
 
@@ -45,10 +46,18 @@ defmodule SymphonyElixirWeb.DashboardLive do
         <div class="hero-grid">
           <div>
             <p class="eyebrow">
-              Symphony Observability
+              <%= if @instance_name do %>
+                <%= @instance_name %>
+              <% else %>
+                Symphony Observability
+              <% end %>
             </p>
             <h1 class="hero-title">
-              Operations Dashboard
+              <%= if @instance_name do %>
+                <%= @instance_name %> Operations Dashboard
+              <% else %>
+                Operations Dashboard
+              <% end %>
             </h1>
             <p class="hero-copy">
               Current state, retry pressure, token usage, and orchestration health for the active Symphony runtime.

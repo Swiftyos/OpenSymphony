@@ -172,6 +172,23 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule Providers do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:openrouter_api_key, :string)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:openrouter_api_key], empty_values: [])
+    end
+  end
+
   defmodule Agent do
     @moduledoc false
     use Ecto.Schema
@@ -449,11 +466,32 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule Instance do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    alias SymphonyElixir.Config.Schema
+
+    @primary_key false
+    embedded_schema do
+      field(:name, :string)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:name], empty_values: [])
+      |> update_change(:name, &Schema.normalize_optional_string/1)
+    end
+  end
+
   embedded_schema do
     embeds_one(:tracker, Tracker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:polling, Polling, on_replace: :update, defaults_to_struct: true)
     embeds_one(:workspace, Workspace, on_replace: :update, defaults_to_struct: true)
     embeds_one(:worker, Worker, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:providers, Providers, on_replace: :update, defaults_to_struct: true)
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
     embeds_one(:opencode, OpenCode, on_replace: :update, defaults_to_struct: true)
@@ -461,6 +499,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:instance, Instance, on_replace: :update, defaults_to_struct: true)
   end
 
   @spec parse(map(), keyword()) :: {:ok, %__MODULE__{}} | {:error, {:invalid_workflow_config, String.t()}}
@@ -576,6 +615,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:polling, with: &Polling.changeset/2)
     |> cast_embed(:workspace, with: &Workspace.changeset/2)
     |> cast_embed(:worker, with: &Worker.changeset/2)
+    |> cast_embed(:providers, with: &Providers.changeset/2)
     |> cast_embed(:agent, with: &Agent.changeset/2)
     |> cast_embed(:codex, with: &Codex.changeset/2)
     |> cast_embed(:opencode, with: &OpenCode.changeset/2)
@@ -583,6 +623,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
+    |> cast_embed(:instance, with: &Instance.changeset/2)
   end
 
   defp finalize_settings(settings, raw_config, opts) do
@@ -604,6 +645,15 @@ defmodule SymphonyElixir.Config.Schema do
     workspace = %{
       settings.workspace
       | root: resolved_workspace_root
+    }
+
+    providers = %{
+      settings.providers
+      | openrouter_api_key:
+          resolve_secret_setting(
+            settings.providers.openrouter_api_key,
+            System.get_env("OPENROUTER_API_KEY")
+          )
     }
 
     agent = %{
@@ -628,7 +678,16 @@ defmodule SymphonyElixir.Config.Schema do
         permission_mode: normalize_optional_string(settings.claude.permission_mode) || "bypassPermissions"
     }
 
-    %{settings | tracker: tracker, workspace: workspace, agent: agent, codex: codex, opencode: opencode, claude: claude}
+    %{
+      settings
+      | tracker: tracker,
+        workspace: workspace,
+        providers: providers,
+        agent: agent,
+        codex: codex,
+        opencode: opencode,
+        claude: claude
+    }
   end
 
   defp finalize_tracker_project(project, default_workspace_root, base_dir) do

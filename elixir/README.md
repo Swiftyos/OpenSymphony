@@ -97,7 +97,8 @@ Passing a `WORKFLOW.md` path explicitly still works as a legacy single-project m
 Optional flags:
 
 - `--logs-root` tells Symphony to write logs under a different directory (default: `./log`)
-- `--port` also starts the Phoenix observability service (default: disabled)
+- `--port` also starts the Phoenix observability service and overrides `server.port`
+  (default: disabled)
 
 `symphony.yml` is the global runtime config. Repo-local `WORKFLOW.md` files contain YAML front
 matter for project-local workflow settings plus a Markdown body used as the agent session prompt.
@@ -108,8 +109,14 @@ Minimal example:
 tracker:
   kind: linear
   api_key: $LINEAR_API_KEY
+providers:
+  openrouter_api_key: $OPENROUTER_API_KEY
 workspace:
   root: ~/code/workspaces
+instance:
+  name: staging-west
+server:
+  port: 4000
 agent:
   backend: codex
   default_effort: medium
@@ -237,6 +244,7 @@ Notes:
 - If a hook needs `mise exec` inside a freshly cloned workspace, trust the repo config and fetch
   the project dependencies in `hooks.after_create` before invoking `mise` later from other hooks.
 - `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`.
+- `providers.openrouter_api_key` reads from `OPENROUTER_API_KEY` when unset or when value is `$OPENROUTER_API_KEY`.
 - For path values, `~` is expanded to the home directory.
 - For env-backed path values, use `$VAR`. `workspace.root` resolves `$VAR` before path handling,
   while `opencode.command` stays a shell command string and any `$VAR` expansion there happens in the
@@ -245,6 +253,8 @@ Notes:
 ```yaml
 tracker:
   api_key: $LINEAR_API_KEY
+providers:
+  openrouter_api_key: $OPENROUTER_API_KEY
 workspace:
   root: $SYMPHONY_WORKSPACE_ROOT
 opencode:

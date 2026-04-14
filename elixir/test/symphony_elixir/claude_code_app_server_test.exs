@@ -30,7 +30,8 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
         workspace_root: workspace_root,
         claude_command: launcher,
         claude_model: "sonnet",
-        claude_permission_mode: "dontAsk"
+        claude_permission_mode: "dontAsk",
+        providers_openrouter_api_key: "openrouter-claude-token"
       )
 
       assert :ok = Tooling.bootstrap_workspace(workspace)
@@ -122,6 +123,7 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
       assert trace =~ "--model sonnet"
       assert trace =~ "--effort max"
       assert trace =~ "ENV:SYMPHONY_LINEAR_API_KEY=token"
+      assert trace =~ "ENV:OPENROUTER_API_KEY=openrouter-claude-token"
       assert trace =~ "\"content\":\"Ship the change\""
     after
       File.rm_rf(test_root)
@@ -381,6 +383,10 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
 
       if [ -n "${SYMPHONY_LINEAR_ENDPOINT:-}" ]; then
         printf 'ENV:SYMPHONY_LINEAR_ENDPOINT=%s\\n' "$SYMPHONY_LINEAR_ENDPOINT" >> "$trace_file"
+      fi
+
+      if [ -n "${OPENROUTER_API_KEY:-}" ]; then
+        printf 'ENV:OPENROUTER_API_KEY=%s\\n' "$OPENROUTER_API_KEY" >> "$trace_file"
       fi
 
       turn=0

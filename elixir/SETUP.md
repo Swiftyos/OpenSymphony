@@ -106,6 +106,8 @@ tracker:
   kind: linear
   endpoint: https://api.linear.app/graphql
   api_key: $LINEAR_API_KEY
+providers:
+  openrouter_api_key: $OPENROUTER_API_KEY
   active_states:
     - Todo
     - In Progress
@@ -123,6 +125,12 @@ polling:
 
 workspace:
   root: ~/work/symphony-workspaces
+
+instance:
+  name: local-dev
+
+server:
+  port: 4000
 
 agent:
   backend: codex
@@ -158,6 +166,8 @@ projects:
 How this works:
 
 - Symphony polls Linear once using the global `tracker` config
+- `instance.name` labels this Symphony runtime in the dashboard and CLI status UI
+- `server.port` enables the observability dashboard at a fixed port, while CLI `--port` can still override it
 - when it sees a ticket in Linear project `project-a`, it uses the `project-a` repo and workflow
 - when it sees a ticket in Linear project `project-b`, it uses the `project-b` repo and workflow
 - if a ticket has no backend label, Symphony uses the route backend, then falls back to `agent.backend`

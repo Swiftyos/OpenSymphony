@@ -153,6 +153,52 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "preflight reuses an existing cached clone and refreshes it" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-cache-reuse-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      source_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+
+      init_repo!(source_repo, "cached bootstrap\n")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_project_slug: nil,
+        tracker_projects: [
+          %{
+            slug: "project-a",
+            repo: source_repo
+          }
+        ],
+        workspace_root: workspace_root
+      )
+
+      issue = %Issue{identifier: "PI-1", project_slug: "project-a"}
+
+      assert {:ok, _workspace} = Workspace.create_for_issue(issue)
+
+      repo_source = Config.project_repo_source_for_issue(issue)
+      cache_repo = Path.join(Config.workspace_root_for_issue(issue), ".symphony-cache/#{repo_source.cache_key}")
+      sentinel = Path.join(cache_repo, "cache-sentinel.txt")
+
+      File.write!(sentinel, "keep me\n")
+
+      File.write!(Path.join(source_repo, "README.md"), "updated upstream\n")
+      System.cmd("git", ["-C", source_repo, "add", "README.md"])
+      System.cmd("git", ["-C", source_repo, "commit", "-m", "update upstream"])
+
+      assert :ok = Workspace.preflight_repo_setup!(Config.settings!())
+      assert File.read!(sentinel) == "keep me\n"
+      assert File.read!(Path.join(cache_repo, "README.md")) == "updated upstream\n"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "workspace path is deterministic per issue identifier" do
     workspace_root =
       Path.join(
@@ -1161,40 +1207,51 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     missing_workspace_env = "SYMP_MISSING_WORKSPACE_#{System.unique_integer([:positive])}"
     empty_secret_env = "SYMP_EMPTY_SECRET_#{System.unique_integer([:positive])}"
     missing_secret_env = "SYMP_MISSING_SECRET_#{System.unique_integer([:positive])}"
+    missing_openrouter_env = "SYMP_MISSING_OPENROUTER_#{System.unique_integer([:positive])}"
 
     previous_missing_workspace_env = System.get_env(missing_workspace_env)
     previous_empty_secret_env = System.get_env(empty_secret_env)
     previous_missing_secret_env = System.get_env(missing_secret_env)
+    previous_missing_openrouter_env = System.get_env(missing_openrouter_env)
     previous_linear_api_key = System.get_env("LINEAR_API_KEY")
+    previous_openrouter_api_key = System.get_env("OPENROUTER_API_KEY")
 
     System.delete_env(missing_workspace_env)
     System.put_env(empty_secret_env, "")
     System.delete_env(missing_secret_env)
+    System.delete_env(missing_openrouter_env)
     System.put_env("LINEAR_API_KEY", "fallback-linear-token")
+    System.put_env("OPENROUTER_API_KEY", "fallback-openrouter-token")
 
     on_exit(fn ->
       restore_env(missing_workspace_env, previous_missing_workspace_env)
       restore_env(empty_secret_env, previous_empty_secret_env)
       restore_env(missing_secret_env, previous_missing_secret_env)
+      restore_env(missing_openrouter_env, previous_missing_openrouter_env)
       restore_env("LINEAR_API_KEY", previous_linear_api_key)
+      restore_env("OPENROUTER_API_KEY", previous_openrouter_api_key)
     end)
 
     assert {:ok, settings} =
              Schema.parse(%{
                tracker: %{api_key: "$#{empty_secret_env}"},
+               providers: %{openrouter_api_key: "$#{missing_openrouter_env}"},
                workspace: %{root: "$#{missing_workspace_env}"}
              })
 
     assert settings.tracker.api_key == nil
+    assert settings.providers.openrouter_api_key == "fallback-openrouter-token"
     assert settings.workspace.root == Path.join(System.tmp_dir!(), "symphony_workspaces")
 
     assert {:ok, settings} =
              Schema.parse(%{
                tracker: %{api_key: "$#{missing_secret_env}"},
+               providers: %{openrouter_api_key: "$#{empty_secret_env}"},
                workspace: %{root: ""}
              })
 
     assert settings.tracker.api_key == "fallback-linear-token"
+    assert settings.providers.openrouter_api_key == nil
     assert settings.workspace.root == Path.join(System.tmp_dir!(), "symphony_workspaces")
   end
 
@@ -1429,6 +1486,37 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert route.backend == "claude"
     after
       File.rm_rf(test_root)
+    end
+  end
+
+  test "symphony config parses instance name and server port" do
+    config_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-instance-config-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(config_root)
+      config_path = Path.join(config_root, "symphony.yml")
+      project_workflow = Path.join(config_root, "PROJECT_WORKFLOW.md")
+
+      write_project_workflow_file!(project_workflow)
+
+      write_symphony_config_file!(config_path,
+        instance_name: "Madrid Runner",
+        server_port: 4101
+      )
+
+      SymphonyConfig.set_config_file_path(config_path)
+
+      settings = Config.settings!()
+      assert settings.instance.name == "Madrid Runner"
+      assert settings.server.port == 4101
+      assert Config.instance_name() == "Madrid Runner"
+      assert Config.server_port() == 4101
+    after
+      File.rm_rf(config_root)
     end
   end
 

@@ -159,6 +159,7 @@ defmodule SymphonyElixir.TestSupport do
           workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
           worker_ssh_hosts: [],
           worker_max_concurrent_agents_per_host: nil,
+          providers_openrouter_api_key: nil,
           agent_backend: "opencode",
           default_effort: nil,
           max_concurrent_agents: 10,
@@ -194,6 +195,7 @@ defmodule SymphonyElixir.TestSupport do
           observability_render_interval_ms: 16,
           server_port: nil,
           server_host: nil,
+          instance_name: nil,
           prompt: @workflow_prompt
         ],
         overrides
@@ -211,6 +213,7 @@ defmodule SymphonyElixir.TestSupport do
     workspace_root = Keyword.get(config, :workspace_root)
     worker_ssh_hosts = Keyword.get(config, :worker_ssh_hosts)
     worker_max_concurrent_agents_per_host = Keyword.get(config, :worker_max_concurrent_agents_per_host)
+    providers_openrouter_api_key = Keyword.get(config, :providers_openrouter_api_key)
     agent_backend = Keyword.get(config, :agent_backend)
     default_effort = Keyword.get(config, :default_effort)
     max_concurrent_agents = Keyword.get(config, :max_concurrent_agents)
@@ -246,6 +249,7 @@ defmodule SymphonyElixir.TestSupport do
     observability_render_interval_ms = Keyword.get(config, :observability_render_interval_ms)
     server_port = Keyword.get(config, :server_port)
     server_host = Keyword.get(config, :server_host)
+    instance_name = Keyword.get(config, :instance_name)
     prompt = Keyword.get(config, :prompt)
 
     sections =
@@ -265,6 +269,7 @@ defmodule SymphonyElixir.TestSupport do
         "workspace:",
         "  root: #{yaml_value(workspace_root)}",
         worker_yaml(worker_ssh_hosts, worker_max_concurrent_agents_per_host),
+        providers_yaml(providers_openrouter_api_key),
         "agent:",
         "  backend: #{yaml_value(agent_backend)}",
         "  default_effort: #{yaml_value(default_effort)}",
@@ -297,6 +302,7 @@ defmodule SymphonyElixir.TestSupport do
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
         server_yaml(server_port, server_host),
+        instance_yaml(instance_name),
         "---",
         prompt
       ]
@@ -356,6 +362,7 @@ defmodule SymphonyElixir.TestSupport do
           workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
           worker_ssh_hosts: [],
           worker_max_concurrent_agents_per_host: nil,
+          providers_openrouter_api_key: nil,
           agent_backend: "codex",
           default_effort: nil,
           max_concurrent_agents: 10,
@@ -386,6 +393,7 @@ defmodule SymphonyElixir.TestSupport do
           observability_render_interval_ms: 16,
           server_port: nil,
           server_host: nil,
+          instance_name: nil,
           projects: [
             %{
               linear_project: "project",
@@ -405,6 +413,7 @@ defmodule SymphonyElixir.TestSupport do
     workspace_root = Keyword.get(config, :workspace_root)
     worker_ssh_hosts = Keyword.get(config, :worker_ssh_hosts)
     worker_max_concurrent_agents_per_host = Keyword.get(config, :worker_max_concurrent_agents_per_host)
+    providers_openrouter_api_key = Keyword.get(config, :providers_openrouter_api_key)
     agent_backend = Keyword.get(config, :agent_backend)
     default_effort = Keyword.get(config, :default_effort)
     max_concurrent_agents = Keyword.get(config, :max_concurrent_agents)
@@ -435,6 +444,7 @@ defmodule SymphonyElixir.TestSupport do
     observability_render_interval_ms = Keyword.get(config, :observability_render_interval_ms)
     server_port = Keyword.get(config, :server_port)
     server_host = Keyword.get(config, :server_host)
+    instance_name = Keyword.get(config, :instance_name)
 
     projects =
       Keyword.get(config, :projects)
@@ -465,6 +475,7 @@ defmodule SymphonyElixir.TestSupport do
         "workspace:",
         "  root: #{yaml_value(workspace_root)}",
         worker_yaml(worker_ssh_hosts, worker_max_concurrent_agents_per_host),
+        providers_yaml(providers_openrouter_api_key),
         "agent:",
         "  backend: #{yaml_value(agent_backend)}",
         "  default_effort: #{yaml_value(default_effort)}",
@@ -496,6 +507,7 @@ defmodule SymphonyElixir.TestSupport do
         "  stall_timeout_ms: #{yaml_value(claude_stall_timeout_ms)}",
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
         server_yaml(server_port, server_host),
+        instance_yaml(instance_name),
         "projects: #{yaml_value(projects)}"
       ]
       |> Enum.reject(&(&1 in [nil, ""]))
@@ -550,6 +562,27 @@ defmodule SymphonyElixir.TestSupport do
       ssh_hosts not in [nil, []] && "  ssh_hosts: #{yaml_value(ssh_hosts)}",
       !is_nil(max_concurrent_agents_per_host) &&
         "  max_concurrent_agents_per_host: #{yaml_value(max_concurrent_agents_per_host)}"
+    ]
+    |> Enum.reject(&(&1 in [nil, false]))
+    |> Enum.join("\n")
+  end
+
+  defp instance_yaml(nil), do: nil
+
+  defp instance_yaml(name) do
+    [
+      "instance:",
+      "  name: #{yaml_value(name)}"
+    ]
+    |> Enum.join("\n")
+  end
+
+  defp providers_yaml(nil), do: nil
+
+  defp providers_yaml(openrouter_api_key) do
+    [
+      "providers:",
+      "  openrouter_api_key: #{yaml_value(openrouter_api_key)}"
     ]
     |> Enum.reject(&(&1 in [nil, false]))
     |> Enum.join("\n")

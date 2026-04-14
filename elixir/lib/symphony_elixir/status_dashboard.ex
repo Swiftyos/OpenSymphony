@@ -131,7 +131,7 @@ defmodule SymphonyElixir.StatusDashboard do
   def render_offline_status do
     content =
       [
-        colorize("╭─ SYMPHONY STATUS", @ansi_bold),
+        header_title(),
         colorize("│ app_status=offline", @ansi_red),
         closing_border()
       ]
@@ -349,7 +349,7 @@ defmodule SymphonyElixir.StatusDashboard do
         backoff_rows = format_retry_rows(retrying)
 
         ([
-           colorize("╭─ SYMPHONY STATUS", @ansi_bold),
+           header_title(),
            colorize("│ Agents: ", @ansi_bold) <>
              colorize("#{agent_count}", @ansi_green) <>
              colorize("/", @ansi_gray) <>
@@ -381,7 +381,7 @@ defmodule SymphonyElixir.StatusDashboard do
 
       :error ->
         [
-          colorize("╭─ SYMPHONY STATUS", @ansi_bold),
+          header_title(),
           colorize("│ Orchestrator snapshot unavailable", @ansi_red),
           colorize("│ Throughput: ", @ansi_bold) <> colorize("#{format_tps(tps)} tps", @ansi_cyan),
           format_project_link_lines(),
@@ -436,6 +436,16 @@ defmodule SymphonyElixir.StatusDashboard do
   end
 
   defp linear_project_url(project_slug), do: "https://linear.app/project/#{project_slug}/issues"
+
+  defp header_title do
+    case Config.instance_name() do
+      name when is_binary(name) and name != "" ->
+        colorize("╭─ SYMPHONY STATUS: #{name}", @ansi_bold)
+
+      _ ->
+        colorize("╭─ SYMPHONY STATUS", @ansi_bold)
+    end
+  end
 
   defp dashboard_url do
     dashboard_url(Config.settings!().server.host, Config.server_port(), HttpServer.bound_port())

@@ -170,6 +170,22 @@ defmodule SymphonyElixir.CoreTest do
     assert Config.settings!().tracker.assignee == env_assignee
   end
 
+  test "openrouter api key resolves from OPENROUTER_API_KEY env var" do
+    previous_openrouter_api_key = System.get_env("OPENROUTER_API_KEY")
+    env_api_key = "test-openrouter-api-key"
+
+    on_exit(fn -> restore_env("OPENROUTER_API_KEY", previous_openrouter_api_key) end)
+    System.put_env("OPENROUTER_API_KEY", env_api_key)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      providers_openrouter_api_key: nil,
+      tracker_project_slug: "project",
+      opencode_command: "/bin/sh app-server"
+    )
+
+    assert Config.settings!().providers.openrouter_api_key == env_api_key
+  end
+
   test "orchestrator startup fails fast when repository preflight fails" do
     test_root =
       Path.join(

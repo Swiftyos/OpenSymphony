@@ -192,6 +192,7 @@ defmodule SymphonyElixir.Codex.AppServer do
             :exit_status,
             :stderr_to_stdout,
             args: [~c"-lc", String.to_charlist(command)],
+            env: port_environment(),
             cd: String.to_charlist(workspace),
             line: @port_line_bytes
           ]
@@ -209,10 +210,39 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp remote_launch_command(workspace, command) when is_binary(workspace) do
     [
       "cd #{shell_escape(workspace)}",
+      remote_environment_exports(),
       "exec #{command}"
     ]
+    |> Enum.reject(&(&1 in [nil, ""]))
     |> Enum.join(" && ")
   end
+
+  defp remote_environment_exports do
+    env_pairs()
+    |> Enum.map(fn {key, value} -> "export #{key}=#{shell_escape(to_string(value))}" end)
+    |> Enum.join(" && ")
+  end
+
+  defp port_environment do
+    env_pairs()
+    |> Enum.map(fn {key, value} ->
+      {String.to_charlist(key), String.to_charlist(to_string(value))}
+    end)
+  end
+
+  defp env_pairs do
+    settings = Config.settings!()
+    tracker = settings.tracker
+
+    []
+    |> maybe_put_env("SYMPHONY_LINEAR_API_KEY", tracker.kind == "linear" && tracker.api_key)
+    |> maybe_put_env("SYMPHONY_LINEAR_ENDPOINT", tracker.kind == "linear" && tracker.endpoint)
+    |> maybe_put_env("OPENROUTER_API_KEY", settings.providers.openrouter_api_key)
+  end
+
+  defp maybe_put_env(entries, _key, nil), do: entries
+  defp maybe_put_env(entries, _key, false), do: entries
+  defp maybe_put_env(entries, key, value), do: [{key, value} | entries]
 
   defp port_metadata(port, worker_host) when is_port(port) do
     base_metadata =

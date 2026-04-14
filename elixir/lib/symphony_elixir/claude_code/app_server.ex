@@ -240,9 +240,12 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
   end
 
   defp tracker_env_pairs(tracker) do
+    settings = Config.settings!()
+
     []
     |> maybe_put_env("SYMPHONY_LINEAR_API_KEY", tracker.kind == "linear" && tracker.api_key)
     |> maybe_put_env("SYMPHONY_LINEAR_ENDPOINT", tracker.kind == "linear" && tracker.endpoint)
+    |> maybe_put_env("OPENROUTER_API_KEY", settings.providers.openrouter_api_key)
   end
 
   defp maybe_put_env(entries, _key, nil), do: entries

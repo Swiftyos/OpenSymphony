@@ -435,6 +435,43 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server passes provider and tracker secrets into the OpenCode launcher environment" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-opencode-env-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-106")
+      trace_file = Path.join(test_root, "opencode-env.trace")
+      File.mkdir_p!(workspace)
+
+      server = start_fake_opencode_server!({:success, workspace})
+      launcher = write_launcher_script!(test_root, server.base_url, trace_file)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        opencode_command: launcher,
+        providers_openrouter_api_key: "openrouter-opencode-token"
+      )
+
+      assert {:ok, _result} =
+               AppServer.run(
+                 workspace,
+                 "Use configured secrets",
+                 issue_fixture("issue-env", "MT-106", "Launcher env")
+               )
+
+      trace = File.read!(trace_file)
+      assert trace =~ "ENV:SYMPHONY_LINEAR_API_KEY=token"
+      assert trace =~ "ENV:OPENROUTER_API_KEY=openrouter-opencode-token"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server approves workspace-contained permission requests once" do
     test_root =
       Path.join(
@@ -631,11 +668,27 @@ defmodule SymphonyElixir.AppServerTest do
     %{state: state, bandit: bandit, base_url: "http://127.0.0.1:#{port}"}
   end
 
-  defp write_launcher_script!(test_root, base_url) do
+  defp write_launcher_script!(test_root, base_url, trace_file \\ nil) do
     launcher = Path.join(test_root, "fake-opencode-launcher.sh")
+
+    trace_commands =
+      if is_binary(trace_file) do
+        """
+        if [ -n "${SYMPHONY_LINEAR_API_KEY:-}" ]; then
+          printf 'ENV:SYMPHONY_LINEAR_API_KEY=%s\\n' "$SYMPHONY_LINEAR_API_KEY" >> "#{trace_file}"
+        fi
+
+        if [ -n "${OPENROUTER_API_KEY:-}" ]; then
+          printf 'ENV:OPENROUTER_API_KEY=%s\\n' "$OPENROUTER_API_KEY" >> "#{trace_file}"
+        fi
+        """
+      else
+        ""
+      end
 
     File.write!(launcher, """
     #!/bin/sh
+    #{trace_commands}
     printf 'opencode server listening on #{base_url}\\n'
     while true; do
       sleep 1

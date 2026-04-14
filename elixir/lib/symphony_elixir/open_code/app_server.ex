@@ -231,11 +231,13 @@ defmodule SymphonyElixir.OpenCode.AppServer do
   end
 
   defp port_environment do
-    tracker = Config.settings!().tracker
+    settings = Config.settings!()
+    tracker = settings.tracker
 
     []
     |> maybe_put_env("SYMPHONY_LINEAR_API_KEY", tracker.kind == "linear" && tracker.api_key)
     |> maybe_put_env("SYMPHONY_LINEAR_ENDPOINT", tracker.kind == "linear" && tracker.endpoint)
+    |> maybe_put_env("OPENROUTER_API_KEY", settings.providers.openrouter_api_key)
     |> Enum.map(fn {key, value} ->
       {String.to_charlist(key), String.to_charlist(to_string(value))}
     end)

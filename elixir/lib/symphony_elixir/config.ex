@@ -222,6 +222,11 @@ defmodule SymphonyElixir.Config do
     end
   end
 
+  @spec instance_name() :: String.t() | nil
+  def instance_name do
+    settings!().instance.name
+  end
+
   @spec validate!() :: :ok | {:error, term()}
   def validate! do
     with {:ok, settings} <- settings(),

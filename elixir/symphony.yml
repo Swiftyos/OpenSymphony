@@ -22,6 +22,12 @@ polling:
 workspace:
   root: ~/work/symphony-workspaces
 
+instance:
+  name: local-dev
+
+server:
+  port: 4000
+
 agent:
   backend: codex
   default_effort: medium
