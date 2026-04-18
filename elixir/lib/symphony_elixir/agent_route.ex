@@ -17,6 +17,7 @@ defmodule SymphonyElixir.AgentRoute do
     "thinking/low" => "low",
     "thinking/medium" => "medium",
     "thinking/high" => "high",
+    "thinking/xhigh" => "xhigh",
     "thinking/max" => "max"
   }
 
@@ -25,12 +26,13 @@ defmodule SymphonyElixir.AgentRoute do
     "effort/low" => "low",
     "effort/medium" => "medium",
     "effort/high" => "high",
+    "effort/xhigh" => "xhigh",
     "effort/max" => "max"
   }
 
   @effort_labels Map.merge(@thinking_labels, @legacy_effort_labels)
 
-  @effort_values ["low", "medium", "high", "max"]
+  @effort_values ["low", "medium", "high", "xhigh", "max"]
 
   defstruct [:backend, :effort, warnings: []]
 
@@ -119,8 +121,11 @@ defmodule SymphonyElixir.AgentRoute do
   def local_only_backend?("opencode"), do: true
   def local_only_backend?(_backend), do: false
 
+  # Codex natively supports low/medium/high/xhigh. Symphony's "max" tier is above
+  # xhigh but Codex has no higher level, so both "max" and "xhigh" collapse to xhigh.
   @spec codex_effort(String.t() | nil) :: String.t() | nil
   def codex_effort("max"), do: "xhigh"
+  def codex_effort("xhigh"), do: "xhigh"
   def codex_effort(effort) when effort in @effort_values, do: effort
   def codex_effort(_effort), do: nil
 
@@ -128,7 +133,10 @@ defmodule SymphonyElixir.AgentRoute do
   def claude_effort(effort) when effort in @effort_values, do: effort
   def claude_effort(_effort), do: nil
 
+  # OpenCode natively supports low/medium/high/max. Symphony's "xhigh" has no
+  # OpenCode counterpart, so it collapses to max.
   @spec opencode_variant(String.t() | nil) :: String.t() | nil
+  def opencode_variant("xhigh"), do: "max"
   def opencode_variant(effort) when effort in @effort_values, do: effort
   def opencode_variant(_effort), do: nil
 

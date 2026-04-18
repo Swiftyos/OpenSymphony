@@ -31,6 +31,7 @@ defmodule SymphonyElixir.AgentRouteTest do
     )
 
     assert AgentRoute.resolve(issue_fixture(["thinking/high"])).effort == "high"
+    assert AgentRoute.resolve(issue_fixture(["thinking/xhigh"])).effort == "xhigh"
     assert AgentRoute.resolve(issue_fixture(["THINKING/MAX"])).effort == "max"
   end
 
@@ -41,7 +42,19 @@ defmodule SymphonyElixir.AgentRouteTest do
     )
 
     assert AgentRoute.resolve(issue_fixture(["effort/high"])).effort == "high"
+    assert AgentRoute.resolve(issue_fixture(["effort/xhigh"])).effort == "xhigh"
     assert AgentRoute.resolve(issue_fixture(["EFFORT/MAX"])).effort == "max"
+  end
+
+  test "xhigh maps per-provider: native on claude, collapses to top on codex/opencode" do
+    assert AgentRoute.claude_effort("xhigh") == "xhigh"
+    assert AgentRoute.claude_effort("max") == "max"
+
+    assert AgentRoute.codex_effort("xhigh") == "xhigh"
+    assert AgentRoute.codex_effort("max") == "xhigh"
+
+    assert AgentRoute.opencode_variant("xhigh") == "max"
+    assert AgentRoute.opencode_variant("max") == "max"
   end
 
   test "conflicting backend labels warn and fall back to the configured backend" do

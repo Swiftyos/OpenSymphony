@@ -180,7 +180,7 @@ defmodule SymphonyElixir.Config do
       nil ->
         command
 
-      "max" ->
+      effort when effort in ["max", "xhigh"] ->
         command <> " -c model_reasoning_effort=xhigh"
 
       normalized_effort ->

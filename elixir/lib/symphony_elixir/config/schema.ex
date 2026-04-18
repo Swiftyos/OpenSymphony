@@ -98,7 +98,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:project_slug, :string)
       field(:assignee, :string)
       field(:active_states, {:array, :string}, default: ["Todo", "In Progress"])
-      field(:terminal_states, {:array, :string}, default: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"])
+      field(:terminal_states, {:array, :string}, default: ["Backlog", "Closed", "Cancelled", "Canceled", "Duplicate", "Done"])
       embeds_many(:projects, TrackerProject, on_replace: :delete)
     end
 
@@ -195,7 +195,7 @@ defmodule SymphonyElixir.Config.Schema do
     import Ecto.Changeset
 
     alias SymphonyElixir.Config.Schema
-    @effort_values ["low", "medium", "high", "max"]
+    @effort_values ["low", "medium", "high", "xhigh", "max"]
 
     @primary_key false
     embedded_schema do

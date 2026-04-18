@@ -1322,7 +1322,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              })
 
     assert message =~ "agent.default_effort"
-    assert message =~ "low, medium, high, max"
+    assert message =~ "low, medium, high, xhigh, max"
   end
 
   test "schema parse infers backend from a lone provider block" do
@@ -1422,6 +1422,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.settings!().agent.default_effort == nil
     assert Config.codex_command() == "codex app-server"
     assert Config.codex_command("max") == "codex app-server -c model_reasoning_effort=xhigh"
+    assert Config.codex_command("xhigh") == "codex app-server -c model_reasoning_effort=xhigh"
+    assert Config.codex_command("high") == "codex app-server -c model_reasoning_effort=high"
 
     assert {:ok, opencode_runtime_settings} = Config.opencode_runtime_settings()
     assert opencode_runtime_settings.variant == nil
