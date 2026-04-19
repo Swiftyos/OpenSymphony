@@ -10,7 +10,7 @@ defmodule SymphonyElixir.Workspace do
   @remote_workspace_marker "__SYMPHONY_WORKSPACE__"
   @repo_cache_dir ".symphony-cache"
   @repo_branch_prefix "symphony/"
-  @repo_cache_preflight_ttl_ms 60_000
+  @repo_cache_sync_ttl_ms 5_000
 
   @type worker_host :: String.t() | nil
 
@@ -173,7 +173,7 @@ defmodule SymphonyElixir.Workspace do
           issue_context = route_issue_context(route)
 
           Enum.reduce_while(worker_hosts, :ok, fn worker_host, :ok ->
-            case ensure_repo_cache(workspace_root, repo_source, target_branch, issue_context, worker_host, settings) do
+            case ensure_repo_cache(workspace_root, repo_source, target_branch, issue_context, worker_host, settings, force: true) do
               :ok ->
                 case validate_project_route_workflow(route, workspace_root, repo_source, issue_context, worker_host, settings) do
                   :ok -> {:cont, :ok}
@@ -601,41 +601,45 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp ensure_repo_cache(workspace_root, repo_source, target_branch, issue_context, nil, settings) do
+  defp ensure_repo_cache(workspace_root, repo_source, target_branch, issue_context, worker_host, settings, opts \\ [])
+
+  defp ensure_repo_cache(workspace_root, repo_source, target_branch, issue_context, nil, settings, opts) do
     timeout_ms = hooks_timeout_ms(settings)
     cache_repo = repo_cache_path(workspace_root, repo_source)
-    preflight_key = repo_cache_preflight_key(workspace_root, repo_source, target_branch, nil)
+    lock_key = repo_cache_lock_key(workspace_root, repo_source, target_branch, nil)
+    force? = Keyword.get(opts, :force, false)
 
-    with_repo_cache_preflight_lock(preflight_key, fn ->
-      if repo_cache_preflight_fresh?(preflight_key) do
+    with_repo_cache_lock(lock_key, fn ->
+      if not force? and repo_cache_sync_fresh?(lock_key) do
         :ok
       else
-        sync_local_repo_cache(workspace_root, repo_source, target_branch, issue_context, cache_repo, timeout_ms, preflight_key)
+        sync_local_repo_cache(workspace_root, repo_source, target_branch, issue_context, cache_repo, timeout_ms, lock_key)
       end
     end)
   end
 
-  defp ensure_repo_cache(workspace_root, repo_source, target_branch, issue_context, worker_host, settings)
+  defp ensure_repo_cache(workspace_root, repo_source, target_branch, issue_context, worker_host, settings, opts)
        when is_binary(worker_host) do
     timeout_ms = hooks_timeout_ms(settings)
     cache_repo = repo_cache_path(workspace_root, repo_source)
-    preflight_key = repo_cache_preflight_key(workspace_root, repo_source, target_branch, worker_host)
+    lock_key = repo_cache_lock_key(workspace_root, repo_source, target_branch, worker_host)
+    force? = Keyword.get(opts, :force, false)
 
-    with_repo_cache_preflight_lock(preflight_key, fn ->
-      if repo_cache_preflight_fresh?(preflight_key) do
+    with_repo_cache_lock(lock_key, fn ->
+      if not force? and repo_cache_sync_fresh?(lock_key) do
         :ok
       else
-        sync_remote_repo_cache(workspace_root, repo_source, target_branch, issue_context, worker_host, cache_repo, timeout_ms, preflight_key)
+        sync_remote_repo_cache(workspace_root, repo_source, target_branch, issue_context, worker_host, cache_repo, timeout_ms, lock_key)
       end
     end)
   end
 
-  defp sync_local_repo_cache(workspace_root, repo_source, target_branch, issue_context, cache_repo, timeout_ms, preflight_key) do
+  defp sync_local_repo_cache(workspace_root, repo_source, target_branch, issue_context, cache_repo, timeout_ms, lock_key) do
     Logger.info("Preparing workspace repo cache #{issue_log_context(issue_context)} workspace_root=#{workspace_root} repo=#{repo_source.display} cache_repo=#{cache_repo} worker_host=local")
 
     case run_local_script(build_repo_cache_sync_script(cache_repo, repo_source, target_branch), timeout_ms) do
       {:ok, {_output, 0}} ->
-        mark_repo_cache_preflight(preflight_key)
+        mark_repo_cache_synced(lock_key)
         :ok
 
       {:ok, {output, status}} ->
@@ -662,13 +666,13 @@ defmodule SymphonyElixir.Workspace do
          worker_host,
          cache_repo,
          timeout_ms,
-         preflight_key
+         lock_key
        ) do
     Logger.info("Preparing workspace repo cache #{issue_log_context(issue_context)} workspace_root=#{workspace_root} repo=#{repo_source.display} cache_repo=#{cache_repo} worker_host=#{worker_host}")
 
     case run_remote_command(worker_host, build_remote_repo_cache_sync_script(cache_repo, repo_source, target_branch), timeout_ms) do
       {:ok, {_output, 0}} ->
-        mark_repo_cache_preflight(preflight_key)
+        mark_repo_cache_synced(lock_key)
         :ok
 
       {:ok, {output, status}} ->
@@ -690,25 +694,25 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp with_repo_cache_preflight_lock(key, fun) when is_function(fun, 0) do
+  defp with_repo_cache_lock(key, fun) when is_function(fun, 0) do
     :global.trans({__MODULE__, key}, fun, [node()], :infinity)
   end
 
-  defp repo_cache_preflight_key(workspace_root, repo_source, target_branch, worker_host) do
-    {:symphony_repo_cache_preflight, worker_host || :local, workspace_root, repo_source.cache_key, target_branch}
+  defp repo_cache_lock_key(workspace_root, repo_source, target_branch, worker_host) do
+    {:symphony_repo_cache_sync, worker_host || :local, workspace_root, repo_source.cache_key, target_branch}
   end
 
-  defp repo_cache_preflight_fresh?(key) do
+  defp repo_cache_sync_fresh?(key) do
     case :persistent_term.get(key, nil) do
       timestamp when is_integer(timestamp) ->
-        System.monotonic_time(:millisecond) - timestamp < @repo_cache_preflight_ttl_ms
+        System.monotonic_time(:millisecond) - timestamp < @repo_cache_sync_ttl_ms
 
       _ ->
         false
     end
   end
 
-  defp mark_repo_cache_preflight(key) do
+  defp mark_repo_cache_synced(key) do
     :persistent_term.put(key, System.monotonic_time(:millisecond))
   end
 
@@ -898,7 +902,7 @@ defmodule SymphonyElixir.Workspace do
             "fi",
             "if ! git -C \"$cache_repo\" rev-parse --is-inside-work-tree >/dev/null 2>&1; then",
             "  rm -rf \"$cache_repo\"",
-            "  gh repo clone \"$repo_slug\" \"$cache_repo\" -- --no-checkout",
+            "  gh repo clone \"$repo_slug\" \"$cache_repo\"",
             "fi",
             "git -C \"$cache_repo\" remote set-url origin \"$remote_url\"",
             "git -C \"$cache_repo\" fetch --prune origin",
@@ -918,7 +922,7 @@ defmodule SymphonyElixir.Workspace do
             "fi",
             "if ! git -C \"$cache_repo\" rev-parse --is-inside-work-tree >/dev/null 2>&1; then",
             "  rm -rf \"$cache_repo\"",
-            "  git clone --no-checkout \"$clone_url\" \"$cache_repo\"",
+            "  git clone \"$clone_url\" \"$cache_repo\"",
             "fi",
             "git -C \"$cache_repo\" remote set-url origin \"$clone_url\"",
             "git -C \"$cache_repo\" fetch --prune origin",
@@ -929,7 +933,7 @@ defmodule SymphonyElixir.Workspace do
     (script_lines ++
        resolve_target_branch_shell_lines("cache_repo", "target_branch") ++
        [
-         "git -C \"$cache_repo\" checkout --detach \"origin/$target_branch\"",
+         "git -C \"$cache_repo\" checkout -f -B \"$target_branch\" \"origin/$target_branch\"",
          "git -C \"$cache_repo\" reset --hard \"origin/$target_branch\"",
          "git -C \"$cache_repo\" worktree prune"
        ])
@@ -970,7 +974,7 @@ defmodule SymphonyElixir.Workspace do
             "fi",
             "if ! git -C \"$cache_repo\" rev-parse --is-inside-work-tree >/dev/null 2>&1; then",
             "  rm -rf \"$cache_repo\"",
-            "  gh repo clone \"$repo_slug\" \"$cache_repo\" -- --no-checkout",
+            "  gh repo clone \"$repo_slug\" \"$cache_repo\"",
             "fi",
             "git -C \"$cache_repo\" remote set-url origin \"$remote_url\"",
             "git -C \"$cache_repo\" fetch --prune origin",
@@ -990,7 +994,7 @@ defmodule SymphonyElixir.Workspace do
             "fi",
             "if ! git -C \"$cache_repo\" rev-parse --is-inside-work-tree >/dev/null 2>&1; then",
             "  rm -rf \"$cache_repo\"",
-            "  git clone --no-checkout \"$clone_url\" \"$cache_repo\"",
+            "  git clone \"$clone_url\" \"$cache_repo\"",
             "fi",
             "git -C \"$cache_repo\" remote set-url origin \"$clone_url\"",
             "git -C \"$cache_repo\" fetch --prune origin",
@@ -1001,7 +1005,7 @@ defmodule SymphonyElixir.Workspace do
     (script_lines ++
        resolve_target_branch_shell_lines("cache_repo", "target_branch") ++
        [
-         "git -C \"$cache_repo\" checkout --detach \"origin/$target_branch\"",
+         "git -C \"$cache_repo\" checkout -f -B \"$target_branch\" \"origin/$target_branch\"",
          "git -C \"$cache_repo\" reset --hard \"origin/$target_branch\"",
          "git -C \"$cache_repo\" worktree prune"
        ])
