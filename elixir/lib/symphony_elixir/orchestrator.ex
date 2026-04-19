@@ -529,11 +529,18 @@ defmodule SymphonyElixir.Orchestrator do
 
     issues
     |> sort_issues_for_dispatch()
-    |> Enum.reduce(state, fn issue, state_acc ->
-      if should_dispatch_issue?(issue, state_acc, active_states, terminal_states) do
-        dispatch_issue(state_acc, issue)
+    |> Enum.reduce_while(state, fn issue, state_acc ->
+      if available_slots(state_acc) <= 0 do
+        {:halt, state_acc}
       else
-        state_acc
+        state_acc =
+          if should_dispatch_issue?(issue, state_acc, active_states, terminal_states) do
+            dispatch_issue(state_acc, issue)
+          else
+            state_acc
+          end
+
+        {:cont, state_acc}
       end
     end)
   end
@@ -564,22 +571,29 @@ defmodule SymphonyElixir.Orchestrator do
          active_states,
          terminal_states
        ) do
-    case resolve_issue_dispatch(issue) do
-      {:ok, _issue_config, route} ->
-        candidate_issue?(issue, active_states, terminal_states) and
-          !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
-          !MapSet.member?(claimed, issue.id) and
-          !Map.has_key?(running, issue.id) and
-          available_slots(state) > 0 and
-          state_slots_available?(issue, running) and
+    if cheap_dispatch_candidate?(issue, state, running, claimed, active_states, terminal_states) do
+      case resolve_issue_dispatch(issue) do
+        {:ok, _issue_config, route} ->
           worker_slots_available?(state, nil, route.backend)
 
-      {:error, _reason} ->
-        false
+        {:error, _reason} ->
+          false
+      end
+    else
+      false
     end
   end
 
   defp should_dispatch_issue?(_issue, _state, _active_states, _terminal_states), do: false
+
+  defp cheap_dispatch_candidate?(issue, state, running, claimed, active_states, terminal_states) do
+    candidate_issue?(issue, active_states, terminal_states) and
+      !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
+      !MapSet.member?(claimed, issue.id) and
+      !Map.has_key?(running, issue.id) and
+      available_slots(state) > 0 and
+      state_slots_available?(issue, running)
+  end
 
   defp state_slots_available?(%Issue{state: issue_state}, running) when is_map(running) do
     limit = Config.max_concurrent_agents_for_state(issue_state)
