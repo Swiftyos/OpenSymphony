@@ -432,6 +432,7 @@ defmodule SymphonyElixir.Config.Schema do
     import Ecto.Changeset
 
     @primary_key false
+
     embedded_schema do
       field(:dashboard_enabled, :boolean, default: true)
       field(:refresh_ms, :integer, default: 1_000)
@@ -444,6 +445,37 @@ defmodule SymphonyElixir.Config.Schema do
       |> cast(attrs, [:dashboard_enabled, :refresh_ms, :render_interval_ms], empty_values: [])
       |> validate_number(:refresh_ms, greater_than: 0)
       |> validate_number(:render_interval_ms, greater_than: 0)
+    end
+  end
+
+  defmodule Telemetry do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+
+    embedded_schema do
+      field(:enabled, :boolean, default: false)
+      field(:otlp_endpoint, :string)
+      field(:otlp_protocol, :string, default: "grpc")
+      field(:include_traces, :boolean, default: true)
+      field(:include_metrics, :boolean, default: true)
+      field(:include_logs, :boolean, default: true)
+      field(:resource_attributes, :map, default: %{})
+    end
+
+    @otlp_protocols ["grpc", "http/protobuf", "http/json"]
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(
+        attrs,
+        [:enabled, :otlp_endpoint, :otlp_protocol, :include_traces, :include_metrics, :include_logs, :resource_attributes],
+        empty_values: []
+      )
+      |> validate_inclusion(:otlp_protocol, @otlp_protocols)
     end
   end
 
@@ -498,6 +530,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:claude, Claude, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:telemetry, Telemetry, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
     embeds_one(:instance, Instance, on_replace: :update, defaults_to_struct: true)
   end
@@ -622,6 +655,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:claude, with: &Claude.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
+    |> cast_embed(:telemetry, with: &Telemetry.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
     |> cast_embed(:instance, with: &Instance.changeset/2)
   end
@@ -678,6 +712,11 @@ defmodule SymphonyElixir.Config.Schema do
         permission_mode: normalize_optional_string(settings.claude.permission_mode) || "bypassPermissions"
     }
 
+    telemetry = %{
+      settings.telemetry
+      | resource_attributes: normalize_resource_attributes(settings.telemetry.resource_attributes)
+    }
+
     %{
       settings
       | tracker: tracker,
@@ -686,7 +725,8 @@ defmodule SymphonyElixir.Config.Schema do
         agent: agent,
         codex: codex,
         opencode: opencode,
-        claude: claude
+        claude: claude,
+        telemetry: telemetry
     }
   end
 
@@ -735,6 +775,17 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp normalize_optional_map(nil), do: nil
   defp normalize_optional_map(value) when is_map(value), do: normalize_keys(value)
+
+  defp normalize_resource_attributes(nil), do: %{}
+
+  defp normalize_resource_attributes(value) when is_map(value) do
+    Enum.reduce(value, %{}, fn {key, val}, acc ->
+      case normalize_optional_string(to_string(val)) do
+        nil -> acc
+        normalized -> Map.put(acc, to_string(key), normalized)
+      end
+    end)
+  end
 
   defp normalize_key(value) when is_atom(value), do: Atom.to_string(value)
   defp normalize_key(value), do: to_string(value)

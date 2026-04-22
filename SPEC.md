@@ -324,6 +324,7 @@ Top-level keys:
 - `hooks`
 - `agent`
 - `codex`
+- `telemetry`
 
 Unknown keys should be ignored for forward compatibility.
 
@@ -442,6 +443,31 @@ fields locally if they want stricter startup checks.
 - `stall_timeout_ms` (integer)
   - Default: `300000` (5 minutes)
   - If `<= 0`, stall detection is disabled.
+
+#### 5.3.7 `telemetry` (object)
+
+Optional extension for exporting agent telemetry (metrics, logs, and traces) via OpenTelemetry OTLP.
+
+Fields:
+
+- `enabled` (boolean)
+  - Default: `false`
+- `otlp_endpoint` (string)
+  - OTLP collector endpoint. Example: `http://localhost:11338`
+- `otlp_protocol` (string)
+  - Default: `grpc`
+  - Supported values: `grpc`, `http/protobuf`, `http/json`
+- `include_traces` (boolean)
+  - Default: `true`
+- `include_metrics` (boolean)
+  - Default: `true`
+- `include_logs` (boolean)
+  - Default: `true`
+- `resource_attributes` (map)
+  - Default: `{}`
+  - Static key-value pairs merged into `OTEL_RESOURCE_ATTRIBUTES` for every agent session.
+
+When enabled, the orchestrator injects OpenTelemetry environment variables into each agent process and tags all signals with the current Linear issue (`linear.issue.id`, `linear.issue.identifier`), backend (`symphony.backend`), and instance (`symphony.instance`).
 
 ### 5.4 Prompt Template Contract
 

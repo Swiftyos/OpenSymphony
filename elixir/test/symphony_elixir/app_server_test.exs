@@ -472,6 +472,58 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server injects telemetry env vars into OpenCode when telemetry is enabled" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-opencode-tel-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-TEL")
+      trace_file = Path.join(test_root, "opencode-telemetry.trace")
+      File.mkdir_p!(workspace)
+
+      server = start_fake_opencode_server!({:success, workspace})
+      launcher = write_launcher_script!(test_root, server.base_url, trace_file)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        opencode_command: launcher,
+        telemetry_enabled: true,
+        telemetry_otlp_endpoint: "http://localhost:11338",
+        telemetry_otlp_protocol: "grpc",
+        telemetry_include_traces: true,
+        telemetry_include_metrics: true,
+        telemetry_include_logs: true,
+        telemetry_resource_attributes: %{"environment" => "test"},
+        instance_name: "test-instance"
+      )
+
+      assert {:ok, _result} =
+               AppServer.run(
+                 workspace,
+                 "Telemetry check",
+                 issue_fixture("issue-tel", "MT-TEL", "Telemetry")
+               )
+
+      trace = File.read!(trace_file)
+      assert trace =~ "ENV:OTEL_METRICS_EXPORTER=otlp"
+      assert trace =~ "ENV:OTEL_LOGS_EXPORTER=otlp"
+      assert trace =~ "ENV:OTEL_TRACES_EXPORTER=otlp"
+      assert trace =~ "ENV:OTEL_EXPORTER_OTLP_PROTOCOL=grpc"
+      assert trace =~ "ENV:OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:11338"
+      assert trace =~ "linear.issue.id=issue-tel"
+      assert trace =~ "linear.issue.identifier=MT-TEL"
+      assert trace =~ "symphony.backend=opencode"
+      assert trace =~ "symphony.instance=test-instance"
+      assert trace =~ "environment=test"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server approves workspace-contained permission requests once" do
     test_root =
       Path.join(
@@ -681,6 +733,10 @@ defmodule SymphonyElixir.AppServerTest do
         if [ -n "${OPENROUTER_API_KEY:-}" ]; then
           printf 'ENV:OPENROUTER_API_KEY=%s\\n' "$OPENROUTER_API_KEY" >> "#{trace_file}"
         fi
+
+        env | grep -E '^OTEL_' | while IFS= read -r line; do
+          printf 'ENV:%s\\n' "$line" >> "#{trace_file}"
+        done
         """
       else
         ""

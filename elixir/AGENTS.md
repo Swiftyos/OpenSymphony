@@ -23,6 +23,9 @@ This directory contains the Elixir agent orchestration service that polls Linear
   - Workspaces must stay under configured workspace root.
 - Orchestrator behavior is stateful and concurrency-sensitive; preserve retry, reconciliation, and cleanup semantics.
 - Follow `docs/logging.md` for logging conventions and required issue/session context fields.
+- Telemetry is configured via the `telemetry` top-level key in `WORKFLOW.md` / `symphony.yml`.
+  - When enabled, Claude Code and Codex receive per-session `OTEL_*` environment variables.
+  - All exported signals include `linear.issue.id`, `linear.issue.identifier`, `symphony.backend`, and `symphony.instance` via `OTEL_RESOURCE_ATTRIBUTES`.
 
 ## Tests and Validation
 

@@ -1325,6 +1325,54 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert message =~ "low, medium, high, xhigh, max"
   end
 
+  test "schema parse accepts telemetry config and validates protocol" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               tracker: %{kind: "memory"},
+               telemetry: %{
+                 enabled: true,
+                 otlp_endpoint: "http://localhost:11338",
+                 otlp_protocol: "grpc",
+                 include_traces: true,
+                 include_metrics: true,
+                 include_logs: true,
+                 resource_attributes: %{"environment" => "test"}
+               }
+             })
+
+    assert settings.telemetry.enabled == true
+    assert settings.telemetry.otlp_endpoint == "http://localhost:11338"
+    assert settings.telemetry.otlp_protocol == "grpc"
+    assert settings.telemetry.include_traces == true
+    assert settings.telemetry.include_metrics == true
+    assert settings.telemetry.include_logs == true
+    assert settings.telemetry.resource_attributes == %{"environment" => "test"}
+
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{
+               tracker: %{kind: "memory"},
+               telemetry: %{otlp_protocol: "websocket"}
+             })
+
+    assert message =~ "telemetry.otlp_protocol"
+  end
+
+  test "config telemetry_issue_resource_attributes builds OTEL resource attributes string" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      instance_name: "test-instance",
+      telemetry_enabled: true,
+      telemetry_resource_attributes: %{"environment" => "test"}
+    )
+
+    issue = %{id: "issue-123", identifier: "MT-123"}
+    attrs = Config.telemetry_issue_resource_attributes(issue)
+
+    assert attrs =~ "linear.issue.id=issue-123"
+    assert attrs =~ "linear.issue.identifier=MT-123"
+    assert attrs =~ "symphony.instance=test-instance"
+    assert attrs =~ "environment=test"
+  end
+
   test "schema parse infers backend from a lone provider block" do
     assert {:ok, opencode_settings} =
              Schema.parse(%{

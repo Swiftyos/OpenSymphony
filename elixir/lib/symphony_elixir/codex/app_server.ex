@@ -4,7 +4,9 @@ defmodule SymphonyElixir.Codex.AppServer do
   """
 
   require Logger
-  alias SymphonyElixir.{Codex.DynamicTool, Config, SSH}
+  alias SymphonyElixir.{Codex.DynamicTool, Config, SSH, Telemetry}
+
+  @codex_config_marker "# managed-by: symphony"
 
   @initialize_id 1
   @thread_start_id 2
@@ -27,7 +29,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   @spec run(Path.t(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def run(workspace, prompt, issue, opts \\ []) do
-    with {:ok, session} <- start_session(workspace, opts) do
+    with {:ok, session} <- start_session(workspace, Keyword.put(opts, :issue, issue)) do
       try do
         run_turn(session, prompt, issue, opts)
       after
@@ -40,9 +42,11 @@ defmodule SymphonyElixir.Codex.AppServer do
   def start_session(workspace, opts \\ []) do
     worker_host = Keyword.get(opts, :worker_host)
     command = Keyword.get(opts, :command) || Config.codex_command(Keyword.get(opts, :effort))
+    issue = Keyword.get(opts, :issue)
 
     with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
-         {:ok, port} <- start_port(expanded_workspace, worker_host, command) do
+         :ok <- maybe_write_codex_config(expanded_workspace, issue),
+         {:ok, port} <- start_port(expanded_workspace, worker_host, command, issue) do
       metadata = port_metadata(port, worker_host)
 
       with {:ok, session_policies} <- session_policies(expanded_workspace, worker_host),
@@ -178,7 +182,77 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp start_port(workspace, nil, command) do
+  defp maybe_write_codex_config(_workspace, nil), do: :ok
+
+  defp maybe_write_codex_config(workspace, issue) do
+    with true <- Config.telemetry_enabled?(),
+         endpoint when is_binary(endpoint) and endpoint != "" <- Config.telemetry_otlp_endpoint() do
+      write_codex_config(workspace, issue, endpoint)
+    else
+      _ -> :ok
+    end
+  end
+
+  defp write_codex_config(workspace, issue, endpoint) do
+    config_path = Path.join(workspace, ".codex")
+    config_file = Path.join(config_path, "config.toml")
+
+    if user_managed_config?(config_file) do
+      Logger.warning(
+        "Skipping codex telemetry config write at #{config_file}: existing file is not managed by symphony"
+      )
+
+      :ok
+    else
+      :ok = File.mkdir_p(config_path)
+      File.write!(config_file, render_codex_config_toml(issue, endpoint))
+    end
+  end
+
+  defp user_managed_config?(path) do
+    case File.read(path) do
+      {:ok, contents} -> not String.contains?(contents, @codex_config_marker)
+      {:error, _} -> false
+    end
+  end
+
+  defp render_codex_config_toml(issue, endpoint) do
+    protocol = Config.telemetry_otlp_protocol()
+    identifier = Map.get(issue, :identifier) || Map.get(issue, "identifier") || "unknown"
+    exporter_inner = codex_exporter_inner(protocol, endpoint)
+
+    """
+    #{@codex_config_marker}
+    [otel]
+    exporter = { #{codex_exporter_key(protocol)} = { #{exporter_inner} } }
+    environment = "symphony-#{escape_toml_string(identifier)}"
+    """
+  end
+
+  defp codex_exporter_inner("grpc", endpoint) do
+    ~s(endpoint = "#{escape_toml_string(endpoint)}")
+  end
+
+  defp codex_exporter_inner(protocol, endpoint) do
+    encoding = codex_http_encoding(protocol)
+
+    ~s(endpoint = "#{escape_toml_string(endpoint)}", protocol = "#{encoding}")
+  end
+
+  defp codex_exporter_key("grpc"), do: "otlp-grpc"
+  defp codex_exporter_key(_), do: "otlp-http"
+
+  defp codex_http_encoding("http/json"), do: "json"
+  defp codex_http_encoding(_), do: "binary"
+
+  defp escape_toml_string(value) do
+    value
+    |> to_string()
+    |> String.replace("\\", "\\\\")
+    |> String.replace("\"", "\\\"")
+  end
+
+  defp start_port(workspace, nil, command, issue) do
     executable = System.find_executable("bash")
 
     if is_nil(executable) do
@@ -192,7 +266,7 @@ defmodule SymphonyElixir.Codex.AppServer do
             :exit_status,
             :stderr_to_stdout,
             args: [~c"-lc", String.to_charlist(command)],
-            env: port_environment(),
+            env: port_environment(issue),
             cd: String.to_charlist(workspace),
             line: @port_line_bytes
           ]
@@ -202,35 +276,35 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp start_port(workspace, worker_host, command) when is_binary(worker_host) do
-    remote_command = remote_launch_command(workspace, command)
+  defp start_port(workspace, worker_host, command, issue) when is_binary(worker_host) do
+    remote_command = remote_launch_command(workspace, command, issue)
     SSH.start_port(worker_host, remote_command, line: @port_line_bytes)
   end
 
-  defp remote_launch_command(workspace, command) when is_binary(workspace) do
+  defp remote_launch_command(workspace, command, issue) when is_binary(workspace) do
     [
       "cd #{shell_escape(workspace)}",
-      remote_environment_exports(),
+      remote_environment_exports(issue),
       "exec #{command}"
     ]
     |> Enum.reject(&(&1 in [nil, ""]))
     |> Enum.join(" && ")
   end
 
-  defp remote_environment_exports do
-    env_pairs()
+  defp remote_environment_exports(issue) do
+    env_pairs(issue)
     |> Enum.map(fn {key, value} -> "export #{key}=#{shell_escape(to_string(value))}" end)
     |> Enum.join(" && ")
   end
 
-  defp port_environment do
-    env_pairs()
+  defp port_environment(issue) do
+    env_pairs(issue)
     |> Enum.map(fn {key, value} ->
       {String.to_charlist(key), String.to_charlist(to_string(value))}
     end)
   end
 
-  defp env_pairs do
+  defp env_pairs(issue) do
     settings = Config.settings!()
     tracker = settings.tracker
 
@@ -238,6 +312,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     |> maybe_put_env("SYMPHONY_LINEAR_API_KEY", tracker.kind == "linear" && tracker.api_key)
     |> maybe_put_env("SYMPHONY_LINEAR_ENDPOINT", tracker.kind == "linear" && tracker.endpoint)
     |> maybe_put_env("OPENROUTER_API_KEY", settings.providers.openrouter_api_key)
+    |> Kernel.++(Telemetry.env_pairs("codex", issue))
   end
 
   defp maybe_put_env(entries, _key, nil), do: entries

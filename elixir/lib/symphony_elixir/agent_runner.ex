@@ -117,7 +117,7 @@ defmodule SymphonyElixir.AgentRunner do
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
 
     with {:ok, session} <-
-           CodexAppServer.start_session(workspace, worker_host: worker_host, effort: AgentRoute.codex_effort(route.effort)) do
+           CodexAppServer.start_session(workspace, worker_host: worker_host, effort: AgentRoute.codex_effort(route.effort), issue: issue) do
       try do
         do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
       after
@@ -176,7 +176,8 @@ defmodule SymphonyElixir.AgentRunner do
       worker_host: worker_host,
       backend: route.backend,
       effort: AgentRoute.claude_effort(route.effort),
-      variant: AgentRoute.opencode_variant(route.effort)
+      variant: AgentRoute.opencode_variant(route.effort),
+      issue: issue
     ]
 
     with {:ok, session} <- AppServer.start_session(workspace, session_opts) do

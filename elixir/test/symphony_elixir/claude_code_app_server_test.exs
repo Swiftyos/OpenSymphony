@@ -372,6 +372,70 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
     end
   end
 
+  test "claude backend injects telemetry env vars when telemetry is enabled" do
+    test_root = temp_root!("telemetry")
+    trace_env = "SYMP_TEST_CLAUDE_TRACE_#{System.unique_integer([:positive])}"
+    scenario_env = "SYMP_TEST_CLAUDE_SCENARIO_#{System.unique_integer([:positive])}"
+    previous_trace = System.get_env(trace_env)
+    previous_scenario = System.get_env(scenario_env)
+
+    on_exit(fn ->
+      restore_env(trace_env, previous_trace)
+      restore_env(scenario_env, previous_scenario)
+    end)
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-CLAUDE-TEL")
+      trace_file = Path.join(test_root, "claude-telemetry.trace")
+      launcher = write_fake_claude_launcher!(test_root, trace_env, scenario_env)
+
+      File.mkdir_p!(workspace)
+      System.put_env(trace_env, trace_file)
+      System.put_env(scenario_env, "success")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        agent_backend: "claude",
+        workspace_root: workspace_root,
+        claude_command: launcher,
+        telemetry_enabled: true,
+        telemetry_otlp_endpoint: "http://localhost:11338",
+        telemetry_otlp_protocol: "grpc",
+        telemetry_include_traces: true,
+        telemetry_include_metrics: true,
+        telemetry_include_logs: true,
+        telemetry_resource_attributes: %{"environment" => "test"},
+        instance_name: "test-instance"
+      )
+
+      assert :ok = Tooling.bootstrap_workspace(workspace)
+
+      assert {:ok, _result} =
+               AppServer.run(
+                 workspace,
+                 "Telemetry test",
+                 issue_fixture("MT-CLAUDE-TEL", "Telemetry test")
+               )
+
+      trace = File.read!(trace_file)
+      assert trace =~ "ENV:CLAUDE_CODE_ENABLE_TELEMETRY=1"
+      assert trace =~ "ENV:CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1"
+      assert trace =~ "ENV:OTEL_METRICS_EXPORTER=otlp"
+      assert trace =~ "ENV:OTEL_LOGS_EXPORTER=otlp"
+      assert trace =~ "ENV:OTEL_TRACES_EXPORTER=otlp"
+      assert trace =~ "ENV:OTEL_EXPORTER_OTLP_PROTOCOL=grpc"
+      assert trace =~ "ENV:OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:11338"
+      assert trace =~ "ENV:OTEL_RESOURCE_ATTRIBUTES="
+      assert trace =~ "linear.issue.id=issue-MT-CLAUDE-TEL"
+      assert trace =~ "linear.issue.identifier=MT-CLAUDE-TEL"
+      assert trace =~ "symphony.backend=claude"
+      assert trace =~ "symphony.instance=test-instance"
+      assert trace =~ "environment=test"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   defp issue_fixture(identifier, title) do
     %Issue{
       id: "issue-#{identifier}",
@@ -436,8 +500,14 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
       fi
 
       if [ -n "${OPENROUTER_API_KEY:-}" ]; then
-        printf 'ENV:OPENROUTER_API_KEY=%s\\n' "$OPENROUTER_API_KEY" >> "$trace_file"
+        printf 'ENV:OPENROUTER_API_KEY=%s\n' "$OPENROUTER_API_KEY" >> "$trace_file"
       fi
+
+      env | grep -E '^(CLAUDE_CODE_|OTEL_)' | while IFS= read -r line; do
+        var_name=$(printf '%s' "$line" | cut -d= -f1)
+        var_value=$(printf '%s' "$line" | cut -d= -f2-)
+        printf 'ENV:%s=%s\n' "$var_name" "$var_value" >> "$trace_file"
+      done
 
       turn=0
 

@@ -6,7 +6,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
   require Logger
 
   alias SymphonyElixir.ClaudeCode.Tooling
-  alias SymphonyElixir.{Config, SSH}
+  alias SymphonyElixir.{Config, SSH, Telemetry}
 
   @poll_interval_ms 250
   @port_line_bytes 1_048_576
@@ -31,7 +31,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
 
   @spec run(Path.t(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def run(workspace, prompt, issue, opts \\ []) do
-    with {:ok, session} <- start_session(workspace, opts) do
+    with {:ok, session} <- start_session(workspace, Keyword.put(opts, :issue, issue)) do
       try do
         run_turn(session, prompt, issue, opts)
       after
@@ -44,10 +44,11 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
   def start_session(workspace, opts \\ []) do
     worker_host = Keyword.get(opts, :worker_host)
     session_id = Ecto.UUID.generate()
+    issue = Keyword.get(opts, :issue)
 
     with {:ok, settings} <- Config.claude_runtime_settings(effort: Keyword.get(opts, :effort)),
          {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
-         {:ok, port} <- start_port(expanded_workspace, worker_host, session_id, settings) do
+         {:ok, port} <- start_port(expanded_workspace, worker_host, session_id, settings, issue) do
       {:ok,
        %{
          port: port,
@@ -157,7 +158,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
     end
   end
 
-  defp start_port(workspace, nil, session_id, settings) do
+  defp start_port(workspace, nil, session_id, settings, issue) do
     executable = System.find_executable("bash")
 
     if is_nil(executable) do
@@ -171,7 +172,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
            :exit_status,
            :stderr_to_stdout,
            args: [~c"-lc", String.to_charlist(launch_command(session_id, settings))],
-           env: port_environment(),
+           env: port_environment(issue),
            cd: String.to_charlist(workspace),
            line: @port_line_bytes
          ]
@@ -179,8 +180,8 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
     end
   end
 
-  defp start_port(workspace, worker_host, session_id, settings) when is_binary(worker_host) do
-    SSH.start_port(worker_host, remote_launch_command(workspace, session_id, settings), line: @port_line_bytes)
+  defp start_port(workspace, worker_host, session_id, settings, issue) when is_binary(worker_host) do
+    SSH.start_port(worker_host, remote_launch_command(workspace, session_id, settings, issue), line: @port_line_bytes)
   end
 
   defp launch_command(session_id, settings) do
@@ -217,38 +218,39 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
 
   defp maybe_append_effort(parts, _effort), do: parts
 
-  defp remote_launch_command(workspace, session_id, settings) when is_binary(workspace) do
+  defp remote_launch_command(workspace, session_id, settings, issue) when is_binary(workspace) do
     [
       "cd #{shell_escape(workspace)}",
-      remote_environment_exports(),
+      remote_environment_exports(issue),
       "exec #{launch_command(session_id, settings)}"
     ]
     |> Enum.reject(&(&1 in [nil, ""]))
     |> Enum.join(" && ")
   end
 
-  defp remote_environment_exports do
+  defp remote_environment_exports(issue) do
     Config.settings!().tracker
-    |> tracker_env_pairs()
+    |> tracker_env_pairs(issue)
     |> Enum.map(fn {key, value} -> "export #{key}=#{shell_escape(value)}" end)
     |> Enum.join(" && ")
   end
 
-  defp port_environment do
+  defp port_environment(issue) do
     Config.settings!().tracker
-    |> tracker_env_pairs()
+    |> tracker_env_pairs(issue)
     |> Enum.map(fn {key, value} ->
       {String.to_charlist(key), String.to_charlist(value)}
     end)
   end
 
-  defp tracker_env_pairs(tracker) do
+  defp tracker_env_pairs(tracker, issue) do
     settings = Config.settings!()
 
     []
     |> maybe_put_env("SYMPHONY_LINEAR_API_KEY", tracker.kind == "linear" && tracker.api_key)
     |> maybe_put_env("SYMPHONY_LINEAR_ENDPOINT", tracker.kind == "linear" && tracker.endpoint)
     |> maybe_put_env("OPENROUTER_API_KEY", settings.providers.openrouter_api_key)
+    |> Kernel.++(Telemetry.env_pairs("claude", issue))
   end
 
   defp maybe_put_env(entries, _key, nil), do: entries

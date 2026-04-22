@@ -227,6 +227,89 @@ defmodule SymphonyElixir.Config do
     settings!().instance.name
   end
 
+  @spec telemetry_enabled?() :: boolean()
+  def telemetry_enabled? do
+    settings!().telemetry.enabled
+  end
+
+  @spec telemetry_otlp_endpoint() :: String.t() | nil
+  def telemetry_otlp_endpoint do
+    normalize_optional_string(settings!().telemetry.otlp_endpoint)
+  end
+
+  @spec telemetry_otlp_protocol() :: String.t()
+  def telemetry_otlp_protocol do
+    settings!().telemetry.otlp_protocol
+  end
+
+  @spec telemetry_include_traces?() :: boolean()
+  def telemetry_include_traces? do
+    settings!().telemetry.include_traces
+  end
+
+  @spec telemetry_include_metrics?() :: boolean()
+  def telemetry_include_metrics? do
+    settings!().telemetry.include_metrics
+  end
+
+  @spec telemetry_include_logs?() :: boolean()
+  def telemetry_include_logs? do
+    settings!().telemetry.include_logs
+  end
+
+  @spec telemetry_resource_attributes() :: map()
+  def telemetry_resource_attributes do
+    settings!().telemetry.resource_attributes
+  end
+
+  @spec telemetry_issue_resource_attributes(map(), String.t() | nil) :: String.t() | nil
+  def telemetry_issue_resource_attributes(issue, backend \\ nil) when is_map(issue) do
+    base_attrs = telemetry_resource_attributes()
+
+    attrs =
+      base_attrs
+      |> maybe_put_resource("linear.issue.id", Map.get(issue, :id) || Map.get(issue, "id"))
+      |> maybe_put_resource("linear.issue.identifier", Map.get(issue, :identifier) || Map.get(issue, "identifier"))
+      |> maybe_put_resource("symphony.backend", backend)
+      |> maybe_put_resource("symphony.instance", instance_name())
+
+    if map_size(attrs) == 0 do
+      nil
+    else
+      attrs
+      |> Enum.map(fn {key, value} -> "#{percent_encode_resource_key(key)}=#{percent_encode_resource_value(value)}" end)
+      |> Enum.join(",")
+    end
+  end
+
+  defp maybe_put_resource(attrs, _key, nil), do: attrs
+  defp maybe_put_resource(attrs, _key, ""), do: attrs
+  defp maybe_put_resource(attrs, key, value), do: Map.put(attrs, key, to_string(value))
+
+  defp percent_encode_resource_key(key) do
+    key
+    |> to_string()
+    |> URI.encode(&resource_char?/1)
+  end
+
+  defp percent_encode_resource_value(value) do
+    value
+    |> to_string()
+    |> URI.encode(&resource_char?/1)
+  end
+
+  defp resource_char?(c) do
+    c in ?a..?z or c in ?A..?Z or c in ?0..?9 or c in ~c"-_.~/"
+  end
+
+  defp normalize_optional_string(nil), do: nil
+  defp normalize_optional_string(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
   @spec validate!() :: :ok | {:error, term()}
   def validate! do
     with {:ok, settings} <- settings(),

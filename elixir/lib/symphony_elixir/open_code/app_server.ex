@@ -5,7 +5,7 @@ defmodule SymphonyElixir.OpenCode.AppServer do
 
   require Logger
 
-  alias SymphonyElixir.{Config, PathSafety}
+  alias SymphonyElixir.{Config, PathSafety, Telemetry}
 
   @allowed_unattended_permissions MapSet.new([
                                     "read",
@@ -46,7 +46,7 @@ defmodule SymphonyElixir.OpenCode.AppServer do
 
   @spec run(Path.t(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def run(workspace, prompt, issue, opts \\ []) do
-    with {:ok, session} <- start_session(workspace, opts) do
+    with {:ok, session} <- start_session(workspace, Keyword.put(opts, :issue, issue)) do
       try do
         run_turn(session, prompt, issue, opts)
       after
@@ -59,10 +59,11 @@ defmodule SymphonyElixir.OpenCode.AppServer do
   def start_session(workspace, opts \\ []) do
     worker_host = Keyword.get(opts, :worker_host)
     variant = Keyword.get(opts, :variant)
+    issue = Keyword.get(opts, :issue)
 
     with {:ok, settings} <- Config.opencode_runtime_settings(variant: variant),
          {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
-         {:ok, port} <- start_port(expanded_workspace, worker_host, settings.command) do
+         {:ok, port} <- start_port(expanded_workspace, worker_host, settings.command, issue) do
       metadata = port_metadata(port)
       startup_context = startup_context(expanded_workspace, settings, metadata)
       read_timeout_ms = settings.read_timeout_ms
@@ -204,7 +205,7 @@ defmodule SymphonyElixir.OpenCode.AppServer do
     {:error, {:opencode_local_only, worker_host}}
   end
 
-  defp start_port(workspace, nil, command) do
+  defp start_port(workspace, nil, command, issue) do
     executable = System.find_executable("bash")
 
     if is_nil(executable) do
@@ -218,7 +219,7 @@ defmodule SymphonyElixir.OpenCode.AppServer do
            :exit_status,
            :stderr_to_stdout,
            args: [~c"-lc", String.to_charlist(command)],
-           env: port_environment(),
+           env: port_environment(issue),
            cd: String.to_charlist(workspace),
            line: @port_line_bytes
          ]
@@ -226,11 +227,11 @@ defmodule SymphonyElixir.OpenCode.AppServer do
     end
   end
 
-  defp start_port(_workspace, worker_host, _command) when is_binary(worker_host) do
+  defp start_port(_workspace, worker_host, _command, _issue) when is_binary(worker_host) do
     {:error, {:opencode_local_only, worker_host}}
   end
 
-  defp port_environment do
+  defp port_environment(issue) do
     settings = Config.settings!()
     tracker = settings.tracker
 
@@ -238,6 +239,7 @@ defmodule SymphonyElixir.OpenCode.AppServer do
     |> maybe_put_env("SYMPHONY_LINEAR_API_KEY", tracker.kind == "linear" && tracker.api_key)
     |> maybe_put_env("SYMPHONY_LINEAR_ENDPOINT", tracker.kind == "linear" && tracker.endpoint)
     |> maybe_put_env("OPENROUTER_API_KEY", settings.providers.openrouter_api_key)
+    |> Kernel.++(Telemetry.env_pairs("opencode", issue))
     |> Enum.map(fn {key, value} ->
       {String.to_charlist(key), String.to_charlist(to_string(value))}
     end)

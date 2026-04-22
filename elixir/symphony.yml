@@ -51,6 +51,16 @@ opencode:
   command: opencode serve --hostname 127.0.0.1 --port 0
   agent: build
 
+telemetry:
+  enabled: false
+  # otlp_endpoint: http://localhost:11338
+  # otlp_protocol: grpc
+  # include_traces: true
+  # include_metrics: true
+  # include_logs: true
+  # resource_attributes:
+  #   environment: local-dev
+
 projects:
   - linear_project: project-a
     repo: your-org/project-a
