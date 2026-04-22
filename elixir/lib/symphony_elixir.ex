@@ -22,6 +22,7 @@ defmodule SymphonyElixir.Application do
   @impl true
   def start(_type, _args) do
     :ok = SymphonyElixir.LogFile.configure()
+
     config_store =
       case Application.get_env(:symphony_elixir, :startup_mode, :legacy) do
         :global -> SymphonyElixir.SymphonyConfigStore

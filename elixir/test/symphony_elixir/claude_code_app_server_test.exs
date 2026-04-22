@@ -281,6 +281,47 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
     end
   end
 
+  test "claude backend kills the OS process when stopping a session" do
+    test_root = temp_root!("stop-session-kills-process")
+    trace_env = "SYMP_TEST_CLAUDE_TRACE_#{System.unique_integer([:positive])}"
+    scenario_env = "SYMP_TEST_CLAUDE_SCENARIO_#{System.unique_integer([:positive])}"
+    previous_trace = System.get_env(trace_env)
+    previous_scenario = System.get_env(scenario_env)
+
+    on_exit(fn ->
+      restore_env(trace_env, previous_trace)
+      restore_env(scenario_env, previous_scenario)
+    end)
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-CLAUDE-105")
+      launcher = write_fake_claude_launcher!(test_root, trace_env, scenario_env)
+
+      File.mkdir_p!(workspace)
+      System.put_env(trace_env, Path.join(test_root, "claude-stop.trace"))
+      System.put_env(scenario_env, "ignore_term")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        agent_backend: "claude",
+        workspace_root: workspace_root,
+        claude_command: launcher
+      )
+
+      assert :ok = Tooling.bootstrap_workspace(workspace)
+      assert {:ok, session} = AppServer.start_session(workspace)
+      assert {:os_pid, os_pid} = :erlang.port_info(session.port, :os_pid)
+      assert os_process_alive?(os_pid)
+
+      assert :ok = AppServer.stop_session(session)
+
+      wait_for_port_closed!(session.port)
+      wait_for_os_process_exit!(os_pid)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "claude backend builds remote ssh launch commands for worker hosts" do
     test_root = temp_root!("remote-ssh")
     trace_file = Path.join(test_root, "ssh.trace")
@@ -377,6 +418,15 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
 
       printf 'ARGV:%s\\n' "$*" >> "$trace_file"
 
+      if [ "$scenario" = "ignore_term" ]; then
+        printf 'PID:%s\\n' "$$" >> "$trace_file"
+        trap '' TERM
+
+        while true; do
+          sleep 1
+        done
+      fi
+
       if [ -n "${SYMPHONY_LINEAR_API_KEY:-}" ]; then
         printf 'ENV:SYMPHONY_LINEAR_API_KEY=%s\\n' "$SYMPHONY_LINEAR_API_KEY" >> "$trace_file"
       fi
@@ -471,4 +521,25 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
       wait_for_port_closed!(port, attempts - 1)
     end
   end
+
+  defp wait_for_os_process_exit!(os_pid, attempts \\ 80)
+  defp wait_for_os_process_exit!(os_pid, 0), do: flunk("timed out waiting for OS process #{os_pid} to exit")
+
+  defp wait_for_os_process_exit!(os_pid, attempts) do
+    if os_process_alive?(os_pid) do
+      Process.sleep(25)
+      wait_for_os_process_exit!(os_pid, attempts - 1)
+    else
+      :ok
+    end
+  end
+
+  defp os_process_alive?(os_pid) when is_integer(os_pid) and os_pid > 0 do
+    case System.cmd("kill", ["-0", "--", Integer.to_string(os_pid)], stderr_to_stdout: true) do
+      {_output, 0} -> true
+      _ -> false
+    end
+  end
+
+  defp os_process_alive?(_os_pid), do: false
 end
