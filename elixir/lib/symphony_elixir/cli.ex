@@ -100,7 +100,9 @@ defmodule SymphonyElixir.CLI do
     """
     Usage:
       symphony [--logs-root <path>] [--port <port>] [path-to-symphony.yml|path-to-WORKFLOW.md]
-      symphony accounts login <codex|claude> <id> [--email <email>] [path-to-symphony.yml|path-to-WORKFLOW.md]
+      symphony accounts login codex <id> [--email <email>] [path-to-symphony.yml|path-to-WORKFLOW.md]
+      symphony accounts login claude <id> [--email <email>] [--token-stdin|--token-file <path>|--token-env <VAR>] [path-to-symphony.yml|path-to-WORKFLOW.md]
+        Claude setup-token output is streamed live, so SSH users can open the printed auth URL elsewhere.
       symphony accounts list [codex|claude] [path-to-symphony.yml|path-to-WORKFLOW.md]
       symphony accounts verify <codex|claude> <id> [path-to-symphony.yml|path-to-WORKFLOW.md]
       symphony accounts pause <codex|claude> <id> [--until <timestamp>] [--reason <text>] [path-to-symphony.yml|path-to-WORKFLOW.md]
@@ -132,7 +134,16 @@ defmodule SymphonyElixir.CLI do
   end
 
   defp evaluate_accounts(["login", backend, id | rest], deps) do
-    with {:ok, opts, config_path} <- parse_account_options(rest, email: :string, command: :string, token: :string),
+    with {:ok, opts, config_path} <-
+           parse_account_options(rest,
+             email: :string,
+             command: :string,
+             token: :string,
+             token_stdin: :boolean,
+             token_file: :string,
+             token_env: :string
+           ),
+         {:ok, opts} <- resolve_account_login_token_opts(opts),
          :ok <- maybe_set_account_config_path(config_path, deps),
          {:ok, account} <- account_dep(deps, :accounts_login).(backend, id, opts) do
       IO.puts("Stored #{account.backend} account #{account.id}#{email_suffix(account)}")
@@ -291,6 +302,52 @@ defmodule SymphonyElixir.CLI do
   end
 
   defp parse_account_list_args(_opts, _args), do: {:error, %OptionParser.ParseError{message: usage_message()}}
+
+  defp resolve_account_login_token_opts(opts) do
+    token_sources =
+      [
+        Keyword.has_key?(opts, :token),
+        Keyword.get(opts, :token_stdin, false),
+        Keyword.has_key?(opts, :token_file),
+        Keyword.has_key?(opts, :token_env)
+      ]
+      |> Enum.count(& &1)
+
+    cond do
+      token_sources > 1 ->
+        {:error, %OptionParser.ParseError{message: "Pass only one of --token, --token-stdin, --token-file, or --token-env"}}
+
+      Keyword.get(opts, :token_stdin, false) ->
+        {:ok, opts |> Keyword.delete(:token_stdin) |> Keyword.put(:token, stdin_token())}
+
+      token_file = Keyword.get(opts, :token_file) ->
+        case File.read(Path.expand(token_file)) do
+          {:ok, token} ->
+            {:ok, opts |> Keyword.delete(:token_file) |> Keyword.put(:token, String.trim(token))}
+
+          {:error, reason} ->
+            {:error, "Unable to read token file #{Path.expand(token_file)}: #{:file.format_error(reason)}"}
+        end
+
+      token_env = Keyword.get(opts, :token_env) ->
+        case System.get_env(token_env) do
+          token when is_binary(token) and token != "" ->
+            {:ok, opts |> Keyword.delete(:token_env) |> Keyword.put(:token, String.trim(token))}
+
+          _ ->
+            {:error, "Environment variable #{token_env} is not set or is empty"}
+        end
+
+      true ->
+        {:ok, opts}
+    end
+  end
+
+  defp stdin_token do
+    IO.read(:stdio, :eof)
+    |> to_string()
+    |> String.trim()
+  end
 
   defp account_config_path(opts, args) do
     config_opt = Keyword.get(opts, :config)

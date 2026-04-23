@@ -755,7 +755,7 @@ defmodule SymphonyElixir.Accounts do
 
         true ->
           command
-          |> run_provider(["setup-token"], credential_env(account), opts)
+          |> run_provider(["setup-token"], credential_env(account), Keyword.put(opts, :stream, true))
           |> case do
             {:ok, output} -> extract_claude_oauth_token(output)
             {:error, reason} -> {:error, reason}

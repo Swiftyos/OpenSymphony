@@ -330,6 +330,32 @@ defmodule SymphonyElixir.CLITest do
     assert output =~ "Stored codex account primary (me@example.com)"
   end
 
+  test "accounts login can read a Claude token from stdin" do
+    parent = self()
+
+    deps = %{
+      accounts_login: fn backend, id, opts ->
+        send(parent, {:login, backend, id, opts})
+        {:ok, %{backend: backend, id: id, email: Keyword.get(opts, :email)}}
+      end
+    }
+
+    output =
+      ExUnit.CaptureIO.capture_io("sk-ant-oat-secret\n", fn ->
+        assert :ok =
+                 CLI.evaluate(
+                   ["accounts", "login", "claude", "work", "--email", "work@example.com", "--token-stdin"],
+                   deps
+                 )
+      end)
+
+    assert_received {:login, "claude", "work", opts}
+    assert Keyword.get(opts, :email) == "work@example.com"
+    assert Keyword.get(opts, :token) == "sk-ant-oat-secret"
+    refute Keyword.has_key?(opts, :token_stdin)
+    assert output =~ "Stored claude account work (work@example.com)"
+  end
+
   test "accounts list formats account health without secrets" do
     deps = %{
       accounts_list: fn backend ->

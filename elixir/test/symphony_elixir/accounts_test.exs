@@ -114,6 +114,33 @@ defmodule SymphonyElixir.AccountsTest do
     assert output =~ "Logged in as streamed@example.com"
   end
 
+  test "claude login streams setup-token output and stores the emitted oauth token" do
+    store_root = temp_accounts_root!("claude-login-stream")
+    settings = accounts_settings!(store_root)
+
+    command =
+      fake_provider_command!(
+        "claude-login",
+        "printf 'Open https://claude.ai/login\\nsk-ant-oat-testtoken123\\n'"
+      )
+
+    output =
+      ExUnit.CaptureIO.capture_io(fn ->
+        assert {:ok, account} =
+                 Accounts.login(
+                   "claude",
+                   "streamed",
+                   [email: "claude@example.com", command: command],
+                   settings
+                 )
+
+        assert account.email == "claude@example.com"
+        assert File.read!(account.claude_oauth_token_file) == "sk-ant-oat-testtoken123\n"
+      end)
+
+    assert output =~ "Open https://claude.ai/login"
+  end
+
   test "rate-limit resets append session and weekly usage period CSV rows" do
     store_root = temp_accounts_root!("usage-periods")
     settings = accounts_settings!(store_root)
