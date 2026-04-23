@@ -253,6 +253,36 @@ defmodule SymphonyElixir.Config do
     settings!().telemetry.otlp_protocol
   end
 
+  @spec telemetry_otlp_traces_endpoint() :: String.t() | nil
+  def telemetry_otlp_traces_endpoint do
+    normalize_optional_string(settings!().telemetry.otlp_traces_endpoint)
+  end
+
+  @spec telemetry_otlp_traces_protocol() :: String.t() | nil
+  def telemetry_otlp_traces_protocol do
+    normalize_optional_string(settings!().telemetry.otlp_traces_protocol)
+  end
+
+  @spec telemetry_otlp_logs_endpoint() :: String.t() | nil
+  def telemetry_otlp_logs_endpoint do
+    normalize_optional_string(settings!().telemetry.otlp_logs_endpoint)
+  end
+
+  @spec telemetry_otlp_logs_protocol() :: String.t() | nil
+  def telemetry_otlp_logs_protocol do
+    normalize_optional_string(settings!().telemetry.otlp_logs_protocol)
+  end
+
+  @spec telemetry_otlp_metrics_endpoint() :: String.t() | nil
+  def telemetry_otlp_metrics_endpoint do
+    normalize_optional_string(settings!().telemetry.otlp_metrics_endpoint)
+  end
+
+  @spec telemetry_otlp_metrics_protocol() :: String.t() | nil
+  def telemetry_otlp_metrics_protocol do
+    normalize_optional_string(settings!().telemetry.otlp_metrics_protocol)
+  end
+
   @spec telemetry_include_traces?() :: boolean()
   def telemetry_include_traces? do
     settings!().telemetry.include_traces

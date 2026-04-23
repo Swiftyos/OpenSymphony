@@ -504,9 +504,17 @@ defmodule SymphonyElixir.Config.Schema do
       field(:enabled, :boolean, default: false)
       field(:otlp_endpoint, :string)
       field(:otlp_protocol, :string, default: "grpc")
+      field(:otlp_traces_endpoint, :string)
+      field(:otlp_traces_protocol, :string)
+      field(:otlp_logs_endpoint, :string)
+      field(:otlp_logs_protocol, :string)
+      field(:otlp_metrics_endpoint, :string)
+      field(:otlp_metrics_protocol, :string)
       field(:include_traces, :boolean, default: true)
       field(:include_metrics, :boolean, default: true)
       field(:include_logs, :boolean, default: true)
+      field(:log_user_prompts, :boolean, default: false)
+      field(:log_tool_details, :boolean, default: false)
       field(:resource_attributes, :map, default: %{})
     end
 
@@ -517,10 +525,29 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:enabled, :otlp_endpoint, :otlp_protocol, :include_traces, :include_metrics, :include_logs, :resource_attributes],
+        [
+          :enabled,
+          :otlp_endpoint,
+          :otlp_protocol,
+          :otlp_traces_endpoint,
+          :otlp_traces_protocol,
+          :otlp_logs_endpoint,
+          :otlp_logs_protocol,
+          :otlp_metrics_endpoint,
+          :otlp_metrics_protocol,
+          :include_traces,
+          :include_metrics,
+          :include_logs,
+          :log_user_prompts,
+          :log_tool_details,
+          :resource_attributes
+        ],
         empty_values: []
       )
       |> validate_inclusion(:otlp_protocol, @otlp_protocols)
+      |> validate_inclusion(:otlp_traces_protocol, @otlp_protocols)
+      |> validate_inclusion(:otlp_logs_protocol, @otlp_protocols)
+      |> validate_inclusion(:otlp_metrics_protocol, @otlp_protocols)
     end
   end
 
