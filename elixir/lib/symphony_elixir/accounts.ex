@@ -755,7 +755,7 @@ defmodule SymphonyElixir.Accounts do
 
         true ->
           command
-          |> run_provider(["setup-token"], credential_env(account), opts |> Keyword.put(:stream, true) |> Keyword.put(:pty, true))
+          |> run_provider(["setup-token"], claude_login_env(), opts |> Keyword.put(:stream, true) |> Keyword.put(:pty, true))
           |> case do
             {:ok, output} -> extract_claude_oauth_token(output)
             {:error, reason} -> {:error, reason}
@@ -858,10 +858,10 @@ defmodule SymphonyElixir.Accounts do
   end
 
   defp do_forward_stdin_to_port(port) do
-    case IO.getn(:stdio, "", 1) do
+    case IO.read(:stdio, :line) do
       data when is_binary(data) ->
         if :erlang.port_info(port) != :undefined do
-          Port.command(port, data)
+          Port.command(port, sanitize_interactive_input(data))
           do_forward_stdin_to_port(port)
         end
 
@@ -870,6 +870,12 @@ defmodule SymphonyElixir.Accounts do
     end
   rescue
     _ -> :ok
+  end
+
+  defp sanitize_interactive_input(data) when is_binary(data) do
+    data
+    |> String.replace("\e[200~", "")
+    |> String.replace("\e[201~", "")
   end
 
   defp receive_provider_stream(port, chunks) do
@@ -919,6 +925,11 @@ defmodule SymphonyElixir.Accounts do
       {"ANTHROPIC_API_KEY", ""}
     ]
   end
+
+  # Claude's setup-token flow should use the operator's currently active Claude
+  # auth, exactly like running `claude setup-token` directly over SSH. The stored
+  # OAuth token is what we isolate and inject into later worker runs.
+  defp claude_login_env, do: []
 
   defp account_matches_host?(%{worker_host: nil}, nil), do: true
   defp account_matches_host?(%{worker_host: nil}, _worker_host), do: false

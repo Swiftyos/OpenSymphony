@@ -121,7 +121,19 @@ defmodule SymphonyElixir.AccountsTest do
     command =
       fake_provider_command!(
         "claude-login",
-        "printf 'Open https://claude.ai/login\\nsk-ant-oat-testtoken123\\n'"
+        """
+        if [ -z "${CLAUDE_CONFIG_DIR+x}" ]; then
+          printf 'claude_config_dir=unset\\n'
+        else
+          printf 'claude_config_dir=set\\n'
+        fi
+        if [ "${ANTHROPIC_API_KEY+x}" = x ] && [ -z "$ANTHROPIC_API_KEY" ]; then
+          printf 'anthropic_api_key=blank\\n'
+        else
+          printf 'anthropic_api_key=not_blank_or_unset\\n'
+        fi
+        printf 'Open https://claude.ai/login\\nsk-ant-oat-testtoken123\\n'
+        """
       )
 
     output =
@@ -139,6 +151,8 @@ defmodule SymphonyElixir.AccountsTest do
       end)
 
     assert output =~ "Open https://claude.ai/login"
+    assert output =~ "claude_config_dir=unset"
+    assert output =~ "anthropic_api_key=not_blank_or_unset"
   end
 
   test "rate-limit resets append session and weekly usage period CSV rows" do
