@@ -474,9 +474,14 @@ Account CLI:
 - `symphony accounts login codex <id> [--email <email>]`
   - Runs Codex login with an isolated `CODEX_HOME` under the account store.
 - `symphony accounts login claude <id> [--email <email>] [--token-stdin|--token-file <path>|--token-env <VAR>]`
-  - Streams Claude `setup-token` output so browser auth URLs are visible over SSH, then stores the
-    emitted OAuth token for later injection via `CLAUDE_CODE_OAUTH_TOKEN`.
+  - Runs Claude `setup-token` against the operator's currently active Claude CLI auth, streams output
+    so browser auth URLs are visible over SSH, then stores the emitted OAuth token for later
+    injection via `CLAUDE_CODE_OAUTH_TOKEN`.
   - Token options bypass browser login and store an already obtained OAuth token.
+- `symphony accounts import claude <id> [--email <email>] [--from <CLAUDE_CONFIG_DIR>]`
+  - Copies the currently working Claude CLI auth/config into the managed account's isolated
+    `CLAUDE_CONFIG_DIR`. This is the preferred SSH flow when direct `claude` login works but
+    `setup-token` is unreliable.
 - `symphony accounts list [backend]`
 - `symphony accounts verify <backend> <id>`
 - `symphony accounts pause <backend> <id> [--until <timestamp>] [--reason <text>]`

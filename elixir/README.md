@@ -285,16 +285,24 @@ CLI is available:
 
 ```bash
 ./bin/symphony accounts login codex personal --email you@example.com
-./bin/symphony accounts login claude work --email you@company.com
+claude
+./bin/symphony accounts import claude work --email you@company.com
 ./bin/symphony accounts list
 ```
 
-Codex accounts use an isolated `CODEX_HOME`; Claude accounts mint a token from your currently active
-Claude CLI auth, store it, and inject it as `CLAUDE_CODE_OAUTH_TOKEN` for worker runs. Claude
-`setup-token` output is streamed live, so SSH users can open the printed auth URL in another
-browser. If you already have a token, avoid browser login with `--token-stdin`,
-`--token-file <path>`, or `--token-env <VAR>`. If an account is already maxed out, pause it before
-starting Symphony:
+Codex accounts use an isolated `CODEX_HOME`. For Claude, the most reliable SSH flow is to sign in
+or switch accounts with the Claude CLI directly, then import the active Claude auth/config into the
+managed account with `accounts import claude <id>`. Repeat the direct Claude login plus import for
+each account id. If your direct Claude CLI uses a non-default config directory, pass it explicitly:
+
+```bash
+./bin/symphony accounts import claude work --email you@company.com --from "$CLAUDE_CONFIG_DIR"
+```
+
+Claude `accounts login` is still available for token-based onboarding: it runs `setup-token` and
+stores the emitted OAuth token for later injection via `CLAUDE_CODE_OAUTH_TOKEN`. If you already
+have a token, avoid browser login with `--token-stdin`, `--token-file <path>`, or
+`--token-env <VAR>`. If an account is already maxed out, pause it before starting Symphony:
 
 ```bash
 ./bin/symphony accounts pause codex personal --reason "daily quota exhausted"
