@@ -648,9 +648,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end)
 
     rate_limits = %{
-      "limit_id" => "codex",
-      "primary" => %{"remaining" => 90, "limit" => 100},
-      "secondary" => nil,
+      "session" => %{"remaining" => 90, "limit" => 100},
+      "weekly" => nil,
       "credits" => %{"has_credits" => false, "unlimited" => false, "balance" => nil}
     }
 
@@ -2010,6 +2009,135 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
              "agent message streaming: writing workpad reconciliation update"
 
     assert StatusDashboard.humanize_codex_message(fallback_reasoning) == "reasoning update"
+  end
+
+  test "orchestrator marks only the selected account exhausted after a quota exit" do
+    store_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-orchestrator-accounts-#{System.unique_integer([:positive])}"
+      )
+
+    on_exit(fn -> File.rm_rf(store_root) end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      agent_backend: "codex",
+      accounts_enabled: true,
+      accounts_store_root: store_root,
+      accounts_exhausted_cooldown_ms: 60_000
+    )
+
+    settings = Config.settings!()
+
+    {:ok, selected_account} =
+      SymphonyElixir.Accounts.create_or_update(
+        "codex",
+        "selected",
+        [email: "selected@example.com"],
+        settings
+      )
+
+    {:ok, other_account} =
+      SymphonyElixir.Accounts.create_or_update(
+        "codex",
+        "other",
+        [email: "other@example.com"],
+        settings
+      )
+
+    issue_id = "issue-account-quota"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-ACCT-429",
+      title: "Quota retry",
+      description: "Account quota failure",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-ACCT-429"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :AccountQuotaOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    worker =
+      spawn(fn ->
+        receive do
+          :quota -> exit({:shutdown, :quota_exhausted})
+        end
+      end)
+
+    initial_state = :sys.get_state(pid)
+
+    :sys.replace_state(pid, fn _state ->
+      ref = Process.monitor(worker)
+
+      running_entry =
+        %{
+          pid: worker,
+          ref: ref,
+          identifier: issue.identifier,
+          issue: issue,
+          backend: "codex",
+          effort: nil,
+          stall_timeout_ms: 300_000,
+          worker_host: nil,
+          workspace_path: nil,
+          session_id: nil,
+          turn_count: 0,
+          retry_attempt: 0,
+          started_at: DateTime.utc_now(),
+          account: selected_account,
+          account_summary: SymphonyElixir.Accounts.account_summary(selected_account),
+          account_id: selected_account.id,
+          account_email: selected_account.email,
+          account_state: selected_account.state,
+          account_credential_kind: selected_account.credential_kind,
+          last_codex_message: nil,
+          last_codex_timestamp: nil,
+          last_codex_event: nil,
+          codex_app_server_pid: nil,
+          codex_input_tokens: 0,
+          codex_output_tokens: 0,
+          codex_total_tokens: 0,
+          codex_last_reported_input_tokens: 0,
+          codex_last_reported_output_tokens: 0,
+          codex_last_reported_total_tokens: 0
+        }
+
+      %{
+        initial_state
+        | running: %{issue_id => running_entry},
+          claimed: MapSet.put(initial_state.claimed, issue_id)
+      }
+    end)
+
+    send(worker, :quota)
+
+    snapshot =
+      wait_for_snapshot(
+        pid,
+        fn snapshot ->
+          snapshot.retrying != []
+        end,
+        1_000
+      )
+
+    assert [%{issue_id: ^issue_id, error: error}] = snapshot.retrying
+    assert error =~ "quota_exhausted"
+
+    assert {:ok, selected_after} =
+             SymphonyElixir.Accounts.get("codex", selected_account.id, settings)
+
+    assert {:ok, other_after} = SymphonyElixir.Accounts.get("codex", other_account.id, settings)
+    assert selected_after.state == "exhausted"
+    assert selected_after.failure_reason =~ "quota_exhausted"
+    assert other_after.state == "unknown"
   end
 
   test "application stop renders offline status" do

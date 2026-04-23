@@ -619,6 +619,10 @@ defmodule SymphonyElixir.CodexAppServerTest do
         printf 'ENV:OTEL_EXPORTER_OTLP_PROTOCOL=%s\n' "$OTEL_EXPORTER_OTLP_PROTOCOL" >> "$trace_file"
       fi
 
+      if [ -n "${CODEX_HOME:-}" ]; then
+        printf 'ENV:CODEX_HOME=%s\n' "$CODEX_HOME" >> "$trace_file"
+      fi
+
       while IFS= read -r line; do
         count=$((count + 1))
         printf 'JSON:%s\n' "$line" >> "$trace_file"
@@ -659,10 +663,19 @@ defmodule SymphonyElixir.CodexAppServerTest do
         telemetry_include_metrics: true,
         telemetry_include_logs: true,
         telemetry_resource_attributes: %{"environment" => "test"},
+        accounts_store_root: Path.join(test_root, "accounts"),
         instance_name: "test-instance"
       )
 
-      assert {:ok, _result} = AppServer.run(workspace, "Telemetry test", issue)
+      assert {:ok, account} =
+               SymphonyElixir.Accounts.create_or_update(
+                 "codex",
+                 "primary",
+                 [email: "primary@example.com"],
+                 Config.settings!()
+               )
+
+      assert {:ok, _result} = AppServer.run(workspace, "Telemetry test", issue, account: account)
 
       codex_config_path = Path.join(workspace, ".codex/config.toml")
       assert File.exists?(codex_config_path)
@@ -678,7 +691,13 @@ defmodule SymphonyElixir.CodexAppServerTest do
       assert trace =~ "linear.issue.identifier=MT-1001-TEL"
       assert trace =~ "symphony.backend=codex"
       assert trace =~ "symphony.instance=test-instance"
+      assert trace =~ "symphony.account.id=primary"
+      assert trace =~ "symphony.account.email=primary%40example.com"
+      assert trace =~ "symphony.account.backend=codex"
+      assert trace =~ "symphony.account.state=unknown"
+      assert trace =~ "symphony.account.credential_kind=codex_home"
       assert trace =~ "environment=test"
+      assert trace =~ "ENV:CODEX_HOME=#{account.codex_home}"
       assert trace =~ "ENV:OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:11338"
       assert trace =~ "ENV:OTEL_EXPORTER_OTLP_PROTOCOL=grpc"
     after
@@ -699,6 +718,7 @@ defmodule SymphonyElixir.CodexAppServerTest do
       File.write!(user_config_path, user_config)
 
       codex_binary = Path.join(test_root, "fake-codex")
+
       File.write!(codex_binary, """
       #!/bin/sh
       count=0
@@ -743,6 +763,7 @@ defmodule SymphonyElixir.CodexAppServerTest do
       File.mkdir_p!(workspace)
 
       codex_binary = Path.join(test_root, "fake-codex")
+
       File.write!(codex_binary, """
       #!/bin/sh
       count=0
@@ -798,6 +819,7 @@ defmodule SymphonyElixir.CodexAppServerTest do
       File.mkdir_p!(workspace)
 
       codex_binary = Path.join(test_root, "fake-codex")
+
       File.write!(codex_binary, """
       #!/bin/sh
       count=0

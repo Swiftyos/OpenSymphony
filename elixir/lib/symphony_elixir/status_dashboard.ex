@@ -618,7 +618,12 @@ defmodule SymphonyElixir.StatusDashboard do
     turn_count = Map.get(running_entry, :turn_count, 0)
     age = format_cell(format_runtime_and_turns(runtime_seconds, turn_count), @running_age_width)
     event = running_entry.last_agent_event || "none"
-    event_label = format_cell(summarize_message(running_entry.last_agent_message), running_event_width)
+
+    event_label =
+      running_entry
+      |> running_account_prefix()
+      |> append_running_event(summarize_message(running_entry.last_agent_message))
+      |> format_cell(running_event_width)
 
     tokens = format_count(total_tokens) |> format_cell(@running_tokens_width, :right)
 
@@ -826,6 +831,45 @@ defmodule SymphonyElixir.StatusDashboard do
 
   defp running_entry_effort_label(_running_entry), do: "default"
 
+  defp running_account_prefix(running_entry) when is_map(running_entry) do
+    account_id = Map.get(running_entry, :account_id)
+    account_email = Map.get(running_entry, :account_email)
+    account_state = Map.get(running_entry, :account_state)
+    account_reset_at = Map.get(running_entry, :account_reset_at)
+
+    cond do
+      is_binary(account_email) and account_email != "" ->
+        account_status(account_email, account_state, account_reset_at)
+
+      is_binary(account_id) and account_id != "" ->
+        account_status(account_id, account_state, account_reset_at)
+
+      true ->
+        nil
+    end
+  end
+
+  defp running_account_prefix(_running_entry), do: nil
+
+  defp account_status(label, state, reset_at) do
+    state_part =
+      case state do
+        value when is_binary(value) and value != "" -> " #{value}"
+        _ -> ""
+      end
+
+    reset_part =
+      case reset_at do
+        value when is_binary(value) and value != "" -> " reset=#{value}"
+        _ -> ""
+      end
+
+    "acct #{label}#{state_part}#{reset_part}"
+  end
+
+  defp append_running_event(nil, event), do: event
+  defp append_running_event(account_prefix, event), do: account_prefix <> " | " <> event
+
   defp terminal_columns do
     case :io.columns() do
       {:ok, columns} when is_integer(columns) and columns > 0 ->
@@ -967,18 +1011,18 @@ defmodule SymphonyElixir.StatusDashboard do
 
   defp format_rate_limits(rate_limits) when is_map(rate_limits) do
     limit_id =
-      map_value(rate_limits, ["limit_id", :limit_id, "limit_name", :limit_name]) ||
+      map_value(rate_limits, ["limit_id", :limit_id, "limitId", :limitId, "limit_name", :limit_name, "limitName", :limitName]) ||
         "unknown"
 
-    primary = format_rate_limit_bucket(map_value(rate_limits, ["primary", :primary]))
-    secondary = format_rate_limit_bucket(map_value(rate_limits, ["secondary", :secondary]))
+    session = format_rate_limit_bucket(map_value(rate_limits, ["session", :session]) || map_value(rate_limits, ["primary", :primary]))
+    weekly = format_rate_limit_bucket(map_value(rate_limits, ["weekly", :weekly]) || map_value(rate_limits, ["secondary", :secondary]))
     credits = format_rate_limit_credits(map_value(rate_limits, ["credits", :credits]))
 
     colorize(to_string(limit_id), @ansi_yellow) <>
       colorize(" | ", @ansi_gray) <>
-      colorize("primary #{primary}", @ansi_cyan) <>
+      colorize("session #{session}", @ansi_cyan) <>
       colorize(" | ", @ansi_gray) <>
-      colorize("secondary #{secondary}", @ansi_cyan) <>
+      colorize("weekly #{weekly}", @ansi_cyan) <>
       colorize(" | ", @ansi_gray) <>
       colorize(credits, @ansi_green)
   end
@@ -1891,16 +1935,16 @@ defmodule SymphonyElixir.StatusDashboard do
   defp format_rate_limits_summary(nil), do: "n/a"
 
   defp format_rate_limits_summary(rate_limits) when is_map(rate_limits) do
-    primary = map_value(rate_limits, ["primary", :primary])
-    secondary = map_value(rate_limits, ["secondary", :secondary])
+    session = map_value(rate_limits, ["session", :session]) || map_value(rate_limits, ["primary", :primary])
+    weekly = map_value(rate_limits, ["weekly", :weekly]) || map_value(rate_limits, ["secondary", :secondary])
 
-    primary_text = format_rate_limit_bucket_summary(primary)
-    secondary_text = format_rate_limit_bucket_summary(secondary)
+    session_text = format_rate_limit_bucket_summary(session)
+    weekly_text = format_rate_limit_bucket_summary(weekly)
 
     cond do
-      primary_text != nil and secondary_text != nil -> "primary #{primary_text}; secondary #{secondary_text}"
-      primary_text != nil -> "primary #{primary_text}"
-      secondary_text != nil -> "secondary #{secondary_text}"
+      session_text != nil and weekly_text != nil -> "session #{session_text}; weekly #{weekly_text}"
+      session_text != nil -> "session #{session_text}"
+      weekly_text != nil -> "weekly #{weekly_text}"
       true -> "n/a"
     end
   end

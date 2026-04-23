@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRoute, AgentRunner, Config, IssueConfig, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{Accounts, AgentRoute, AgentRunner, Config, IssueConfig, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Linear.Issue
 
   @continuation_retry_delay_ms 1_000
@@ -138,6 +138,7 @@ defmodule SymphonyElixir.Orchestrator do
       issue_id ->
         {running_entry, state} = pop_running_entry(state, issue_id)
         state = record_session_completion_totals(state, running_entry)
+        record_account_completion(running_entry, reason)
         session_id = running_entry_session_id(running_entry)
 
         state =
@@ -202,6 +203,11 @@ defmodule SymphonyElixir.Orchestrator do
       running_entry ->
         {updated_running_entry, token_delta} = integrate_codex_update(running_entry, update)
 
+        updated_running_entry =
+          updated_running_entry
+          |> record_account_update(update, token_delta)
+          |> refresh_running_account()
+
         state =
           state
           |> apply_codex_token_delta(token_delta)
@@ -224,6 +230,11 @@ defmodule SymphonyElixir.Orchestrator do
 
       running_entry ->
         {updated_running_entry, token_delta} = integrate_agent_update(running_entry, update)
+
+        updated_running_entry =
+          updated_running_entry
+          |> record_account_update(update, token_delta)
+          |> refresh_running_account()
 
         state =
           state
@@ -720,7 +731,21 @@ defmodule SymphonyElixir.Orchestrator do
             state
 
           worker_host ->
-            spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host, route, issue_config)
+            case select_account_for_dispatch(route.backend, worker_host, state, issue_config.settings) do
+              {:ok, account} ->
+                spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host, route, issue_config, account)
+
+              {:error, selection_error} ->
+                Logger.warning("No usable account for #{issue_context(issue)} backend=#{route.backend}: #{format_account_selection_error(selection_error)}")
+
+                state
+                |> schedule_issue_retry(
+                  issue.id,
+                  next_retry_attempt_from_attempt(attempt),
+                  account_retry_metadata(issue, worker_host, selection_error)
+                )
+                |> claim_issue(issue.id)
+            end
         end
 
       {:error, reason} ->
@@ -729,7 +754,7 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host, route, issue_config) do
+  defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host, route, issue_config, account) do
     case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
            AgentRunner.run(
              issue,
@@ -737,21 +762,22 @@ defmodule SymphonyElixir.Orchestrator do
              attempt: attempt,
              worker_host: worker_host,
              route: route,
-             issue_config: issue_config
+             issue_config: issue_config,
+             account: account
            )
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
 
         Logger.info(
-          "Dispatching issue to agent: #{issue_context(issue)} backend=#{route.backend} effort=#{route.effort || "default"} pid=#{inspect(pid)} attempt=#{inspect(attempt)} worker_host=#{worker_host || "local"}"
+          "Dispatching issue to agent: #{issue_context(issue)} backend=#{route.backend} effort=#{route.effort || "default"} pid=#{inspect(pid)} attempt=#{inspect(attempt)} worker_host=#{worker_host || "local"} account=#{account_log_label(account)}"
         )
 
         running =
           Map.put(
             state.running,
             issue.id,
-            new_running_entry(issue, pid, ref, worker_host, attempt, route)
+            new_running_entry(issue, pid, ref, worker_host, attempt, route, account)
           )
 
         %{
@@ -773,7 +799,9 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp new_running_entry(issue, pid, ref, worker_host, attempt, route) do
+  defp new_running_entry(issue, pid, ref, worker_host, attempt, route, account) do
+    account_summary = Accounts.account_summary(account)
+
     base = %{
       pid: pid,
       ref: ref,
@@ -787,7 +815,13 @@ defmodule SymphonyElixir.Orchestrator do
       session_id: nil,
       turn_count: 0,
       retry_attempt: normalize_retry_attempt(attempt),
-      started_at: DateTime.utc_now()
+      started_at: DateTime.utc_now(),
+      account: account,
+      account_summary: account_summary,
+      account_id: account_value(account_summary, :id),
+      account_email: account_value(account_summary, :email),
+      account_state: account_value(account_summary, :state),
+      account_credential_kind: account_value(account_summary, :credential_kind)
     }
 
     case route.backend do
@@ -1010,10 +1044,15 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp retry_delay(attempt, metadata) when is_integer(attempt) and attempt > 0 and is_map(metadata) do
-    if metadata[:delay_type] == :continuation and attempt == 1 do
-      @continuation_retry_delay_ms
-    else
-      failure_retry_delay(attempt)
+    cond do
+      is_integer(metadata[:delay_ms]) and metadata[:delay_ms] > 0 ->
+        min(metadata[:delay_ms], Config.settings!().agent.max_retry_backoff_ms)
+
+      metadata[:delay_type] == :continuation and attempt == 1 ->
+        @continuation_retry_delay_ms
+
+      true ->
+        failure_retry_delay(attempt)
     end
   end
 
@@ -1032,6 +1071,13 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp next_retry_attempt_from_attempt(attempt) when is_integer(attempt) and attempt > 0, do: attempt + 1
+  defp next_retry_attempt_from_attempt(_attempt), do: nil
+
+  defp claim_issue(%State{} = state, issue_id) when is_binary(issue_id) do
+    %{state | claimed: MapSet.put(state.claimed, issue_id)}
+  end
+
   defp pick_retry_identifier(issue_id, previous_retry, metadata) do
     metadata[:identifier] || Map.get(previous_retry, :identifier) || issue_id
   end
@@ -1047,6 +1093,58 @@ defmodule SymphonyElixir.Orchestrator do
   defp pick_retry_workspace_path(previous_retry, metadata) do
     metadata[:workspace_path] || Map.get(previous_retry, :workspace_path)
   end
+
+  defp select_account_for_dispatch(backend, worker_host, %State{} = state, settings)
+       when backend in ["codex", "claude"] do
+    Accounts.select_for_dispatch(backend, worker_host, state.running, settings)
+  end
+
+  defp select_account_for_dispatch(_backend, _worker_host, _state, _settings), do: {:ok, nil}
+
+  defp account_retry_metadata(%Issue{} = issue, worker_host, selection_error) when is_map(selection_error) do
+    %{
+      identifier: issue.identifier,
+      error: format_account_selection_error(selection_error),
+      worker_host: worker_host,
+      delay_ms: account_retry_delay_ms(selection_error)
+    }
+  end
+
+  defp format_account_selection_error(%{backend: backend, reason: reason} = selection_error) do
+    next_reset =
+      case Map.get(selection_error, :next_available_at) do
+        reset when is_binary(reset) and reset != "" -> "; next reset at #{reset}"
+        _ -> ""
+      end
+
+    skipped =
+      selection_error
+      |> Map.get(:skipped, [])
+      |> Enum.map_join("; ", fn skipped ->
+        account_id = Map.get(skipped, :account_id) || Map.get(skipped, "account_id") || "unknown"
+        email = Map.get(skipped, :email) || Map.get(skipped, "email")
+        label = if is_binary(email) and email != "", do: "#{account_id}(#{email})", else: account_id
+        skipped_reason = Map.get(skipped, :reason) || Map.get(skipped, "reason") || "unavailable"
+        "#{label}: #{skipped_reason}"
+      end)
+
+    skipped_suffix = if skipped == "", do: "", else: "; skipped #{skipped}"
+    "#{reason || "no usable #{backend} accounts"}#{next_reset}#{skipped_suffix}"
+  end
+
+  defp format_account_selection_error(reason), do: inspect(reason)
+
+  defp account_retry_delay_ms(%{next_available_at: next_available_at}) when is_binary(next_available_at) do
+    case DateTime.from_iso8601(next_available_at) do
+      {:ok, timestamp, _offset} ->
+        max(1_000, DateTime.diff(timestamp, DateTime.utc_now(), :millisecond))
+
+      _ ->
+        nil
+    end
+  end
+
+  defp account_retry_delay_ms(_selection_error), do: nil
 
   defp maybe_put_runtime_value(running_entry, _key, nil), do: running_entry
 
@@ -1249,6 +1347,13 @@ defmodule SymphonyElixir.Orchestrator do
       effort: Map.get(metadata, :effort),
       worker_host: Map.get(metadata, :worker_host),
       workspace_path: Map.get(metadata, :workspace_path),
+      account: Map.get(metadata, :account_summary),
+      account_id: Map.get(metadata, :account_id),
+      account_email: Map.get(metadata, :account_email),
+      account_state: Map.get(metadata, :account_state),
+      account_credential_kind: Map.get(metadata, :account_credential_kind),
+      account_reset_at: account_reset_at(metadata),
+      account_failure_reason: account_failure_reason(metadata),
       session_id: metadata.session_id,
       agent_server_pid: running_entry_agent_server_pid(metadata),
       agent_input_tokens: running_entry_input_tokens(metadata),
@@ -1262,6 +1367,30 @@ defmodule SymphonyElixir.Orchestrator do
       runtime_seconds: running_seconds(metadata.started_at, now)
     }
   end
+
+  defp account_reset_at(metadata) when is_map(metadata) do
+    case Map.get(metadata, :account_summary) do
+      %{exhausted_until: exhausted_until} when is_binary(exhausted_until) -> exhausted_until
+      %{"exhausted_until" => exhausted_until} when is_binary(exhausted_until) -> exhausted_until
+      %{paused_until: paused_until} when is_binary(paused_until) -> paused_until
+      %{"paused_until" => paused_until} when is_binary(paused_until) -> paused_until
+      %{latest_reset_at: latest_reset_at} when is_binary(latest_reset_at) -> latest_reset_at
+      %{"latest_reset_at" => latest_reset_at} when is_binary(latest_reset_at) -> latest_reset_at
+      _ -> nil
+    end
+  end
+
+  defp account_reset_at(_metadata), do: nil
+
+  defp account_failure_reason(metadata) when is_map(metadata) do
+    case Map.get(metadata, :account_summary) do
+      %{failure_reason: reason} when is_binary(reason) -> reason
+      %{"failure_reason" => reason} when is_binary(reason) -> reason
+      _ -> nil
+    end
+  end
+
+  defp account_failure_reason(_metadata), do: nil
 
   defp snapshot_agent_totals(%State{} = state) do
     state.agent_totals
@@ -1606,6 +1735,88 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp running_entry_stall_timeout_ms(_running_entry), do: Config.agent_stall_timeout_ms()
 
+  defp record_account_update(running_entry, update, token_delta) when is_map(running_entry) do
+    account = Map.get(running_entry, :account)
+
+    Accounts.record_usage(account, token_delta, Map.get(update, :timestamp))
+
+    case extract_rate_limits(update) do
+      %{} = rate_limits -> Accounts.record_rate_limits(account, rate_limits, Config.settings!())
+      _ -> :ok
+    end
+
+    if account_failure_update?(update) and Accounts.quota_error?(update) do
+      Accounts.mark_exhausted(account, update, Config.settings!())
+    end
+
+    running_entry
+  end
+
+  defp record_account_update(running_entry, _update, _token_delta), do: running_entry
+
+  defp record_account_completion(running_entry, :normal) when is_map(running_entry) do
+    Accounts.mark_success(Map.get(running_entry, :account), Config.settings!())
+  end
+
+  defp record_account_completion(running_entry, reason) when is_map(running_entry) do
+    if Accounts.quota_error?(reason) do
+      Accounts.mark_exhausted(Map.get(running_entry, :account), reason, Config.settings!())
+    else
+      :ok
+    end
+  end
+
+  defp record_account_completion(_running_entry, _reason), do: :ok
+
+  defp refresh_running_account(%{account: %{backend: backend, id: id}} = running_entry)
+       when is_binary(backend) and is_binary(id) do
+    case Accounts.get(backend, id, Config.settings!()) do
+      {:ok, account} ->
+        account_summary = Accounts.account_summary(account)
+
+        running_entry
+        |> Map.put(:account, account)
+        |> Map.put(:account_summary, account_summary)
+        |> Map.put(:account_id, account_value(account_summary, :id))
+        |> Map.put(:account_email, account_value(account_summary, :email))
+        |> Map.put(:account_state, account_value(account_summary, :state))
+        |> Map.put(:account_credential_kind, account_value(account_summary, :credential_kind))
+
+      _ ->
+        running_entry
+    end
+  end
+
+  defp refresh_running_account(running_entry), do: running_entry
+
+  defp account_failure_update?(%{event: event}) do
+    event in [
+      :startup_failed,
+      :turn_failed,
+      :turn_ended_with_error,
+      "startup_failed",
+      "turn_failed",
+      "turn_ended_with_error"
+    ]
+  end
+
+  defp account_failure_update?(_update), do: false
+
+  defp account_value(nil, _key), do: nil
+
+  defp account_value(account, key) when is_map(account) do
+    Map.get(account, key) || Map.get(account, Atom.to_string(key))
+  end
+
+  defp account_log_label(nil), do: "host-auth"
+
+  defp account_log_label(%{backend: backend, id: id, email: email}) when is_binary(backend) and is_binary(id) do
+    email_suffix = if is_binary(email) and email != "", do: "(#{email})", else: ""
+    "#{backend}:#{id}#{email_suffix}"
+  end
+
+  defp account_log_label(account), do: inspect(Accounts.account_summary(account), limit: 4)
+
   defp apply_codex_token_delta(
          %{codex_totals: codex_totals} = state,
          %{input_tokens: input, output_tokens: output, total_tokens: total} = token_delta
@@ -1935,22 +2146,41 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp rate_limits_map?(payload) when is_map(payload) do
-    limit_id =
-      Map.get(payload, "limit_id") ||
-        Map.get(payload, :limit_id) ||
-        Map.get(payload, "limit_name") ||
-        Map.get(payload, :limit_name)
-
-    has_buckets =
-      Enum.any?(
-        ["primary", :primary, "secondary", :secondary, "credits", :credits],
-        &Map.has_key?(payload, &1)
-      )
-
-    !is_nil(limit_id) and has_buckets
+    Enum.any?(
+      ["session", :session, "weekly", :weekly, "primary", :primary, "secondary", :secondary, "credits", :credits],
+      fn key -> payload |> Map.get(key) |> rate_limit_bucket_payload?() end
+    )
   end
 
   defp rate_limits_map?(_payload), do: false
+
+  defp rate_limit_bucket_payload?(bucket) when is_map(bucket) do
+    Enum.any?(
+      [
+        "remaining",
+        :remaining,
+        "limit",
+        :limit,
+        "reset_at",
+        :reset_at,
+        "resetAt",
+        :resetAt,
+        "reset_in_seconds",
+        :reset_in_seconds,
+        "reset_after_seconds",
+        :reset_after_seconds,
+        "has_credits",
+        :has_credits,
+        "unlimited",
+        :unlimited,
+        "balance",
+        :balance
+      ],
+      &Map.has_key?(bucket, &1)
+    )
+  end
+
+  defp rate_limit_bucket_payload?(_bucket), do: false
 
   defp explicit_map_at_paths(payload, paths, map_predicate)
        when is_map(payload) and is_list(paths) and is_function(map_predicate, 1) do

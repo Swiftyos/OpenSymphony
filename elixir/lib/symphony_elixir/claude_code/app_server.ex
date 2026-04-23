@@ -6,7 +6,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
   require Logger
 
   alias SymphonyElixir.ClaudeCode.Tooling
-  alias SymphonyElixir.{Config, SSH, Telemetry}
+  alias SymphonyElixir.{Accounts, Config, SSH, Telemetry}
 
   @poll_interval_ms 250
   @port_line_bytes 1_048_576
@@ -24,6 +24,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
           permission_mode: String.t(),
           model: String.t() | nil,
           effort: String.t() | nil,
+          account: map() | nil,
           turn_timeout_ms: pos_integer(),
           read_timeout_ms: pos_integer(),
           stall_timeout_ms: non_neg_integer()
@@ -43,22 +44,24 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
   @spec start_session(Path.t(), keyword()) :: {:ok, session()} | {:error, term()}
   def start_session(workspace, opts \\ []) do
     worker_host = Keyword.get(opts, :worker_host)
+    account = Keyword.get(opts, :account)
     session_id = Ecto.UUID.generate()
     issue = Keyword.get(opts, :issue)
 
     with {:ok, settings} <- Config.claude_runtime_settings(effort: Keyword.get(opts, :effort)),
          {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
-         {:ok, port} <- start_port(expanded_workspace, worker_host, session_id, settings, issue) do
+         {:ok, port} <- start_port(expanded_workspace, worker_host, session_id, settings, issue, account) do
       {:ok,
        %{
          port: port,
-         metadata: port_metadata(port, worker_host),
+         metadata: port_metadata(port, worker_host, account),
          session_id: session_id,
          workspace: expanded_workspace,
          worker_host: worker_host,
          permission_mode: settings.permission_mode,
          model: settings.model,
          effort: settings.effort,
+         account: account,
          turn_timeout_ms: settings.turn_timeout_ms,
          read_timeout_ms: settings.read_timeout_ms,
          stall_timeout_ms: settings.stall_timeout_ms
@@ -158,7 +161,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
     end
   end
 
-  defp start_port(workspace, nil, session_id, settings, issue) do
+  defp start_port(workspace, nil, session_id, settings, issue, account) do
     executable = System.find_executable("bash")
 
     if is_nil(executable) do
@@ -172,7 +175,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
            :exit_status,
            :stderr_to_stdout,
            args: [~c"-lc", String.to_charlist(launch_command(session_id, settings))],
-           env: port_environment(issue),
+           env: port_environment(issue, account),
            cd: String.to_charlist(workspace),
            line: @port_line_bytes
          ]
@@ -180,8 +183,8 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
     end
   end
 
-  defp start_port(workspace, worker_host, session_id, settings, issue) when is_binary(worker_host) do
-    SSH.start_port(worker_host, remote_launch_command(workspace, session_id, settings, issue), line: @port_line_bytes)
+  defp start_port(workspace, worker_host, session_id, settings, issue, account) when is_binary(worker_host) do
+    SSH.start_port(worker_host, remote_launch_command(workspace, session_id, settings, issue, account), line: @port_line_bytes)
   end
 
   defp launch_command(session_id, settings) do
@@ -218,39 +221,40 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
 
   defp maybe_append_effort(parts, _effort), do: parts
 
-  defp remote_launch_command(workspace, session_id, settings, issue) when is_binary(workspace) do
+  defp remote_launch_command(workspace, session_id, settings, issue, account) when is_binary(workspace) do
     [
       "cd #{shell_escape(workspace)}",
-      remote_environment_exports(issue),
+      remote_environment_exports(issue, account),
       "exec #{launch_command(session_id, settings)}"
     ]
     |> Enum.reject(&(&1 in [nil, ""]))
     |> Enum.join(" && ")
   end
 
-  defp remote_environment_exports(issue) do
+  defp remote_environment_exports(issue, account) do
     Config.settings!().tracker
-    |> tracker_env_pairs(issue)
+    |> tracker_env_pairs(issue, account)
     |> Enum.map(fn {key, value} -> "export #{key}=#{shell_escape(value)}" end)
     |> Enum.join(" && ")
   end
 
-  defp port_environment(issue) do
+  defp port_environment(issue, account) do
     Config.settings!().tracker
-    |> tracker_env_pairs(issue)
+    |> tracker_env_pairs(issue, account)
     |> Enum.map(fn {key, value} ->
       {String.to_charlist(key), String.to_charlist(value)}
     end)
   end
 
-  defp tracker_env_pairs(tracker, issue) do
+  defp tracker_env_pairs(tracker, issue, account) do
     settings = Config.settings!()
 
     []
     |> maybe_put_env("SYMPHONY_LINEAR_API_KEY", tracker.kind == "linear" && tracker.api_key)
     |> maybe_put_env("SYMPHONY_LINEAR_ENDPOINT", tracker.kind == "linear" && tracker.endpoint)
     |> maybe_put_env("OPENROUTER_API_KEY", settings.providers.openrouter_api_key)
-    |> Kernel.++(Telemetry.env_pairs("claude", issue))
+    |> Kernel.++(Accounts.credential_env(account))
+    |> Kernel.++(Telemetry.env_pairs("claude", issue, account))
   end
 
   defp maybe_put_env(entries, _key, nil), do: entries
@@ -501,7 +505,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
 
   defp issue_title(_issue), do: "agent turn"
 
-  defp port_metadata(port, worker_host) when is_port(port) do
+  defp port_metadata(port, worker_host, account) when is_port(port) do
     base_metadata =
       case :erlang.port_info(port, :os_pid) do
         {:os_pid, os_pid} ->
@@ -511,9 +515,15 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
           %{}
       end
 
-    case worker_host do
-      host when is_binary(host) -> Map.put(base_metadata, :worker_host, host)
-      _ -> base_metadata
+    base_metadata =
+      case worker_host do
+        host when is_binary(host) -> Map.put(base_metadata, :worker_host, host)
+        _ -> base_metadata
+      end
+
+    case Accounts.account_summary(account) do
+      nil -> base_metadata
+      account_summary -> Map.put(base_metadata, :account, account_summary)
     end
   end
 

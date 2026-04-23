@@ -160,6 +160,14 @@ defmodule SymphonyElixir.TestSupport do
           worker_ssh_hosts: [],
           worker_max_concurrent_agents_per_host: nil,
           providers_openrouter_api_key: nil,
+          accounts_enabled: false,
+          accounts_store_root: "~/.symphony/accounts",
+          accounts_allow_host_auth_fallback: false,
+          accounts_rotation_strategy: "usage_aware_round_robin",
+          accounts_max_concurrent_sessions_per_account: 1,
+          accounts_exhausted_cooldown_ms: 300_000,
+          accounts_daily_token_budget: nil,
+          accounts_monthly_token_budget: nil,
           agent_backend: "opencode",
           default_effort: nil,
           max_concurrent_agents: 10,
@@ -221,6 +229,14 @@ defmodule SymphonyElixir.TestSupport do
     worker_ssh_hosts = Keyword.get(config, :worker_ssh_hosts)
     worker_max_concurrent_agents_per_host = Keyword.get(config, :worker_max_concurrent_agents_per_host)
     providers_openrouter_api_key = Keyword.get(config, :providers_openrouter_api_key)
+    accounts_enabled = Keyword.get(config, :accounts_enabled)
+    accounts_store_root = Keyword.get(config, :accounts_store_root)
+    accounts_allow_host_auth_fallback = Keyword.get(config, :accounts_allow_host_auth_fallback)
+    accounts_rotation_strategy = Keyword.get(config, :accounts_rotation_strategy)
+    accounts_max_concurrent_sessions_per_account = Keyword.get(config, :accounts_max_concurrent_sessions_per_account)
+    accounts_exhausted_cooldown_ms = Keyword.get(config, :accounts_exhausted_cooldown_ms)
+    accounts_daily_token_budget = Keyword.get(config, :accounts_daily_token_budget)
+    accounts_monthly_token_budget = Keyword.get(config, :accounts_monthly_token_budget)
     agent_backend = Keyword.get(config, :agent_backend)
     default_effort = Keyword.get(config, :default_effort)
     max_concurrent_agents = Keyword.get(config, :max_concurrent_agents)
@@ -284,6 +300,16 @@ defmodule SymphonyElixir.TestSupport do
         "  root: #{yaml_value(workspace_root)}",
         worker_yaml(worker_ssh_hosts, worker_max_concurrent_agents_per_host),
         providers_yaml(providers_openrouter_api_key),
+        accounts_yaml(
+          accounts_enabled,
+          accounts_store_root,
+          accounts_allow_host_auth_fallback,
+          accounts_rotation_strategy,
+          accounts_max_concurrent_sessions_per_account,
+          accounts_exhausted_cooldown_ms,
+          accounts_daily_token_budget,
+          accounts_monthly_token_budget
+        ),
         "agent:",
         "  backend: #{yaml_value(agent_backend)}",
         "  default_effort: #{yaml_value(default_effort)}",
@@ -378,6 +404,14 @@ defmodule SymphonyElixir.TestSupport do
           worker_ssh_hosts: [],
           worker_max_concurrent_agents_per_host: nil,
           providers_openrouter_api_key: nil,
+          accounts_enabled: false,
+          accounts_store_root: "~/.symphony/accounts",
+          accounts_allow_host_auth_fallback: false,
+          accounts_rotation_strategy: "usage_aware_round_robin",
+          accounts_max_concurrent_sessions_per_account: 1,
+          accounts_exhausted_cooldown_ms: 300_000,
+          accounts_daily_token_budget: nil,
+          accounts_monthly_token_budget: nil,
           agent_backend: "codex",
           default_effort: nil,
           max_concurrent_agents: 10,
@@ -436,6 +470,14 @@ defmodule SymphonyElixir.TestSupport do
     worker_ssh_hosts = Keyword.get(config, :worker_ssh_hosts)
     worker_max_concurrent_agents_per_host = Keyword.get(config, :worker_max_concurrent_agents_per_host)
     providers_openrouter_api_key = Keyword.get(config, :providers_openrouter_api_key)
+    accounts_enabled = Keyword.get(config, :accounts_enabled)
+    accounts_store_root = Keyword.get(config, :accounts_store_root)
+    accounts_allow_host_auth_fallback = Keyword.get(config, :accounts_allow_host_auth_fallback)
+    accounts_rotation_strategy = Keyword.get(config, :accounts_rotation_strategy)
+    accounts_max_concurrent_sessions_per_account = Keyword.get(config, :accounts_max_concurrent_sessions_per_account)
+    accounts_exhausted_cooldown_ms = Keyword.get(config, :accounts_exhausted_cooldown_ms)
+    accounts_daily_token_budget = Keyword.get(config, :accounts_daily_token_budget)
+    accounts_monthly_token_budget = Keyword.get(config, :accounts_monthly_token_budget)
     agent_backend = Keyword.get(config, :agent_backend)
     default_effort = Keyword.get(config, :default_effort)
     max_concurrent_agents = Keyword.get(config, :max_concurrent_agents)
@@ -505,6 +547,16 @@ defmodule SymphonyElixir.TestSupport do
         "  root: #{yaml_value(workspace_root)}",
         worker_yaml(worker_ssh_hosts, worker_max_concurrent_agents_per_host),
         providers_yaml(providers_openrouter_api_key),
+        accounts_yaml(
+          accounts_enabled,
+          accounts_store_root,
+          accounts_allow_host_auth_fallback,
+          accounts_rotation_strategy,
+          accounts_max_concurrent_sessions_per_account,
+          accounts_exhausted_cooldown_ms,
+          accounts_daily_token_budget,
+          accounts_monthly_token_budget
+        ),
         "agent:",
         "  backend: #{yaml_value(agent_backend)}",
         "  default_effort: #{yaml_value(default_effort)}",
@@ -613,6 +665,43 @@ defmodule SymphonyElixir.TestSupport do
     [
       "providers:",
       "  openrouter_api_key: #{yaml_value(openrouter_api_key)}"
+    ]
+    |> Enum.reject(&(&1 in [nil, false]))
+    |> Enum.join("\n")
+  end
+
+  defp accounts_yaml(
+         false,
+         "~/.symphony/accounts",
+         false,
+         "usage_aware_round_robin",
+         1,
+         300_000,
+         nil,
+         nil
+       ),
+       do: nil
+
+  defp accounts_yaml(
+         enabled,
+         store_root,
+         allow_host_auth_fallback,
+         rotation_strategy,
+         max_concurrent_sessions_per_account,
+         exhausted_cooldown_ms,
+         daily_token_budget,
+         monthly_token_budget
+       ) do
+    [
+      "accounts:",
+      "  enabled: #{yaml_value(enabled)}",
+      "  store_root: #{yaml_value(store_root)}",
+      "  allow_host_auth_fallback: #{yaml_value(allow_host_auth_fallback)}",
+      "  rotation_strategy: #{yaml_value(rotation_strategy)}",
+      "  max_concurrent_sessions_per_account: #{yaml_value(max_concurrent_sessions_per_account)}",
+      "  exhausted_cooldown_ms: #{yaml_value(exhausted_cooldown_ms)}",
+      !is_nil(daily_token_budget) && "  daily_token_budget: #{yaml_value(daily_token_budget)}",
+      !is_nil(monthly_token_budget) && "  monthly_token_budget: #{yaml_value(monthly_token_budget)}"
     ]
     |> Enum.reject(&(&1 in [nil, false]))
     |> Enum.join("\n")

@@ -12,15 +12,17 @@ defmodule SymphonyElixir.Telemetry do
   @type backend :: String.t()
   @type env_pair :: {String.t(), String.t()}
 
-  @spec env_pairs(backend(), map() | nil) :: [env_pair()]
-  def env_pairs(_backend, nil), do: []
+  @spec env_pairs(backend(), map() | nil, map() | nil) :: [env_pair()]
+  def env_pairs(backend, issue, account \\ nil)
 
-  def env_pairs(backend, issue) when is_binary(backend) and is_map(issue) do
+  def env_pairs(_backend, nil, _account), do: []
+
+  def env_pairs(backend, issue, account) when is_binary(backend) and is_map(issue) do
     if Config.telemetry_enabled?() do
       settings = Config.settings!()
       endpoint = Config.telemetry_otlp_endpoint()
       protocol = Config.telemetry_otlp_protocol()
-      resource_attrs = Config.telemetry_issue_resource_attributes(issue, backend)
+      resource_attrs = Config.telemetry_issue_resource_attributes(issue, backend, account)
       include_traces = settings.telemetry.include_traces
 
       []

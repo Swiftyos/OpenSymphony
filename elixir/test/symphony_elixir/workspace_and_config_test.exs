@@ -1371,6 +1371,46 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert attrs =~ "linear.issue.identifier=MT-123"
     assert attrs =~ "symphony.instance=test-instance"
     assert attrs =~ "environment=test"
+
+    account_attrs =
+      Config.telemetry_issue_resource_attributes(issue, "codex", %{
+        id: "primary",
+        email: "primary@example.com",
+        backend: "codex",
+        state: "healthy",
+        credential_kind: "codex_home"
+      })
+
+    assert account_attrs =~ "symphony.account.id=primary"
+    assert account_attrs =~ "symphony.account.email=primary%40example.com"
+    assert account_attrs =~ "symphony.account.backend=codex"
+    assert account_attrs =~ "symphony.account.state=healthy"
+    assert account_attrs =~ "symphony.account.credential_kind=codex_home"
+  end
+
+  test "config accepts accounts defaults, budgets, and path expansion" do
+    workflow_dir = Path.dirname(Workflow.workflow_file_path())
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      accounts_enabled: true,
+      accounts_store_root: "managed-accounts",
+      accounts_allow_host_auth_fallback: true,
+      accounts_max_concurrent_sessions_per_account: 2,
+      accounts_exhausted_cooldown_ms: 123_000,
+      accounts_daily_token_budget: 10_000,
+      accounts_monthly_token_budget: 200_000
+    )
+
+    config = Config.settings!()
+
+    assert config.accounts.enabled == true
+    assert config.accounts.store_root == Path.expand("managed-accounts", workflow_dir)
+    assert config.accounts.allow_host_auth_fallback == true
+    assert config.accounts.rotation_strategy == "usage_aware_round_robin"
+    assert config.accounts.max_concurrent_sessions_per_account == 2
+    assert config.accounts.exhausted_cooldown_ms == 123_000
+    assert config.accounts.daily_token_budget == 10_000
+    assert config.accounts.monthly_token_budget == 200_000
   end
 
   test "schema parse infers backend from a lone provider block" do

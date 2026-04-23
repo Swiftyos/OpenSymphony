@@ -323,6 +323,7 @@ Top-level keys:
 - `workspace`
 - `hooks`
 - `agent`
+- `accounts`
 - `codex`
 - `telemetry`
 
@@ -444,7 +445,56 @@ fields locally if they want stricter startup checks.
   - Default: `300000` (5 minutes)
   - If `<= 0`, stall detection is disabled.
 
-#### 5.3.7 `telemetry` (object)
+#### 5.3.7 `accounts` (object)
+
+Optional extension for managing multiple authenticated Codex and Claude accounts and selecting one
+per dispatched worker run.
+
+Fields:
+
+- `enabled` (boolean)
+  - Default: `false`
+- `store_root` (path string or `$VAR`)
+  - Default: `~/.symphony/accounts`
+  - Expanded using the same path rules as workspace roots.
+- `allow_host_auth_fallback` (boolean)
+  - Default: `false`
+  - When true, dispatch may use the host's ambient provider auth if no managed account exists.
+- `rotation_strategy` (string)
+  - Default: `usage_aware_round_robin`
+- `max_concurrent_sessions_per_account` (integer)
+  - Default: `1`
+- `exhausted_cooldown_ms` (integer)
+  - Default: `300000` (5 minutes)
+- `daily_token_budget` / `monthly_token_budget` (integer, optional)
+  - Local best-effort token budgets. Accounts at or over budget are skipped.
+
+Account CLI:
+
+- `symphony accounts login codex <id> [--email <email>]`
+  - Runs Codex login with an isolated `CODEX_HOME` under the account store.
+- `symphony accounts login claude <id> [--email <email>]`
+  - Stores the Claude OAuth token for later injection via `CLAUDE_CODE_OAUTH_TOKEN`.
+- `symphony accounts list [backend]`
+- `symphony accounts verify <backend> <id>`
+- `symphony accounts pause <backend> <id> [--until <timestamp>] [--reason <text>]`
+- `symphony accounts resume <backend> <id>`
+- `symphony accounts remove <backend> <id>`
+
+Selection filters disabled accounts, manual pauses, active cooldowns, exhausted rate-limit buckets,
+local token budget exhaustion, and account concurrency before rotating through the remaining
+accounts. If no account is usable, the issue is put into retry/backoff with a skipped-account
+reason. Quota or rate-limit failures observed during startup or a turn mark only the selected
+account as exhausted before the issue is retried.
+
+When provider rate-limit telemetry exposes `session` and `weekly` buckets (or legacy
+`primary`/`secondary` buckets), Symphony tracks local token deltas against the active bucket windows.
+If a bucket reset boundary changes, Symphony appends `usage_periods.csv` in that account directory
+with the account id/email, provider limit id, bucket name, reset transition, usage percentage,
+weekly usage percentage when applicable, and total input/output/token usage observed for that
+period.
+
+#### 5.3.8 `telemetry` (object)
 
 Optional extension for exporting agent telemetry (metrics, logs, and traces) via OpenTelemetry OTLP.
 
@@ -467,7 +517,7 @@ Fields:
   - Default: `{}`
   - Static key-value pairs merged into `OTEL_RESOURCE_ATTRIBUTES` for every agent session.
 
-When enabled, the orchestrator injects OpenTelemetry environment variables into each agent process and tags all signals with the current Linear issue (`linear.issue.id`, `linear.issue.identifier`), backend (`symphony.backend`), and instance (`symphony.instance`).
+When enabled, the orchestrator injects OpenTelemetry environment variables into each agent process and tags all signals with the current Linear issue (`linear.issue.id`, `linear.issue.identifier`), backend (`symphony.backend`), instance (`symphony.instance`), and selected managed account when present (`symphony.account.id`, `symphony.account.email`, `symphony.account.backend`, `symphony.account.state`, `symphony.account.credential_kind`).
 
 ### 5.4 Prompt Template Contract
 

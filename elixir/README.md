@@ -245,6 +245,9 @@ Notes:
   the project dependencies in `hooks.after_create` before invoking `mise` later from other hooks.
 - `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`.
 - `providers.openrouter_api_key` reads from `OPENROUTER_API_KEY` when unset or when value is `$OPENROUTER_API_KEY`.
+- `accounts.enabled` turns on managed Codex/Claude account rotation. Managed accounts live under
+  `accounts.store_root` (default `~/.symphony/accounts`) and are selected per worker run with
+  usage-aware round robin.
 - For path values, `~` is expanded to the home directory.
 - For env-backed path values, use `$VAR`. `workspace.root` resolves `$VAR` before path handling,
   while `opencode.command` stays a shell command string and any `$VAR` expansion there happens in the
@@ -274,6 +277,33 @@ projects:
   `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
 
 ## Backend support
+
+### Managed Accounts
+
+When account rotation is enabled, add accounts one at a time from the same shell where the provider
+CLI is available:
+
+```bash
+./bin/symphony accounts login codex personal --email you@example.com
+./bin/symphony accounts login claude work --email you@company.com
+./bin/symphony accounts list
+```
+
+Codex accounts use an isolated `CODEX_HOME`; Claude accounts store the OAuth token and inject it as
+`CLAUDE_CODE_OAUTH_TOKEN`. If an account is already maxed out, pause it before starting Symphony:
+
+```bash
+./bin/symphony accounts pause codex personal --reason "daily quota exhausted"
+./bin/symphony accounts resume codex personal
+```
+
+During dispatch, Symphony skips paused, disabled, cooling-down, rate-limited, over-budget, and
+already-in-use accounts before rotating through the rest. If every account for a backend is
+unavailable, the issue stays in retry/backoff until an account becomes usable.
+
+Each account directory also gets `usage_periods.csv` when Codex or Claude reports a `session` or
+`weekly` rate-limit reset. Rows include the reset transition, usage percentage, weekly percentage
+where applicable, and local token totals accumulated during that provider period.
 
 ### Codex
 

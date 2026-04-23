@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   """
 
   require Logger
-  alias SymphonyElixir.{Codex.DynamicTool, Config, SSH, Telemetry}
+  alias SymphonyElixir.{Accounts, Codex.DynamicTool, Config, SSH, Telemetry}
 
   @codex_config_marker "# managed-by: symphony"
 
@@ -24,7 +24,8 @@ defmodule SymphonyElixir.Codex.AppServer do
           turn_sandbox_policy: map(),
           thread_id: String.t(),
           workspace: Path.t(),
-          worker_host: String.t() | nil
+          worker_host: String.t() | nil,
+          account: map() | nil
         }
 
   @spec run(Path.t(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
@@ -41,13 +42,14 @@ defmodule SymphonyElixir.Codex.AppServer do
   @spec start_session(Path.t(), keyword()) :: {:ok, session()} | {:error, term()}
   def start_session(workspace, opts \\ []) do
     worker_host = Keyword.get(opts, :worker_host)
+    account = Keyword.get(opts, :account)
     command = Keyword.get(opts, :command) || Config.codex_command(Keyword.get(opts, :effort))
     issue = Keyword.get(opts, :issue)
 
     with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
          :ok <- maybe_write_codex_config(expanded_workspace, issue),
-         {:ok, port} <- start_port(expanded_workspace, worker_host, command, issue) do
-      metadata = port_metadata(port, worker_host)
+         {:ok, port} <- start_port(expanded_workspace, worker_host, command, issue, account) do
+      metadata = port_metadata(port, worker_host, account)
 
       with {:ok, session_policies} <- session_policies(expanded_workspace, worker_host),
            {:ok, thread_id} <- do_start_session(port, expanded_workspace, session_policies) do
@@ -61,7 +63,8 @@ defmodule SymphonyElixir.Codex.AppServer do
            turn_sandbox_policy: session_policies.turn_sandbox_policy,
            thread_id: thread_id,
            workspace: expanded_workspace,
-           worker_host: worker_host
+           worker_host: worker_host,
+           account: account
          }}
       else
         {:error, reason} ->
@@ -198,9 +201,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     config_file = Path.join(config_path, "config.toml")
 
     if user_managed_config?(config_file) do
-      Logger.warning(
-        "Skipping codex telemetry config write at #{config_file}: existing file is not managed by symphony"
-      )
+      Logger.warning("Skipping codex telemetry config write at #{config_file}: existing file is not managed by symphony")
 
       :ok
     else
@@ -252,7 +253,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     |> String.replace("\"", "\\\"")
   end
 
-  defp start_port(workspace, nil, command, issue) do
+  defp start_port(workspace, nil, command, issue, account) do
     executable = System.find_executable("bash")
 
     if is_nil(executable) do
@@ -266,7 +267,7 @@ defmodule SymphonyElixir.Codex.AppServer do
             :exit_status,
             :stderr_to_stdout,
             args: [~c"-lc", String.to_charlist(command)],
-            env: port_environment(issue),
+            env: port_environment(issue, account),
             cd: String.to_charlist(workspace),
             line: @port_line_bytes
           ]
@@ -276,35 +277,35 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp start_port(workspace, worker_host, command, issue) when is_binary(worker_host) do
-    remote_command = remote_launch_command(workspace, command, issue)
+  defp start_port(workspace, worker_host, command, issue, account) when is_binary(worker_host) do
+    remote_command = remote_launch_command(workspace, command, issue, account)
     SSH.start_port(worker_host, remote_command, line: @port_line_bytes)
   end
 
-  defp remote_launch_command(workspace, command, issue) when is_binary(workspace) do
+  defp remote_launch_command(workspace, command, issue, account) when is_binary(workspace) do
     [
       "cd #{shell_escape(workspace)}",
-      remote_environment_exports(issue),
+      remote_environment_exports(issue, account),
       "exec #{command}"
     ]
     |> Enum.reject(&(&1 in [nil, ""]))
     |> Enum.join(" && ")
   end
 
-  defp remote_environment_exports(issue) do
-    env_pairs(issue)
+  defp remote_environment_exports(issue, account) do
+    env_pairs(issue, account)
     |> Enum.map(fn {key, value} -> "export #{key}=#{shell_escape(to_string(value))}" end)
     |> Enum.join(" && ")
   end
 
-  defp port_environment(issue) do
-    env_pairs(issue)
+  defp port_environment(issue, account) do
+    env_pairs(issue, account)
     |> Enum.map(fn {key, value} ->
       {String.to_charlist(key), String.to_charlist(to_string(value))}
     end)
   end
 
-  defp env_pairs(issue) do
+  defp env_pairs(issue, account) do
     settings = Config.settings!()
     tracker = settings.tracker
 
@@ -312,14 +313,15 @@ defmodule SymphonyElixir.Codex.AppServer do
     |> maybe_put_env("SYMPHONY_LINEAR_API_KEY", tracker.kind == "linear" && tracker.api_key)
     |> maybe_put_env("SYMPHONY_LINEAR_ENDPOINT", tracker.kind == "linear" && tracker.endpoint)
     |> maybe_put_env("OPENROUTER_API_KEY", settings.providers.openrouter_api_key)
-    |> Kernel.++(Telemetry.env_pairs("codex", issue))
+    |> Kernel.++(Accounts.credential_env(account))
+    |> Kernel.++(Telemetry.env_pairs("codex", issue, account))
   end
 
   defp maybe_put_env(entries, _key, nil), do: entries
   defp maybe_put_env(entries, _key, false), do: entries
   defp maybe_put_env(entries, key, value), do: [{key, value} | entries]
 
-  defp port_metadata(port, worker_host) when is_port(port) do
+  defp port_metadata(port, worker_host, account \\ nil) when is_port(port) do
     base_metadata =
       case :erlang.port_info(port, :os_pid) do
         {:os_pid, os_pid} ->
@@ -329,9 +331,15 @@ defmodule SymphonyElixir.Codex.AppServer do
           %{}
       end
 
-    case worker_host do
-      host when is_binary(host) -> Map.put(base_metadata, :worker_host, host)
-      _ -> base_metadata
+    base_metadata =
+      case worker_host do
+        host when is_binary(host) -> Map.put(base_metadata, :worker_host, host)
+        _ -> base_metadata
+      end
+
+    case Accounts.account_summary(account) do
+      nil -> base_metadata
+      account_summary -> Map.put(base_metadata, :account, account_summary)
     end
   end
 

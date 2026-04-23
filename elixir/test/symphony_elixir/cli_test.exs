@@ -266,4 +266,94 @@ defmodule SymphonyElixir.CLITest do
 
     assert :ok = CLI.evaluate([@ack_flag, "WORKFLOW.md"], deps)
   end
+
+  test "accounts login bypasses guardrails and passes provider options" do
+    parent = self()
+
+    deps = %{
+      accounts_login: fn backend, id, opts ->
+        send(parent, {:login, backend, id, opts})
+        {:ok, %{backend: backend, id: id, email: Keyword.get(opts, :email)}}
+      end
+    }
+
+    output =
+      ExUnit.CaptureIO.capture_io(fn ->
+        assert :ok = CLI.evaluate(["accounts", "login", "codex", "primary", "--email", "me@example.com"], deps)
+      end)
+
+    assert_received {:login, "codex", "primary", [email: "me@example.com"]}
+    assert output =~ "Stored codex account primary (me@example.com)"
+  end
+
+  test "accounts login accepts trailing config path without starting the app" do
+    parent = self()
+    config_path = Path.expand("../../symphony-s2t.yml")
+
+    deps = %{
+      file_regular?: fn path ->
+        send(parent, {:file_checked, path})
+        path == config_path
+      end,
+      set_workflow_file_path: fn path ->
+        send(parent, {:workflow_set, path})
+        :ok
+      end,
+      set_symphony_config_file_path: fn path ->
+        send(parent, {:config_set, path})
+        :ok
+      end,
+      accounts_login: fn backend, id, opts ->
+        send(parent, {:login, backend, id, opts})
+        {:ok, %{backend: backend, id: id, email: Keyword.get(opts, :email)}}
+      end,
+      ensure_all_started: fn ->
+        send(parent, :started)
+        {:ok, [:symphony_elixir]}
+      end
+    }
+
+    output =
+      ExUnit.CaptureIO.capture_io(fn ->
+        assert :ok =
+                 CLI.evaluate(
+                   ["accounts", "login", "codex", "primary", "--email", "me@example.com", "../../symphony-s2t.yml"],
+                   deps
+                 )
+      end)
+
+    assert_received {:file_checked, ^config_path}
+    assert_received {:config_set, ^config_path}
+    refute_received {:workflow_set, _path}
+    refute_received :started
+    assert_received {:login, "codex", "primary", [email: "me@example.com"]}
+    assert output =~ "Stored codex account primary (me@example.com)"
+  end
+
+  test "accounts list formats account health without secrets" do
+    deps = %{
+      accounts_list: fn backend ->
+        assert backend == "claude"
+
+        {:ok,
+         [
+           %{
+             backend: "claude",
+             id: "work",
+             email: "work@example.com",
+             state: "paused",
+             credential_kind: "claude_oauth_token",
+             failure_reason: "daily quota exhausted"
+           }
+         ]}
+      end
+    }
+
+    output =
+      ExUnit.CaptureIO.capture_io(fn ->
+        assert :ok = CLI.evaluate(["accounts", "list", "claude"], deps)
+      end)
+
+    assert output =~ "claude\twork\twork@example.com\tpaused\tclaude_oauth_token\tdaily quota exhausted"
+  end
 end

@@ -47,6 +47,17 @@ defmodule SymphonyElixir.Config do
           stall_timeout_ms: non_neg_integer()
         }
 
+  @type accounts_settings :: %{
+          enabled: boolean(),
+          store_root: Path.t(),
+          allow_host_auth_fallback: boolean(),
+          rotation_strategy: String.t(),
+          max_concurrent_sessions_per_account: pos_integer(),
+          exhausted_cooldown_ms: non_neg_integer(),
+          daily_token_budget: pos_integer() | nil,
+          monthly_token_budget: pos_integer() | nil
+        }
+
   @type linear_project_route :: %{
           slug: String.t(),
           repo: String.t() | nil,
@@ -262,8 +273,8 @@ defmodule SymphonyElixir.Config do
     settings!().telemetry.resource_attributes
   end
 
-  @spec telemetry_issue_resource_attributes(map(), String.t() | nil) :: String.t() | nil
-  def telemetry_issue_resource_attributes(issue, backend \\ nil) when is_map(issue) do
+  @spec telemetry_issue_resource_attributes(map(), String.t() | nil, map() | nil) :: String.t() | nil
+  def telemetry_issue_resource_attributes(issue, backend \\ nil, account \\ nil) when is_map(issue) do
     base_attrs = telemetry_resource_attributes()
 
     attrs =
@@ -272,6 +283,11 @@ defmodule SymphonyElixir.Config do
       |> maybe_put_resource("linear.issue.identifier", Map.get(issue, :identifier) || Map.get(issue, "identifier"))
       |> maybe_put_resource("symphony.backend", backend)
       |> maybe_put_resource("symphony.instance", instance_name())
+      |> maybe_put_resource("symphony.account.id", account_value(account, :id))
+      |> maybe_put_resource("symphony.account.email", account_value(account, :email))
+      |> maybe_put_resource("symphony.account.backend", account_value(account, :backend))
+      |> maybe_put_resource("symphony.account.state", account_value(account, :state))
+      |> maybe_put_resource("symphony.account.credential_kind", account_value(account, :credential_kind))
 
     if map_size(attrs) == 0 do
       nil
@@ -285,6 +301,12 @@ defmodule SymphonyElixir.Config do
   defp maybe_put_resource(attrs, _key, nil), do: attrs
   defp maybe_put_resource(attrs, _key, ""), do: attrs
   defp maybe_put_resource(attrs, key, value), do: Map.put(attrs, key, to_string(value))
+
+  defp account_value(nil, _key), do: nil
+
+  defp account_value(account, key) when is_map(account) do
+    Map.get(account, key) || Map.get(account, Atom.to_string(key))
+  end
 
   defp percent_encode_resource_key(key) do
     key
@@ -303,12 +325,32 @@ defmodule SymphonyElixir.Config do
   end
 
   defp normalize_optional_string(nil), do: nil
+
   defp normalize_optional_string(value) when is_binary(value) do
     case String.trim(value) do
       "" -> nil
       trimmed -> trimmed
     end
   end
+
+  @spec accounts_settings() :: accounts_settings()
+  def accounts_settings do
+    accounts = settings!().accounts
+
+    %{
+      enabled: accounts.enabled,
+      store_root: accounts.store_root,
+      allow_host_auth_fallback: accounts.allow_host_auth_fallback,
+      rotation_strategy: accounts.rotation_strategy,
+      max_concurrent_sessions_per_account: accounts.max_concurrent_sessions_per_account,
+      exhausted_cooldown_ms: accounts.exhausted_cooldown_ms,
+      daily_token_budget: accounts.daily_token_budget,
+      monthly_token_budget: accounts.monthly_token_budget
+    }
+  end
+
+  @spec accounts_enabled?() :: boolean()
+  def accounts_enabled?, do: settings!().accounts.enabled
 
   @spec validate!() :: :ok | {:error, term()}
   def validate! do

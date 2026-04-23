@@ -405,8 +405,19 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
         telemetry_include_metrics: true,
         telemetry_include_logs: true,
         telemetry_resource_attributes: %{"environment" => "test"},
+        accounts_store_root: Path.join(test_root, "accounts"),
         instance_name: "test-instance"
       )
+
+      assert {:ok, account} =
+               SymphonyElixir.Accounts.create_or_update(
+                 "claude",
+                 "primary",
+                 [email: "claude-primary@example.com"],
+                 Config.settings!()
+               )
+
+      File.write!(account.claude_oauth_token_file, "claude-oauth-token\n")
 
       assert :ok = Tooling.bootstrap_workspace(workspace)
 
@@ -414,7 +425,8 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
                AppServer.run(
                  workspace,
                  "Telemetry test",
-                 issue_fixture("MT-CLAUDE-TEL", "Telemetry test")
+                 issue_fixture("MT-CLAUDE-TEL", "Telemetry test"),
+                 account: account
                )
 
       trace = File.read!(trace_file)
@@ -430,6 +442,13 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
       assert trace =~ "linear.issue.identifier=MT-CLAUDE-TEL"
       assert trace =~ "symphony.backend=claude"
       assert trace =~ "symphony.instance=test-instance"
+      assert trace =~ "symphony.account.id=primary"
+      assert trace =~ "symphony.account.email=claude-primary%40example.com"
+      assert trace =~ "symphony.account.backend=claude"
+      assert trace =~ "symphony.account.state=unknown"
+      assert trace =~ "symphony.account.credential_kind=claude_oauth_token"
+      assert trace =~ "ENV:CLAUDE_CODE_OAUTH_TOKEN=claude-oauth-token"
+      assert trace =~ "ENV:CLAUDE_CONFIG_DIR=#{account.claude_config_dir}"
       assert trace =~ "environment=test"
     after
       File.rm_rf(test_root)
@@ -503,7 +522,7 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
         printf 'ENV:OPENROUTER_API_KEY=%s\n' "$OPENROUTER_API_KEY" >> "$trace_file"
       fi
 
-      env | grep -E '^(CLAUDE_CODE_|OTEL_)' | while IFS= read -r line; do
+      env | grep -E '^(CLAUDE_CODE_|CLAUDE_CONFIG_DIR=|OTEL_)' | while IFS= read -r line; do
         var_name=$(printf '%s' "$line" | cut -d= -f1)
         var_value=$(printf '%s' "$line" | cut -d= -f2-)
         printf 'ENV:%s=%s\n' "$var_name" "$var_value" >> "$trace_file"

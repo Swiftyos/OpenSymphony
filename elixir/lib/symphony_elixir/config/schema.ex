@@ -189,6 +189,51 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule Accounts do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @rotation_strategies ["usage_aware_round_robin"]
+
+    @primary_key false
+    embedded_schema do
+      field(:enabled, :boolean, default: false)
+      field(:store_root, :string, default: "~/.symphony/accounts")
+      field(:allow_host_auth_fallback, :boolean, default: false)
+      field(:rotation_strategy, :string, default: "usage_aware_round_robin")
+      field(:max_concurrent_sessions_per_account, :integer, default: 1)
+      field(:exhausted_cooldown_ms, :integer, default: 300_000)
+      field(:daily_token_budget, :integer)
+      field(:monthly_token_budget, :integer)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(
+        attrs,
+        [
+          :enabled,
+          :store_root,
+          :allow_host_auth_fallback,
+          :rotation_strategy,
+          :max_concurrent_sessions_per_account,
+          :exhausted_cooldown_ms,
+          :daily_token_budget,
+          :monthly_token_budget
+        ],
+        empty_values: []
+      )
+      |> validate_required([:store_root, :rotation_strategy])
+      |> validate_inclusion(:rotation_strategy, @rotation_strategies)
+      |> validate_number(:max_concurrent_sessions_per_account, greater_than: 0)
+      |> validate_number(:exhausted_cooldown_ms, greater_than_or_equal_to: 0)
+      |> validate_number(:daily_token_budget, greater_than: 0)
+      |> validate_number(:monthly_token_budget, greater_than: 0)
+    end
+  end
+
   defmodule Agent do
     @moduledoc false
     use Ecto.Schema
@@ -524,6 +569,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:workspace, Workspace, on_replace: :update, defaults_to_struct: true)
     embeds_one(:worker, Worker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:providers, Providers, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:accounts, Accounts, on_replace: :update, defaults_to_struct: true)
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
     embeds_one(:opencode, OpenCode, on_replace: :update, defaults_to_struct: true)
@@ -649,6 +695,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:workspace, with: &Workspace.changeset/2)
     |> cast_embed(:worker, with: &Worker.changeset/2)
     |> cast_embed(:providers, with: &Providers.changeset/2)
+    |> cast_embed(:accounts, with: &Accounts.changeset/2)
     |> cast_embed(:agent, with: &Agent.changeset/2)
     |> cast_embed(:codex, with: &Codex.changeset/2)
     |> cast_embed(:opencode, with: &OpenCode.changeset/2)
@@ -690,6 +737,11 @@ defmodule SymphonyElixir.Config.Schema do
           )
     }
 
+    accounts = %{
+      settings.accounts
+      | store_root: resolve_path_value(settings.accounts.store_root, "~/.symphony/accounts", base_dir)
+    }
+
     agent = %{
       settings.agent
       | backend: resolve_agent_backend(settings.agent.backend, raw_config)
@@ -722,6 +774,7 @@ defmodule SymphonyElixir.Config.Schema do
       | tracker: tracker,
         workspace: workspace,
         providers: providers,
+        accounts: accounts,
         agent: agent,
         codex: codex,
         opencode: opencode,

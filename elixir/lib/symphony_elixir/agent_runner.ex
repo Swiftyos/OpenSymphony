@@ -15,10 +15,13 @@ defmodule SymphonyElixir.AgentRunner do
   def run(issue, agent_update_recipient \\ nil, opts \\ []) do
     issue_config = Keyword.get(opts, :issue_config) || resolve_issue_config!(issue)
     route = Keyword.get(opts, :route) || AgentRoute.resolve(issue, issue_config.settings)
+    account = Keyword.get(opts, :account)
     # The orchestrator owns host retries so one worker lifetime never hops machines.
     worker_host = selected_worker_host(Keyword.get(opts, :worker_host), issue_config.settings.worker.ssh_hosts)
 
-    Logger.info("Starting agent run for #{issue_context(issue)} backend=#{route.backend} effort=#{route.effort || "default"} worker_host=#{worker_host_for_log(worker_host)}")
+    Logger.info(
+      "Starting agent run for #{issue_context(issue)} backend=#{route.backend} effort=#{route.effort || "default"} worker_host=#{worker_host_for_log(worker_host)} account=#{account_label(account)}"
+    )
 
     run_opts =
       opts
@@ -39,8 +42,11 @@ defmodule SymphonyElixir.AgentRunner do
   defp run_on_worker_host(issue, agent_update_recipient, opts, worker_host) do
     route = Keyword.fetch!(opts, :route)
     issue_config = Keyword.fetch!(opts, :issue_config)
+    account = Keyword.get(opts, :account)
 
-    Logger.info("Starting worker attempt for #{issue_context(issue)} backend=#{route.backend} effort=#{route.effort || "default"} worker_host=#{worker_host_for_log(worker_host)}")
+    Logger.info(
+      "Starting worker attempt for #{issue_context(issue)} backend=#{route.backend} effort=#{route.effort || "default"} worker_host=#{worker_host_for_log(worker_host)} account=#{account_label(account)}"
+    )
 
     case Workspace.create_for_issue(issue, worker_host, settings: issue_config.settings) do
       {:ok, workspace} ->
@@ -117,7 +123,12 @@ defmodule SymphonyElixir.AgentRunner do
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
 
     with {:ok, session} <-
-           CodexAppServer.start_session(workspace, worker_host: worker_host, effort: AgentRoute.codex_effort(route.effort), issue: issue) do
+           CodexAppServer.start_session(workspace,
+             worker_host: worker_host,
+             effort: AgentRoute.codex_effort(route.effort),
+             issue: issue,
+             account: Keyword.get(opts, :account)
+           ) do
       try do
         do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
       after
@@ -177,7 +188,8 @@ defmodule SymphonyElixir.AgentRunner do
       backend: route.backend,
       effort: AgentRoute.claude_effort(route.effort),
       variant: AgentRoute.opencode_variant(route.effort),
-      issue: issue
+      issue: issue,
+      account: Keyword.get(opts, :account)
     ]
 
     with {:ok, session} <- AppServer.start_session(workspace, session_opts) do
@@ -332,6 +344,14 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp worker_host_for_log(nil), do: "local"
   defp worker_host_for_log(worker_host), do: worker_host
+
+  defp account_label(nil), do: "host-auth"
+
+  defp account_label(%{backend: backend, id: id}) when is_binary(backend) and is_binary(id) do
+    "#{backend}:#{id}"
+  end
+
+  defp account_label(account), do: inspect(account, limit: 4)
 
   defp normalize_issue_state(state_name) when is_binary(state_name) do
     state_name

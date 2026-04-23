@@ -3,7 +3,7 @@ defmodule SymphonyElixir.CLI do
   Escript entrypoint for running Symphony with `symphony.yml` or legacy `WORKFLOW.md`.
   """
 
-  alias SymphonyElixir.LogFile
+  alias SymphonyElixir.{Accounts, LogFile}
 
   @acknowledgement_switch :i_understand_that_this_will_be_running_without_the_usual_guardrails
   @switches [{@acknowledgement_switch, :boolean}, logs_root: :string, port: :integer]
@@ -16,7 +16,15 @@ defmodule SymphonyElixir.CLI do
           validate_config: (-> :ok | {:error, term()}),
           set_logs_root: (String.t() -> :ok | {:error, term()}),
           set_server_port_override: (non_neg_integer() | nil -> :ok | {:error, term()}),
-          ensure_all_started: (-> ensure_started_result())
+          ensure_all_started: (-> ensure_started_result()),
+          accounts_login: (String.t(), String.t(), keyword() -> {:ok, map()} | {:error, term()}),
+          accounts_list: (String.t() | nil -> {:ok, [map()]} | {:error, term()}),
+          accounts_verify: (String.t(), String.t(), keyword() -> {:ok, map()} | {:error, term()}),
+          accounts_pause: (String.t(), String.t(), keyword() -> {:ok, map()} | {:error, term()}),
+          accounts_resume: (String.t(), String.t() -> {:ok, map()} | {:error, term()}),
+          accounts_remove: (String.t(), String.t() -> :ok | {:error, term()}),
+          accounts_enable: (String.t(), String.t() -> {:ok, map()} | {:error, term()}),
+          accounts_disable: (String.t(), String.t() -> {:ok, map()} | {:error, term()})
         }
 
   @spec main([String.t()]) :: no_return()
@@ -32,7 +40,13 @@ defmodule SymphonyElixir.CLI do
   end
 
   @spec evaluate([String.t()], deps()) :: :ok | {:error, String.t()}
-  def evaluate(args, deps \\ runtime_deps()) do
+  def evaluate(args, deps \\ runtime_deps())
+
+  def evaluate(["accounts" | account_args], deps) do
+    evaluate_accounts(account_args, deps)
+  end
+
+  def evaluate(args, deps) do
     case OptionParser.parse(args, strict: @switches) do
       {opts, [], []} ->
         with :ok <- require_guardrails_acknowledgement(opts),
@@ -83,7 +97,17 @@ defmodule SymphonyElixir.CLI do
 
   @spec usage_message() :: String.t()
   defp usage_message do
-    "Usage: symphony [--logs-root <path>] [--port <port>] [path-to-symphony.yml|path-to-WORKFLOW.md]"
+    """
+    Usage:
+      symphony [--logs-root <path>] [--port <port>] [path-to-symphony.yml|path-to-WORKFLOW.md]
+      symphony accounts login <codex|claude> <id> [--email <email>] [path-to-symphony.yml|path-to-WORKFLOW.md]
+      symphony accounts list [codex|claude] [path-to-symphony.yml|path-to-WORKFLOW.md]
+      symphony accounts verify <codex|claude> <id> [path-to-symphony.yml|path-to-WORKFLOW.md]
+      symphony accounts pause <codex|claude> <id> [--until <timestamp>] [--reason <text>] [path-to-symphony.yml|path-to-WORKFLOW.md]
+      symphony accounts resume <codex|claude> <id> [path-to-symphony.yml|path-to-WORKFLOW.md]
+      symphony accounts remove <codex|claude> <id> [path-to-symphony.yml|path-to-WORKFLOW.md]
+    """
+    |> String.trim()
   end
 
   @spec runtime_deps() :: deps()
@@ -95,9 +119,243 @@ defmodule SymphonyElixir.CLI do
       validate_config: &SymphonyElixir.Config.validate!/0,
       set_logs_root: &set_logs_root/1,
       set_server_port_override: &set_server_port_override/1,
-      ensure_all_started: fn -> Application.ensure_all_started(:symphony_elixir) end
+      ensure_all_started: fn -> Application.ensure_all_started(:symphony_elixir) end,
+      accounts_login: &Accounts.login/3,
+      accounts_list: &Accounts.list/1,
+      accounts_verify: &Accounts.verify/3,
+      accounts_pause: &Accounts.pause/3,
+      accounts_resume: &Accounts.resume/2,
+      accounts_remove: &Accounts.remove/2,
+      accounts_enable: &Accounts.enable/2,
+      accounts_disable: &Accounts.disable/2
     }
   end
+
+  defp evaluate_accounts(["login", backend, id | rest], deps) do
+    with {:ok, opts, config_path} <- parse_account_options(rest, email: :string, command: :string, token: :string),
+         :ok <- maybe_set_account_config_path(config_path, deps),
+         {:ok, account} <- account_dep(deps, :accounts_login).(backend, id, opts) do
+      IO.puts("Stored #{account.backend} account #{account.id}#{email_suffix(account)}")
+      :ok
+    else
+      {:error, %OptionParser.ParseError{} = error} -> {:error, error.message}
+      {:error, reason} -> {:error, "Failed to login account: #{format_account_error(reason)}"}
+    end
+  end
+
+  defp evaluate_accounts(["list" | rest], deps) do
+    with {:ok, backend, config_path} <- parse_account_list_options(rest),
+         :ok <- maybe_set_account_config_path(config_path, deps),
+         {:ok, accounts} <- account_dep(deps, :accounts_list).(backend) do
+      print_accounts(accounts)
+      :ok
+    else
+      {:error, %OptionParser.ParseError{} = error} -> {:error, error.message}
+      {:error, reason} -> {:error, "Failed to list accounts: #{format_account_error(reason)}"}
+    end
+  end
+
+  defp evaluate_accounts(["verify", backend, id | rest], deps) do
+    with {:ok, opts, config_path} <- parse_account_options(rest, command: :string),
+         :ok <- maybe_set_account_config_path(config_path, deps),
+         {:ok, result} <- account_dep(deps, :accounts_verify).(backend, id, opts) do
+      account = Map.get(result, :account) || %{}
+      IO.puts("Verified #{Map.get(account, :backend, backend)} account #{Map.get(account, :id, id)}#{email_suffix(account)}")
+
+      case Map.get(result, :output) do
+        output when is_binary(output) and output != "" -> IO.puts(output)
+        _ -> :ok
+      end
+
+      :ok
+    else
+      {:error, %OptionParser.ParseError{} = error} -> {:error, error.message}
+      {:error, reason} -> {:error, "Failed to verify account: #{format_account_error(reason)}"}
+    end
+  end
+
+  defp evaluate_accounts(["pause", backend, id | rest], deps) do
+    with {:ok, opts, config_path} <- parse_account_options(rest, until: :string, reason: :string),
+         :ok <- maybe_set_account_config_path(config_path, deps),
+         {:ok, account} <- account_dep(deps, :accounts_pause).(backend, id, opts) do
+      IO.puts("Paused #{account.backend} account #{account.id}#{email_suffix(account)}")
+      :ok
+    else
+      {:error, %OptionParser.ParseError{} = error} -> {:error, error.message}
+      {:error, reason} -> {:error, "Failed to pause account: #{format_account_error(reason)}"}
+    end
+  end
+
+  defp evaluate_accounts(["resume", backend, id | rest], deps) do
+    with {:ok, _opts, config_path} <- parse_account_options(rest, []),
+         :ok <- maybe_set_account_config_path(config_path, deps),
+         {:ok, account} <- account_dep(deps, :accounts_resume).(backend, id) do
+      IO.puts("Resumed #{account.backend} account #{account.id}#{email_suffix(account)}")
+      :ok
+    else
+      {:error, reason} -> {:error, "Failed to resume account: #{format_account_error(reason)}"}
+    end
+  end
+
+  defp evaluate_accounts(["remove", backend, id | rest], deps) do
+    with {:ok, _opts, config_path} <- parse_account_options(rest, []),
+         :ok <- maybe_set_account_config_path(config_path, deps) do
+      case account_dep(deps, :accounts_remove).(backend, id) do
+        :ok ->
+          IO.puts("Removed #{backend} account #{id}")
+          :ok
+
+        {:error, reason} ->
+          {:error, "Failed to remove account: #{format_account_error(reason)}"}
+      end
+    else
+      {:error, %OptionParser.ParseError{} = error} -> {:error, error.message}
+      {:error, reason} -> {:error, "Failed to remove account: #{format_account_error(reason)}"}
+    end
+  end
+
+  defp evaluate_accounts(["enable", backend, id | rest], deps) do
+    with {:ok, _opts, config_path} <- parse_account_options(rest, []),
+         :ok <- maybe_set_account_config_path(config_path, deps),
+         {:ok, account} <- account_dep(deps, :accounts_enable).(backend, id) do
+      IO.puts("Enabled #{account.backend} account #{account.id}#{email_suffix(account)}")
+      :ok
+    else
+      {:error, reason} -> {:error, "Failed to enable account: #{format_account_error(reason)}"}
+    end
+  end
+
+  defp evaluate_accounts(["disable", backend, id | rest], deps) do
+    with {:ok, _opts, config_path} <- parse_account_options(rest, []),
+         :ok <- maybe_set_account_config_path(config_path, deps),
+         {:ok, account} <- account_dep(deps, :accounts_disable).(backend, id) do
+      IO.puts("Disabled #{account.backend} account #{account.id}#{email_suffix(account)}")
+      :ok
+    else
+      {:error, reason} -> {:error, "Failed to disable account: #{format_account_error(reason)}"}
+    end
+  end
+
+  defp evaluate_accounts(_args, _deps), do: {:error, usage_message()}
+
+  defp parse_account_options(args, switches) do
+    case OptionParser.parse(args, strict: Keyword.put_new(switches, :config, :string)) do
+      {opts, args, []} when length(args) <= 1 ->
+        with {:ok, config_path} <- account_config_path(opts, args) do
+          {:ok, Keyword.delete(opts, :config), config_path}
+        end
+
+      {_opts, _args, invalid} when invalid != [] ->
+        {:error, %OptionParser.ParseError{message: "Invalid account option: #{inspect(invalid)}"}}
+
+      _ ->
+        {:error, %OptionParser.ParseError{message: usage_message()}}
+    end
+  end
+
+  defp parse_account_list_options(args) do
+    case OptionParser.parse(args, strict: [config: :string]) do
+      {opts, args, []} when length(args) <= 2 ->
+        parse_account_list_args(opts, args)
+
+      {_opts, _args, invalid} when invalid != [] ->
+        {:error, %OptionParser.ParseError{message: "Invalid account option: #{inspect(invalid)}"}}
+
+      _ ->
+        {:error, %OptionParser.ParseError{message: usage_message()}}
+    end
+  end
+
+  defp parse_account_list_args(opts, []) do
+    with {:ok, config_path} <- account_config_path(opts, []) do
+      {:ok, nil, config_path}
+    end
+  end
+
+  defp parse_account_list_args(opts, [backend]) when backend in ["codex", "claude"] do
+    with {:ok, config_path} <- account_config_path(opts, []) do
+      {:ok, backend, config_path}
+    end
+  end
+
+  defp parse_account_list_args(opts, [config_path]) do
+    with {:ok, config_path} <- account_config_path(opts, [config_path]) do
+      {:ok, nil, config_path}
+    end
+  end
+
+  defp parse_account_list_args(opts, [backend, config_path]) when backend in ["codex", "claude"] do
+    with {:ok, config_path} <- account_config_path(opts, [config_path]) do
+      {:ok, backend, config_path}
+    end
+  end
+
+  defp parse_account_list_args(_opts, _args), do: {:error, %OptionParser.ParseError{message: usage_message()}}
+
+  defp account_config_path(opts, args) do
+    config_opt = Keyword.get(opts, :config)
+    trailing_path = List.first(args)
+
+    cond do
+      is_binary(config_opt) and is_binary(trailing_path) ->
+        {:error, %OptionParser.ParseError{message: "Pass account config path either as --config or trailing path, not both"}}
+
+      is_binary(config_opt) ->
+        {:ok, config_opt}
+
+      is_binary(trailing_path) ->
+        {:ok, trailing_path}
+
+      true ->
+        {:ok, nil}
+    end
+  end
+
+  defp maybe_set_account_config_path(nil, _deps), do: :ok
+
+  defp maybe_set_account_config_path(config_path, deps) when is_binary(config_path) do
+    expanded_path = Path.expand(config_path)
+
+    if deps.file_regular?.(expanded_path) do
+      case startup_mode_for_path(expanded_path) do
+        :legacy -> :ok = deps.set_workflow_file_path.(expanded_path)
+        :global -> :ok = deps.set_symphony_config_file_path.(expanded_path)
+      end
+    else
+      {:error, "Config file not found: #{expanded_path}"}
+    end
+  end
+
+  defp account_dep(deps, key), do: Map.get(deps, key, Map.fetch!(runtime_deps(), key))
+
+  defp print_accounts([]), do: IO.puts("No accounts configured")
+
+  defp print_accounts(accounts) when is_list(accounts) do
+    Enum.each(accounts, fn account ->
+      summary = Accounts.account_summary(account) || account
+
+      [
+        account_value(summary, :backend),
+        account_value(summary, :id),
+        account_value(summary, :email) || "-",
+        account_value(summary, :state) || "unknown",
+        account_value(summary, :credential_kind) || "-",
+        account_value(summary, :failure_reason) || "-"
+      ]
+      |> Enum.join("\t")
+      |> IO.puts()
+    end)
+  end
+
+  defp email_suffix(%{email: email}) when is_binary(email) and email != "", do: " (#{email})"
+  defp email_suffix(%{"email" => email}) when is_binary(email) and email != "", do: " (#{email})"
+  defp email_suffix(_account), do: ""
+
+  defp account_value(account, key) when is_map(account) do
+    Map.get(account, key) || Map.get(account, Atom.to_string(key))
+  end
+
+  defp format_account_error(reason), do: inspect(reason, limit: 20, printable_limit: 1_000)
 
   defp validate_config(expanded_path, deps) do
     case deps.validate_config.() do
