@@ -142,7 +142,7 @@ defmodule SymphonyElixir.AccountsTest do
                  Accounts.login(
                    "claude",
                    "streamed",
-                   [email: "claude@example.com", command: command],
+                   [email: "claude@example.com", command: command, tty_capture: false],
                    settings
                  )
 

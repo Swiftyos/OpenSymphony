@@ -755,7 +755,14 @@ defmodule SymphonyElixir.Accounts do
 
         true ->
           command
-          |> run_provider(["setup-token"], claude_login_env(), opts |> Keyword.put(:stream, true) |> Keyword.put(:pty, true))
+          |> run_provider(
+            ["setup-token"],
+            claude_login_env(),
+            opts
+            |> Keyword.put(:stream, true)
+            |> Keyword.put_new(:tty_capture, true)
+            |> Keyword.put(:transcript_path, Path.join(account.account_dir, "claude_setup_token.transcript"))
+          )
           |> case do
             {:ok, output} -> extract_claude_oauth_token(output)
             {:error, reason} -> {:error, reason}
@@ -785,21 +792,81 @@ defmodule SymphonyElixir.Accounts do
       [executable | command_args] ->
         env = Enum.map(env, fn {key, value} -> {key, to_string(value)} end)
 
-        if Keyword.get(opts, :stream, false) do
-          run_provider_stream(executable, command_args ++ args, env, opts)
-        else
-          case System.cmd(executable, command_args ++ args,
-                 env: env,
-                 stderr_to_stdout: true,
-                 into: Keyword.get(opts, :into, "")
-               ) do
-            {output, 0} -> {:ok, IO.iodata_to_binary(output)}
-            {output, status} -> {:error, %{exit_status: status, output: IO.iodata_to_binary(output)}}
-          end
+        cond do
+          Keyword.get(opts, :tty_capture, false) ->
+            run_provider_tty_capture(executable, command_args ++ args, env, opts)
+
+          Keyword.get(opts, :stream, false) ->
+            run_provider_stream(executable, command_args ++ args, env, opts)
+
+          true ->
+            case System.cmd(executable, command_args ++ args,
+                   env: env,
+                   stderr_to_stdout: true,
+                   into: Keyword.get(opts, :into, "")
+                 ) do
+              {output, 0} -> {:ok, IO.iodata_to_binary(output)}
+              {output, status} -> {:error, %{exit_status: status, output: IO.iodata_to_binary(output)}}
+            end
         end
     end
   rescue
     error -> {:error, error}
+  end
+
+  defp run_provider_tty_capture(executable, args, env, opts) do
+    with {:ok, executable_path} <- resolve_executable(executable),
+         {:ok, script_path} <- resolve_executable("script"),
+         {:ok, transcript_path} <- prepare_transcript_path(opts) do
+      command = script_shell_command(script_path, transcript_path, executable_path, args)
+
+      {shell_output, status} =
+        System.cmd("/bin/sh", ["-lc", command],
+          env: env,
+          stderr_to_stdout: true
+        )
+
+      transcript = read_transcript(transcript_path)
+      File.rm(transcript_path)
+      output = transcript <> IO.iodata_to_binary(shell_output)
+
+      case status do
+        0 -> {:ok, output}
+        _ -> {:error, %{exit_status: status, output: output}}
+      end
+    end
+  end
+
+  defp prepare_transcript_path(opts) do
+    path =
+      Keyword.get(opts, :transcript_path) ||
+        Path.join(System.tmp_dir!(), "symphony-claude-setup-token-#{System.unique_integer([:positive])}.log")
+
+    with :ok <- File.mkdir_p(Path.dirname(path)),
+         :ok <- File.write(path, ""),
+         :ok <- File.chmod(path, @secret_mode) do
+      {:ok, path}
+    end
+  end
+
+  defp script_shell_command(script_path, transcript_path, executable_path, args) do
+    command =
+      case :os.type() do
+        {:unix, :darwin} ->
+          shell_join([script_path, "-q", transcript_path, executable_path | args])
+
+        _ ->
+          shell_join([script_path, "-q", "-c", shell_join([executable_path | args]), transcript_path])
+      end
+
+    command <> " </dev/tty >/dev/tty 2>&1"
+  end
+
+  defp read_transcript(path) do
+    case File.read(path) do
+      {:ok, contents} -> contents
+      _ -> ""
+    end
   end
 
   defp run_provider_stream(executable, args, env, opts) do
@@ -876,12 +943,14 @@ defmodule SymphonyElixir.Accounts do
     data
     |> String.replace("\e[200~", "")
     |> String.replace("\e[201~", "")
+    |> String.replace("^[[200~", "")
+    |> String.replace("^[[201~", "")
   end
 
   defp receive_provider_stream(port, chunks) do
     receive do
       {^port, {:data, data}} ->
-        IO.write(data)
+        IO.write(sanitize_interactive_output(data))
         receive_provider_stream(port, [data | chunks])
 
       {^port, {:exit_status, 0}} ->
@@ -890,6 +959,12 @@ defmodule SymphonyElixir.Accounts do
       {^port, {:exit_status, status}} ->
         {:error, %{exit_status: status, output: IO.iodata_to_binary(Enum.reverse(chunks))}}
     end
+  end
+
+  defp sanitize_interactive_output(data) when is_binary(data) do
+    data
+    |> String.replace("\e[?2004h", "")
+    |> String.replace("\e[?2004l", "")
   end
 
   defp resolve_executable(executable) do
@@ -1364,15 +1439,9 @@ defmodule SymphonyElixir.Accounts do
   defp default_credential_kind("claude"), do: "claude_oauth_token"
 
   defp extract_claude_oauth_token(output) when is_binary(output) do
-    token =
-      output
-      |> String.split(~r/\s+/, trim: true)
-      |> Enum.reverse()
-      |> Enum.find(&String.match?(&1, ~r/^(sk-ant-oat|oauth|claude)[A-Za-z0-9._:-]+/))
-
-    case token do
-      nil -> {:error, {:missing_claude_oauth_token, output}}
-      token -> {:ok, token}
+    case Regex.scan(~r/(sk-ant-oat[A-Za-z0-9._:-]+|oauth[A-Za-z0-9._:-]+|claude[A-Za-z0-9._:-]+)/, output) do
+      [] -> {:error, {:missing_claude_oauth_token, output}}
+      matches -> {:ok, matches |> List.last() |> List.last()}
     end
   end
 
