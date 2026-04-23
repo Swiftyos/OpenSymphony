@@ -31,13 +31,20 @@ defmodule SymphonyElixir.CLI do
   def main(args) do
     case evaluate(args) do
       :ok ->
-        wait_for_shutdown()
+        if accounts_command?(args) do
+          System.halt(0)
+        else
+          wait_for_shutdown()
+        end
 
       {:error, message} ->
         IO.puts(:stderr, message)
         System.halt(1)
     end
   end
+
+  defp accounts_command?(["accounts" | _args]), do: true
+  defp accounts_command?(_args), do: false
 
   @spec evaluate([String.t()], deps()) :: :ok | {:error, String.t()}
   def evaluate(args, deps \\ runtime_deps())

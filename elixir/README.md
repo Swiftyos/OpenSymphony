@@ -290,7 +290,10 @@ CLI is available:
 ```
 
 Codex accounts use an isolated `CODEX_HOME`; Claude accounts store the OAuth token and inject it as
-`CLAUDE_CODE_OAUTH_TOKEN`. If an account is already maxed out, pause it before starting Symphony:
+`CLAUDE_CODE_OAUTH_TOKEN`. Claude `setup-token` output is streamed live, so SSH users can open the
+printed auth URL in another browser. If you already have a token, avoid browser login with
+`--token-stdin`, `--token-file <path>`, or `--token-env <VAR>`. If an account is already maxed out,
+pause it before starting Symphony:
 
 ```bash
 ./bin/symphony accounts pause codex personal --reason "daily quota exhausted"

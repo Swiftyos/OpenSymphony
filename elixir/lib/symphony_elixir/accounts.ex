@@ -755,7 +755,7 @@ defmodule SymphonyElixir.Accounts do
 
         true ->
           command
-          |> run_provider(["setup-token"], credential_env(account), Keyword.put(opts, :stream, true))
+          |> run_provider(["setup-token"], credential_env(account), opts |> Keyword.put(:stream, true) |> Keyword.put(:pty, true))
           |> case do
             {:ok, output} -> extract_claude_oauth_token(output)
             {:error, reason} -> {:error, reason}
@@ -786,7 +786,7 @@ defmodule SymphonyElixir.Accounts do
         env = Enum.map(env, fn {key, value} -> {key, to_string(value)} end)
 
         if Keyword.get(opts, :stream, false) do
-          run_provider_stream(executable, command_args ++ args, env)
+          run_provider_stream(executable, command_args ++ args, env, opts)
         else
           case System.cmd(executable, command_args ++ args,
                  env: env,
@@ -802,8 +802,9 @@ defmodule SymphonyElixir.Accounts do
     error -> {:error, error}
   end
 
-  defp run_provider_stream(executable, args, env) do
-    with {:ok, executable_path} <- resolve_executable(executable) do
+  defp run_provider_stream(executable, args, env, opts) do
+    with {:ok, executable_path} <- resolve_executable(executable),
+         {:ok, executable_path, args, interactive?} <- maybe_wrap_with_pty(executable_path, args, opts) do
       port =
         Port.open(
           {:spawn_executable, String.to_charlist(executable_path)},
@@ -816,8 +817,59 @@ defmodule SymphonyElixir.Accounts do
           ]
         )
 
+      if interactive?, do: forward_stdin_to_port(port)
       receive_provider_stream(port, [])
     end
+  end
+
+  defp maybe_wrap_with_pty(executable, args, opts) do
+    if Keyword.get(opts, :pty, false) do
+      case System.find_executable("script") do
+        nil ->
+          {:error, :script_command_not_found_for_pty_login}
+
+        script ->
+          {:ok, script, script_args(executable, args), true}
+      end
+    else
+      {:ok, executable, args, false}
+    end
+  end
+
+  defp script_args(executable, args) do
+    case :os.type() do
+      {:unix, :darwin} ->
+        ["-q", "/dev/null", executable | args]
+
+      _ ->
+        ["-q", "-c", shell_join([executable | args]), "/dev/null"]
+    end
+  end
+
+  defp shell_join(parts), do: parts |> Enum.map(&shell_quote/1) |> Enum.join(" ")
+
+  defp shell_quote(value) do
+    "'" <> String.replace(to_string(value), "'", "'\"'\"'") <> "'"
+  end
+
+  defp forward_stdin_to_port(port) when is_port(port) do
+    spawn(fn -> do_forward_stdin_to_port(port) end)
+    :ok
+  end
+
+  defp do_forward_stdin_to_port(port) do
+    case IO.getn(:stdio, "", 1) do
+      data when is_binary(data) ->
+        if :erlang.port_info(port) != :undefined do
+          Port.command(port, data)
+          do_forward_stdin_to_port(port)
+        end
+
+      _ ->
+        :ok
+    end
+  rescue
+    _ -> :ok
   end
 
   defp receive_provider_stream(port, chunks) do
