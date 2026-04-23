@@ -356,6 +356,61 @@ defmodule SymphonyElixir.CLITest do
     assert output =~ "Stored claude account work (work@example.com)"
   end
 
+  test "accounts import passes Claude source options without starting the app" do
+    parent = self()
+    config_path = Path.expand("../../symphony-s2t.yml")
+    source_path = Path.expand("~/.claude-work")
+
+    deps = %{
+      file_regular?: fn path ->
+        send(parent, {:file_checked, path})
+        path == config_path
+      end,
+      set_workflow_file_path: fn path ->
+        send(parent, {:workflow_set, path})
+        :ok
+      end,
+      set_symphony_config_file_path: fn path ->
+        send(parent, {:config_set, path})
+        :ok
+      end,
+      accounts_import: fn backend, id, opts ->
+        send(parent, {:import, backend, id, opts})
+        {:ok, %{backend: backend, id: id, email: Keyword.get(opts, :email)}}
+      end,
+      ensure_all_started: fn ->
+        send(parent, :started)
+        {:ok, [:symphony_elixir]}
+      end
+    }
+
+    output =
+      ExUnit.CaptureIO.capture_io(fn ->
+        assert :ok =
+                 CLI.evaluate(
+                   [
+                     "accounts",
+                     "import",
+                     "claude",
+                     "work",
+                     "--email",
+                     "work@example.com",
+                     "--from",
+                     source_path,
+                     "../../symphony-s2t.yml"
+                   ],
+                   deps
+                 )
+      end)
+
+    assert_received {:file_checked, ^config_path}
+    assert_received {:config_set, ^config_path}
+    refute_received {:workflow_set, _path}
+    refute_received :started
+    assert_received {:import, "claude", "work", [email: "work@example.com", from: ^source_path]}
+    assert output =~ "Imported claude account work (work@example.com)"
+  end
+
   test "accounts list formats account health without secrets" do
     deps = %{
       accounts_list: fn backend ->

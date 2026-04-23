@@ -91,6 +91,38 @@ defmodule SymphonyElixir.AccountsTest do
     assert env["ANTHROPIC_API_KEY"] == ""
   end
 
+  test "claude import copies active CLI config into an isolated account directory" do
+    store_root = temp_accounts_root!("claude-import-store")
+    source_dir = temp_accounts_root!("claude-import-source")
+    settings = accounts_settings!(store_root)
+
+    File.mkdir_p!(source_dir)
+    File.write!(Path.join(source_dir, ".claude.json"), ~s({"oauthAccount":{"emailAddress":"import@example.com"}}))
+    File.write!(Path.join(source_dir, ".config.json"), ~s({"primaryApiKey":"oauth"}))
+    File.write!(Path.join(source_dir, "settings.json"), ~s({"theme":"dark"}))
+    File.write!(Path.join(source_dir, "history.jsonl"), "do not copy\n")
+
+    assert {:ok, account} =
+             Accounts.import_account(
+               "claude",
+               "imported",
+               [email: "import@example.com", from: source_dir],
+               settings
+             )
+
+    assert account.email == "import@example.com"
+    assert account.credential_kind == "claude_config"
+    assert File.read!(Path.join(account.claude_config_dir, ".claude.json")) =~ "oauthAccount"
+    assert File.read!(Path.join(account.claude_config_dir, ".config.json")) =~ "primaryApiKey"
+    assert File.read!(Path.join(account.claude_config_dir, "settings.json")) =~ "dark"
+    refute File.exists?(Path.join(account.claude_config_dir, "history.jsonl"))
+
+    env = Map.new(Accounts.credential_env(account))
+    refute Map.has_key?(env, "CLAUDE_CODE_OAUTH_TOKEN")
+    assert env["CLAUDE_CONFIG_DIR"] == Path.join(account.account_dir, "claude_config")
+    assert env["ANTHROPIC_API_KEY"] == ""
+  end
+
   test "codex login streams provider output while storing isolated account metadata" do
     store_root = temp_accounts_root!("login-stream")
     settings = accounts_settings!(store_root)

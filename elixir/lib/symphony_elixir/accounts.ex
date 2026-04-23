@@ -13,6 +13,13 @@ defmodule SymphonyElixir.Accounts do
   @state_file "state.json"
   @rotation_file "rotation.json"
   @usage_periods_file "usage_periods.csv"
+  @claude_import_files [
+    ".config.json",
+    "settings.json",
+    "settings.local.json",
+    "policy-limits.json",
+    "mcp-needs-auth-cache.json"
+  ]
   @secret_mode 0o600
   @dir_mode 0o700
   @usage_period_csv_header [
@@ -123,6 +130,22 @@ defmodule SymphonyElixir.Accounts do
         "codex" -> login_codex(account, opts, settings)
         "claude" -> login_claude(account, opts, settings)
       end
+    end
+  rescue
+    error -> {:error, error}
+  end
+
+  @spec import_account(String.t(), String.t(), keyword(), term() | nil) :: {:ok, account()} | {:error, term()}
+  def import_account(backend, id, opts \\ [], settings \\ nil) do
+    settings = settings || current_settings()
+    backend = normalize_backend!(backend)
+
+    case backend do
+      "claude" ->
+        import_claude_account(id, opts, settings)
+
+      _ ->
+        {:error, {:unsupported_account_import_backend, backend}}
     end
   rescue
     error -> {:error, error}
@@ -779,6 +802,102 @@ defmodule SymphonyElixir.Accounts do
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  defp import_claude_account(id, opts, settings) do
+    with {:ok, account} <-
+           create_or_update(
+             "claude",
+             id,
+             Keyword.merge(opts, credential_kind: "claude_config"),
+             settings
+           ),
+         :ok <- import_claude_config_files(account, opts),
+         {:ok, account} <- get("claude", id, settings) do
+      {:ok, account}
+    end
+  end
+
+  defp import_claude_config_files(account, opts) do
+    source_dir = claude_import_source_dir(opts)
+    destination_dir = account.claude_config_dir
+
+    with :ok <- mkdir_private(destination_dir) do
+      copied_files =
+        []
+        |> copy_optional_claude_global_config(source_dir, destination_dir, opts)
+        |> copy_optional_claude_config_dir_files(source_dir, destination_dir)
+
+      case copied_files do
+        [] -> {:error, {:missing_claude_config, source_dir}}
+        _files -> :ok
+      end
+    end
+  end
+
+  defp claude_import_source_dir(opts) do
+    opts
+    |> Keyword.get(:from)
+    |> case do
+      source when is_binary(source) and source != "" ->
+        Path.expand(source)
+
+      _ ->
+        case System.get_env("CLAUDE_CONFIG_DIR") do
+          source when is_binary(source) and source != "" -> Path.expand(source)
+          _ -> Path.expand("~/.claude")
+        end
+    end
+  end
+
+  defp copy_optional_claude_global_config(copied_files, source_dir, destination_dir, opts) do
+    source_dir
+    |> claude_global_config_candidates(opts)
+    |> Enum.reduce(copied_files, fn source_path, copied ->
+      copy_optional_secret_file(source_path, Path.join(destination_dir, ".claude.json"), copied)
+    end)
+  end
+
+  defp claude_global_config_candidates(source_dir, opts) do
+    configured =
+      case Keyword.get(opts, :global_config_file) do
+        path when is_binary(path) and path != "" -> [Path.expand(path)]
+        _ -> []
+      end
+
+    source_local = Path.join(source_dir, ".claude.json")
+    default_source_dir = Path.expand("~/.claude")
+
+    default_global =
+      if Path.expand(source_dir) == default_source_dir do
+        [Path.expand("~/.claude.json")]
+      else
+        []
+      end
+
+    (default_global ++ [source_local] ++ configured)
+    |> Enum.uniq()
+  end
+
+  defp copy_optional_claude_config_dir_files(copied_files, source_dir, destination_dir) do
+    Enum.reduce(@claude_import_files, copied_files, fn file_name, copied ->
+      copy_optional_secret_file(
+        Path.join(source_dir, file_name),
+        Path.join(destination_dir, file_name),
+        copied
+      )
+    end)
+  end
+
+  defp copy_optional_secret_file(source_path, destination_path, copied_files) do
+    if File.regular?(source_path) do
+      :ok = File.mkdir_p(Path.dirname(destination_path))
+      :ok = File.cp(source_path, destination_path)
+      :ok = File.chmod(destination_path, @secret_mode)
+      [destination_path | copied_files]
+    else
+      copied_files
     end
   end
 

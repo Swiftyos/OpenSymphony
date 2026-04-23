@@ -18,6 +18,7 @@ defmodule SymphonyElixir.CLI do
           set_server_port_override: (non_neg_integer() | nil -> :ok | {:error, term()}),
           ensure_all_started: (-> ensure_started_result()),
           accounts_login: (String.t(), String.t(), keyword() -> {:ok, map()} | {:error, term()}),
+          accounts_import: (String.t(), String.t(), keyword() -> {:ok, map()} | {:error, term()}),
           accounts_list: (String.t() | nil -> {:ok, [map()]} | {:error, term()}),
           accounts_verify: (String.t(), String.t(), keyword() -> {:ok, map()} | {:error, term()}),
           accounts_pause: (String.t(), String.t(), keyword() -> {:ok, map()} | {:error, term()}),
@@ -110,6 +111,7 @@ defmodule SymphonyElixir.CLI do
       symphony accounts login codex <id> [--email <email>] [path-to-symphony.yml|path-to-WORKFLOW.md]
       symphony accounts login claude <id> [--email <email>] [--token-stdin|--token-file <path>|--token-env <VAR>] [path-to-symphony.yml|path-to-WORKFLOW.md]
         Claude setup-token output is streamed live, so SSH users can open the printed auth URL elsewhere.
+      symphony accounts import claude <id> [--email <email>] [--from <CLAUDE_CONFIG_DIR>] [path-to-symphony.yml|path-to-WORKFLOW.md]
       symphony accounts list [codex|claude] [path-to-symphony.yml|path-to-WORKFLOW.md]
       symphony accounts verify <codex|claude> <id> [path-to-symphony.yml|path-to-WORKFLOW.md]
       symphony accounts pause <codex|claude> <id> [--until <timestamp>] [--reason <text>] [path-to-symphony.yml|path-to-WORKFLOW.md]
@@ -130,6 +132,7 @@ defmodule SymphonyElixir.CLI do
       set_server_port_override: &set_server_port_override/1,
       ensure_all_started: fn -> Application.ensure_all_started(:symphony_elixir) end,
       accounts_login: &Accounts.login/3,
+      accounts_import: &Accounts.import_account/3,
       accounts_list: &Accounts.list/1,
       accounts_verify: &Accounts.verify/3,
       accounts_pause: &Accounts.pause/3,
@@ -158,6 +161,22 @@ defmodule SymphonyElixir.CLI do
     else
       {:error, %OptionParser.ParseError{} = error} -> {:error, error.message}
       {:error, reason} -> {:error, "Failed to login account: #{format_account_error(reason)}"}
+    end
+  end
+
+  defp evaluate_accounts(["import", backend, id | rest], deps) do
+    with {:ok, opts, config_path} <-
+           parse_account_options(rest,
+             email: :string,
+             from: :string
+           ),
+         :ok <- maybe_set_account_config_path(config_path, deps),
+         {:ok, account} <- account_dep(deps, :accounts_import).(backend, id, opts) do
+      IO.puts("Imported #{account.backend} account #{account.id}#{email_suffix(account)}")
+      :ok
+    else
+      {:error, %OptionParser.ParseError{} = error} -> {:error, error.message}
+      {:error, reason} -> {:error, "Failed to import account: #{format_account_error(reason)}"}
     end
   end
 
