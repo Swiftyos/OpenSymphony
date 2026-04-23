@@ -340,78 +340,197 @@ defmodule SymphonyElixir.ExtensionsTest do
     conn = get(build_conn(), "/api/v1/state")
     state_payload = json_response(conn, 200)
 
-    assert state_payload == %{
+    assert Map.take(state_payload, ["generated_at", "counts", "agent_totals", "rate_limits", "polling"]) == %{
              "generated_at" => state_payload["generated_at"],
              "counts" => %{"running" => 1, "retrying" => 1},
-             "running" => [
-               %{
-                 "issue_id" => "issue-http",
-                 "issue_identifier" => "MT-HTTP",
-                 "state" => "In Progress",
-                 "backend" => "claude",
-                 "effort" => "max",
-                 "worker_host" => nil,
-                 "workspace_path" => nil,
-                 "session_id" => "thread-http",
-                 "turn_count" => 7,
-                 "last_event" => "notification",
-                 "last_message" => "rendered",
-                 "started_at" => state_payload["running"] |> List.first() |> Map.fetch!("started_at"),
-                 "last_event_at" => nil,
-                 "tokens" => %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12}
-               }
-             ],
-             "retrying" => [
-               %{
-                 "issue_id" => "issue-retry",
-                 "issue_identifier" => "MT-RETRY",
-                 "attempt" => 2,
-                 "due_at" => state_payload["retrying"] |> List.first() |> Map.fetch!("due_at"),
-                 "error" => "boom",
-                 "worker_host" => nil,
-                 "workspace_path" => nil
-               }
-             ],
              "agent_totals" => %{
                "input_tokens" => 4,
                "output_tokens" => 8,
                "total_tokens" => 12,
                "seconds_running" => 42.5
              },
-             "rate_limits" => %{"primary" => %{"remaining" => 11}}
+             "rate_limits" => %{"primary" => %{"remaining" => 11}},
+             "polling" => nil
            }
+
+    assert [running_payload] = state_payload["running"]
+
+    assert Map.take(running_payload, [
+             "issue_id",
+             "issue_identifier",
+             "issue_title",
+             "issue_url",
+             "state",
+             "project_slug",
+             "project_name",
+             "backend",
+             "effort",
+             "account_id",
+             "account_email",
+             "session_id",
+             "turn_count",
+             "last_event",
+             "last_message",
+             "started_at",
+             "last_event_at",
+             "tokens",
+             "progress"
+           ]) == %{
+             "issue_id" => "issue-http",
+             "issue_identifier" => "MT-HTTP",
+             "issue_title" => "Render HTTP dashboard",
+             "issue_url" => "https://linear.app/test/issue/MT-HTTP/render-http-dashboard",
+             "state" => "In Progress",
+             "project_slug" => "project",
+             "project_name" => "Project",
+             "backend" => "claude",
+             "effort" => "max",
+             "account_id" => "claude-primary",
+             "account_email" => "claude@example.com",
+             "session_id" => "thread-http",
+             "turn_count" => 7,
+             "last_event" => "notification",
+             "last_message" => "rendered",
+             "started_at" => running_payload["started_at"],
+             "last_event_at" => nil,
+             "tokens" => %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12},
+             "progress" => %{"label" => "In Progress", "percent" => 58, "tone" => "active"}
+           }
+
+    assert [retry_payload] = state_payload["retrying"]
+
+    assert Map.take(retry_payload, [
+             "issue_id",
+             "issue_identifier",
+             "issue_title",
+             "issue_url",
+             "project_slug",
+             "project_name",
+             "backend",
+             "effort",
+             "state",
+             "attempt",
+             "due_at",
+             "error",
+             "worker_host",
+             "workspace_path",
+             "tokens",
+             "progress"
+           ]) == %{
+             "issue_id" => "issue-retry",
+             "issue_identifier" => "MT-RETRY",
+             "issue_title" => "Retry dashboard issue",
+             "issue_url" => "https://linear.app/test/issue/MT-RETRY/retry-dashboard-issue",
+             "project_slug" => "project",
+             "project_name" => "Project",
+             "backend" => "codex",
+             "effort" => "medium",
+             "state" => "retrying",
+             "attempt" => 2,
+             "due_at" => retry_payload["due_at"],
+             "error" => "boom",
+             "worker_host" => nil,
+             "workspace_path" => nil,
+             "tokens" => %{"input_tokens" => 0, "output_tokens" => 0, "total_tokens" => 0},
+             "progress" => %{"label" => "Backoff", "percent" => 38, "tone" => "warning"}
+           }
+
+    assert [
+             %{
+               "backend" => "claude",
+               "id" => "claude-primary",
+               "label" => "claude@example.com",
+               "running_count" => 1,
+               "total_tokens" => 12,
+               "rate_limit_buckets" => [
+                 %{"bucket" => "session", "limit" => 100, "remaining" => 80},
+                 %{"bucket" => "weekly", "limit" => 1000, "remaining" => 900}
+               ]
+             }
+           ] = state_payload["accounts"]
+
+    assert [
+             %{
+               "slug" => "project",
+               "issue_count" => 2,
+               "running_count" => 1,
+               "retrying_count" => 1,
+               "total_tokens" => 12,
+               "issues" => [%{"issue_identifier" => "MT-HTTP"}, %{"issue_identifier" => "MT-RETRY"}]
+             }
+           ] = state_payload["projects"]
+
+    assert state_payload["telemetry"]["enabled"] == false
+    assert state_payload["capacity"]["max_concurrent_agents"] == 10
 
     conn = get(build_conn(), "/api/v1/MT-HTTP")
     issue_payload = json_response(conn, 200)
 
-    assert issue_payload == %{
+    assert Map.take(issue_payload, [
+             "issue_identifier",
+             "issue_id",
+             "issue_title",
+             "issue_url",
+             "project",
+             "status",
+             "workspace",
+             "attempts",
+             "retry",
+             "logs",
+             "recent_events",
+             "last_error",
+             "tracked"
+           ]) == %{
              "issue_identifier" => "MT-HTTP",
              "issue_id" => "issue-http",
+             "issue_title" => "Render HTTP dashboard",
+             "issue_url" => "https://linear.app/test/issue/MT-HTTP/render-http-dashboard",
+             "project" => %{"id" => "project-id", "slug" => "project", "name" => "Project"},
              "status" => "running",
              "workspace" => %{
                "path" => Path.join(Config.settings!().workspace.root, "MT-HTTP"),
                "host" => nil
              },
              "attempts" => %{"restart_count" => 0, "current_retry_attempt" => 0},
-             "running" => %{
-               "backend" => "claude",
-               "effort" => "max",
-               "worker_host" => nil,
-               "workspace_path" => nil,
-               "session_id" => "thread-http",
-               "turn_count" => 7,
-               "state" => "In Progress",
-               "started_at" => issue_payload["running"]["started_at"],
-               "last_event" => "notification",
-               "last_message" => "rendered",
-               "last_event_at" => nil,
-               "tokens" => %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12}
-             },
              "retry" => nil,
              "logs" => %{"agent_session_logs" => []},
              "recent_events" => [],
              "last_error" => nil,
              "tracked" => %{}
+           }
+
+    assert Map.take(issue_payload["running"], [
+             "backend",
+             "effort",
+             "account_id",
+             "account_email",
+             "worker_host",
+             "workspace_path",
+             "session_id",
+             "turn_count",
+             "state",
+             "started_at",
+             "last_event",
+             "last_message",
+             "last_event_at",
+             "tokens",
+             "progress"
+           ]) == %{
+             "backend" => "claude",
+             "effort" => "max",
+             "account_id" => "claude-primary",
+             "account_email" => "claude@example.com",
+             "worker_host" => nil,
+             "workspace_path" => nil,
+             "session_id" => "thread-http",
+             "turn_count" => 7,
+             "state" => "In Progress",
+             "started_at" => issue_payload["running"]["started_at"],
+             "last_event" => "notification",
+             "last_message" => "rendered",
+             "last_event_at" => nil,
+             "tokens" => %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12},
+             "progress" => %{"label" => "In Progress", "percent" => 58, "tone" => "active"}
            }
 
     conn = get(build_conn(), "/api/v1/MT-RETRY")
@@ -697,14 +816,43 @@ defmodule SymphonyElixir.ExtensionsTest do
   end
 
   defp static_snapshot do
+    today = Date.utc_today() |> Date.to_iso8601()
+    month = Date.utc_today() |> Calendar.strftime("%Y-%m")
+
     %{
       running: [
         %{
           issue_id: "issue-http",
           identifier: "MT-HTTP",
+          issue_title: "Render HTTP dashboard",
+          issue_url: "https://linear.app/test/issue/MT-HTTP/render-http-dashboard",
           state: "In Progress",
+          project_id: "project-id",
+          project_slug: "project",
+          project_name: "Project",
+          labels: ["thinking/max"],
           backend: "claude",
           effort: "max",
+          account: %{
+            backend: "claude",
+            id: "claude-primary",
+            email: "claude@example.com",
+            state: "healthy",
+            credential_kind: "claude_oauth_token",
+            latest_rate_limits: %{
+              "session" => %{"limit" => 100, "remaining" => 80},
+              "weekly" => %{"limit" => 1_000, "remaining" => 900}
+            },
+            token_totals: %{
+              "total" => %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12},
+              "daily" => %{"period" => today, "input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12},
+              "monthly" => %{"period" => month, "input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12}
+            }
+          },
+          account_id: "claude-primary",
+          account_email: "claude@example.com",
+          account_state: "healthy",
+          account_credential_kind: "claude_oauth_token",
           session_id: "thread-http",
           turn_count: 7,
           agent_server_pid: nil,
@@ -721,6 +869,14 @@ defmodule SymphonyElixir.ExtensionsTest do
         %{
           issue_id: "issue-retry",
           identifier: "MT-RETRY",
+          issue_title: "Retry dashboard issue",
+          issue_url: "https://linear.app/test/issue/MT-RETRY/retry-dashboard-issue",
+          project_id: "project-id",
+          project_slug: "project",
+          project_name: "Project",
+          labels: ["thinking/medium"],
+          backend: "codex",
+          effort: "medium",
           attempt: 2,
           due_in_ms: 2_000,
           error: "boom"

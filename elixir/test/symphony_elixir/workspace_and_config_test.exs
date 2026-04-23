@@ -1413,6 +1413,20 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.accounts.monthly_token_budget == 200_000
   end
 
+  test "config accepts common account boolean spellings" do
+    assert {:ok, config} =
+             Schema.parse(%{
+               "tracker" => %{"kind" => "memory"},
+               "accounts" => %{
+                 "enabled" => "YES",
+                 "allow_host_auth_fallback" => "no"
+               }
+             })
+
+    assert config.accounts.enabled == true
+    assert config.accounts.allow_host_auth_fallback == false
+  end
+
   test "schema parse infers backend from a lone provider block" do
     assert {:ok, opencode_settings} =
              Schema.parse(%{

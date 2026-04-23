@@ -210,6 +210,8 @@ defmodule SymphonyElixir.Config.Schema do
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
+      attrs = normalize_boolean_attrs(attrs, [:enabled, :allow_host_auth_fallback])
+
       schema
       |> cast(
         attrs,
@@ -232,6 +234,42 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:daily_token_budget, greater_than: 0)
       |> validate_number(:monthly_token_budget, greater_than: 0)
     end
+
+    defp normalize_boolean_attrs(attrs, fields) when is_map(attrs) do
+      Enum.reduce(fields, attrs, fn field, acc ->
+        acc
+        |> normalize_boolean_attr(field)
+        |> normalize_boolean_attr(Atom.to_string(field))
+      end)
+    end
+
+    defp normalize_boolean_attrs(attrs, _fields), do: attrs
+
+    defp normalize_boolean_attr(attrs, field) do
+      case Map.fetch(attrs, field) do
+        {:ok, value} ->
+          Map.put(attrs, field, normalize_boolean_value(value))
+
+        :error ->
+          attrs
+      end
+    end
+
+    defp normalize_boolean_value(value) when is_binary(value) do
+      case String.downcase(String.trim(value)) do
+        "true" -> true
+        "yes" -> true
+        "on" -> true
+        "1" -> true
+        "false" -> false
+        "no" -> false
+        "off" -> false
+        "0" -> false
+        _ -> value
+      end
+    end
+
+    defp normalize_boolean_value(value), do: value
   end
 
   defmodule Agent do
