@@ -678,6 +678,90 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert snapshot.rate_limits == rate_limits
   end
 
+  test "orchestrator captures codex-native rate-limit payloads (usedPercent/resetsAt/windowDurationMins)" do
+    issue_id = "issue-codex-rate-limit-native"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-221b",
+      title: "Codex native rate limit format",
+      description: "Ensure primary/secondary buckets with usedPercent/resetsAt/windowDurationMins are recognized",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-221b"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :CodexNativeRateLimitOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+    process_ref = make_ref()
+    started_at = DateTime.utc_now()
+
+    running_entry = %{
+      pid: self(),
+      ref: process_ref,
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: nil,
+      last_agent_message: nil,
+      last_agent_timestamp: nil,
+      last_agent_event: nil,
+      agent_input_tokens: 0,
+      agent_output_tokens: 0,
+      agent_total_tokens: 0,
+      agent_last_reported_input_tokens: 0,
+      agent_last_reported_output_tokens: 0,
+      agent_last_reported_total_tokens: 0,
+      started_at: started_at
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    session_reset = DateTime.utc_now() |> DateTime.add(5 * 60 * 60, :second) |> DateTime.to_unix()
+    weekly_reset = DateTime.utc_now() |> DateTime.add(7 * 24 * 60 * 60, :second) |> DateTime.to_unix()
+
+    rate_limits = %{
+      "limitId" => "codex_bengalfox",
+      "primary" => %{"usedPercent" => 78, "resetsAt" => session_reset, "windowDurationMins" => 300},
+      "secondary" => %{"usedPercent" => 94, "resetsAt" => weekly_reset, "windowDurationMins" => 10_080}
+    }
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :notification,
+         payload: %{
+           "method" => "codex/event/token_count",
+           "params" => %{
+             "msg" => %{
+               "type" => "event_msg",
+               "payload" => %{
+                 "type" => "token_count",
+                 "rate_limits" => rate_limits
+               }
+             }
+           }
+         },
+         timestamp: DateTime.utc_now()
+       }}
+    )
+
+    _ = GenServer.call(pid, :snapshot)
+    state_after = :sys.get_state(pid)
+    assert state_after.codex_rate_limits == rate_limits
+  end
+
   test "orchestrator token accounting prefers total_token_usage over last_token_usage in token_count payloads" do
     issue_id = "issue-token-precedence"
 

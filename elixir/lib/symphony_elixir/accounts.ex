@@ -1553,11 +1553,17 @@ defmodule SymphonyElixir.Accounts do
       Map.get(bucket, "reset_at") ||
         Map.get(bucket, :reset_at) ||
         Map.get(bucket, "resetAt") ||
-        Map.get(bucket, :resetAt)
+        Map.get(bucket, :resetAt) ||
+        Map.get(bucket, "resets_at") ||
+        Map.get(bucket, :resets_at) ||
+        Map.get(bucket, "resetsAt") ||
+        Map.get(bucket, :resetsAt)
 
     relative =
       Map.get(bucket, "reset_in_seconds") ||
         Map.get(bucket, :reset_in_seconds) ||
+        Map.get(bucket, "resets_in_seconds") ||
+        Map.get(bucket, :resets_in_seconds) ||
         Map.get(bucket, "reset_after_seconds") ||
         Map.get(bucket, :reset_after_seconds)
 

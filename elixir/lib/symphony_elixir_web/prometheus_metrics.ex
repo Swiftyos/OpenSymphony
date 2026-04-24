@@ -481,6 +481,8 @@ defmodule SymphonyElixirWeb.PrometheusMetrics do
     relative =
       Map.get(bucket, "reset_in_seconds") ||
         Map.get(bucket, :reset_in_seconds) ||
+        Map.get(bucket, "resets_in_seconds") ||
+        Map.get(bucket, :resets_in_seconds) ||
         Map.get(bucket, "reset_after_seconds") ||
         Map.get(bucket, :reset_after_seconds)
 
