@@ -176,16 +176,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
                         <span class="meter-fill meter-fill-account" style={percent_width(account.daily_budget_percent)}></span>
                       </div>
                     </div>
-
-                    <div class="budget-item">
-                      <div class="budget-label">
-                        <span>Monthly</span>
-                        <span class="numeric"><%= format_budget(account.monthly_tokens, account.monthly_token_budget) %></span>
-                      </div>
-                      <div class="meter-track">
-                        <span class="meter-fill meter-fill-account" style={percent_width(account.monthly_budget_percent)}></span>
-                      </div>
-                    </div>
                   </div>
 
                   <div class="limit-list">

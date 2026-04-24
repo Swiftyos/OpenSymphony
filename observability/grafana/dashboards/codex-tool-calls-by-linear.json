@@ -1,0 +1,1458 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "links": [
+    {
+      "asDropdown": false,
+      "icon": "",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": true,
+      "title": "Open in Linear",
+      "tooltip": "",
+      "type": "link",
+      "url": "https://linear.app/issue/${linear_issue}"
+    },
+    {
+      "asDropdown": false,
+      "icon": "",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": true,
+      "title": "Open VictoriaTraces VMUI",
+      "tooltip": "",
+      "type": "link",
+      "url": "http://localhost:11343/select/vmui"
+    }
+  ],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": {
+        "type": "victoriametrics-logs-datasource",
+        "uid": "victorialogs"
+      },
+      "description": "Total tool calls, unique tool names, and unique runs (traces) for the selected Linear issue.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "13.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "expr": "linear.issue.identifier:=\"$linear_issue\" trace_id:~\"$trace_id\" _msg:codex.tool_result tool_name:~\"$tool_name\" | stats count() as tool_calls, count_uniq(tool_name) as unique_tools, count_uniq(trace_id) as unique_runs",
+          "queryType": "stats",
+          "refId": "A"
+        }
+      ],
+      "title": "Selected Issue Summary",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "victoriametrics-logs-datasource",
+        "uid": "victorialogs"
+      },
+      "description": "apply_patch-only summary for the selected Linear issue. No data means this issue has no apply_patch calls.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Tool Calls Before First Write"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Avg Tools Before Write"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Num Writes"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 16,
+        "x": 8,
+        "y": 0
+      },
+      "id": 7,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "13.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "expr": "linear.issue.identifier:=\"$linear_issue\" trace_id:~\"$trace_id\" _msg:codex.tool_result | sort by (_time asc) rank as call_number | filter tool_name:=apply_patch | math (call_number - 1) as tools_before_write | stats min(tools_before_write) as tool_calls_before_first_write, avg(tools_before_write) as avg_tools_before_write, count() as num_writes",
+          "queryType": "stats",
+          "refId": "A"
+        }
+      ],
+      "title": "Write Summary",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "indexByName": {
+              "avg_tools_before_write": 1,
+              "num_writes": 2,
+              "tool_calls_before_first_write": 0
+            },
+            "renameByName": {
+              "avg_tools_before_write": "Avg Tools Before Write",
+              "num_writes": "Num Writes",
+              "tool_calls_before_first_write": "Tool Calls Before First Write"
+            }
+          }
+        }
+      ],
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "victoriametrics-logs-datasource",
+        "uid": "victorialogs"
+      },
+      "description": "Total tokens and estimated cost across all runs for the selected Linear issue. Cost is estimated at gpt-5.5 pricing: input $5.00 / output $30.00 / cached $0.50 per M tokens. Totals are summed from codex.sse_event response.completed logs within the dashboard time range.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "total_input_tokens"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Total Input Tokens"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "total_output_tokens"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Total Output Tokens"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "total_cached_tokens"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Total Cached Tokens"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "total_cost_usd"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Est. Total Cost (gpt-5.5)"
+              },
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 4
+              },
+              {
+                "id": "noValue",
+                "value": "$0"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "id": 10,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "13.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "expr": "linear.issue.identifier:=\"$linear_issue\" trace_id:~\"$trace_id\" _msg:codex.sse_event event.kind:=\"response.completed\" input_token_count:* | math input_token_count*5/1000000 + output_token_count*30/1000000 + cached_token_count*0.5/1000000 as row_cost | stats sum(input_token_count) as total_input_tokens, sum(output_token_count) as total_output_tokens, sum(cached_token_count) as total_cached_tokens, sum(row_cost) as total_cost_usd",
+          "queryType": "stats",
+          "refId": "A"
+        }
+      ],
+      "title": "Token Totals & Est. Cost",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "victoriametrics-logs-datasource",
+        "uid": "victorialogs"
+      },
+      "description": "Tool-call event markers over token usage for the selected Linear issue, across all its runs within the dashboard time range.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "opacity",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 3,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "input_token_count"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Input Tokens"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 12
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "output_token_count"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Output Tokens"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cached_token_count"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Cached Tokens (cumulative)"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "purple",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 18
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "all_tool_event"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "All Tool Calls"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "gray",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "bars"
+              },
+              {
+                "id": "custom.barAlignment",
+                "value": 0
+              },
+              {
+                "id": "custom.barWidthFactor",
+                "value": 0.012
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 35
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "hidden"
+              },
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": true,
+                  "viz": false
+                }
+              },
+              {
+                "id": "min",
+                "value": 0
+              },
+              {
+                "id": "max",
+                "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "exec_command_event"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "exec_command"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "bars"
+              },
+              {
+                "id": "custom.barAlignment",
+                "value": 0
+              },
+              {
+                "id": "custom.barWidthFactor",
+                "value": 0.012
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 100
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "hidden"
+              },
+              {
+                "id": "min",
+                "value": 0
+              },
+              {
+                "id": "max",
+                "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "write_stdin_event"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "write_stdin"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "cyan",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "bars"
+              },
+              {
+                "id": "custom.barAlignment",
+                "value": 0
+              },
+              {
+                "id": "custom.barWidthFactor",
+                "value": 0.012
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 100
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "hidden"
+              },
+              {
+                "id": "min",
+                "value": 0
+              },
+              {
+                "id": "max",
+                "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "apply_patch_event"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "apply_patch"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "bars"
+              },
+              {
+                "id": "custom.barAlignment",
+                "value": 0
+              },
+              {
+                "id": "custom.barWidthFactor",
+                "value": 0.012
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 100
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "hidden"
+              },
+              {
+                "id": "min",
+                "value": 0
+              },
+              {
+                "id": "max",
+                "value": 1
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 10
+      },
+      "id": 9,
+      "options": {
+        "annotations": {
+          "clustering": -1,
+          "multiLane": false
+        },
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "13.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "expr": "linear.issue.identifier:=\"$linear_issue\" trace_id:~\"$trace_id\" _msg:codex.sse_event event.kind:=\"response.completed\" input_token_count:* | fields _time, input_token_count, output_token_count, cached_token_count | sort by (_time asc)",
+          "maxLines": 1000,
+          "queryType": "instant",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "expr": "linear.issue.identifier:=\"$linear_issue\" trace_id:~\"$trace_id\" _msg:codex.tool_result tool_name:~\"$tool_name\" | math 1 as all_tool_event | fields _time, all_tool_event | sort by (_time asc)",
+          "maxLines": 2000,
+          "queryType": "instant",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "expr": "linear.issue.identifier:=\"$linear_issue\" trace_id:~\"$trace_id\" _msg:codex.tool_result tool_name:=exec_command tool_name:~\"$tool_name\" | math 1 as exec_command_event | fields _time, exec_command_event | sort by (_time asc)",
+          "maxLines": 2000,
+          "queryType": "instant",
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "expr": "linear.issue.identifier:=\"$linear_issue\" trace_id:~\"$trace_id\" _msg:codex.tool_result tool_name:=write_stdin tool_name:~\"$tool_name\" | math 1 as write_stdin_event | fields _time, write_stdin_event | sort by (_time asc)",
+          "maxLines": 2000,
+          "queryType": "instant",
+          "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "expr": "linear.issue.identifier:=\"$linear_issue\" trace_id:~\"$trace_id\" _msg:codex.tool_result tool_name:=apply_patch tool_name:~\"$tool_name\" | math 1 as apply_patch_event | fields _time, apply_patch_event | sort by (_time asc)",
+          "maxLines": 2000,
+          "queryType": "instant",
+          "refId": "E"
+        }
+      ],
+      "title": "Issue Timeline",
+      "transformations": [
+        {
+          "id": "extractFields",
+          "options": {
+            "format": "json",
+            "keepTime": true,
+            "replace": false,
+            "source": "Line"
+          }
+        },
+        {
+          "id": "convertFieldType",
+          "options": {
+            "conversions": [
+              {
+                "destinationType": "number",
+                "targetField": "input_token_count"
+              },
+              {
+                "destinationType": "number",
+                "targetField": "output_token_count"
+              },
+              {
+                "destinationType": "number",
+                "targetField": "cached_token_count"
+              },
+              {
+                "destinationType": "number",
+                "targetField": "all_tool_event"
+              },
+              {
+                "destinationType": "number",
+                "targetField": "exec_command_event"
+              },
+              {
+                "destinationType": "number",
+                "targetField": "write_stdin_event"
+              },
+              {
+                "destinationType": "number",
+                "targetField": "apply_patch_event"
+              }
+            ]
+          }
+        }
+      ],
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "victoriametrics-logs-datasource",
+        "uid": "victorialogs"
+      },
+      "description": "Count of calls by tool_name for the selected Linear issue.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "footer": {
+              "reducers": []
+            },
+            "inspect": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        }
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 19
+      },
+      "id": 4,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "pluginVersion": "13.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "expr": "linear.issue.identifier:=\"$linear_issue\" trace_id:~\"$trace_id\" _msg:codex.tool_result | filter tool_name:~\"$tool_name\" | stats by (tool_name) count() | sort by (\"count(*)\" desc)",
+          "maxLines": 100,
+          "queryType": "instant",
+          "refId": "A"
+        }
+      ],
+      "title": "Calls By Tool",
+      "transformations": [
+        {
+          "id": "extractFields",
+          "options": {
+            "format": "json",
+            "keepTime": false,
+            "replace": true,
+            "source": "labels"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Line": true
+            },
+            "indexByName": {
+              "count(*)": 1,
+              "tool_name": 0
+            },
+            "renameByName": {
+              "count(*)": "count"
+            }
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "victoriametrics-logs-datasource",
+        "uid": "victorialogs"
+      },
+      "description": "Chronological tool calls for the selected Linear issue (across all runs). call_number is the global sequence number. The five parameter slots show the most common tool arguments; raw arguments stays available for tools with free-form input such as apply_patch.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "footer": {
+              "reducers": []
+            },
+            "inspect": true
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "call_number"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 116
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "time"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 210
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "tool_name"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 150
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "trace_id"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 260
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/param_[1-5]_name/"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/param_[1-5]$/"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 420
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "arguments"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 650
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 16,
+        "w": 24,
+        "x": 0,
+        "y": 26
+      },
+      "id": 8,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "pluginVersion": "13.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "expr": "linear.issue.identifier:=\"$linear_issue\" trace_id:~\"$trace_id\" _msg:codex.tool_result | sort by (_time asc) rank as call_number | filter tool_name:~\"$tool_name\" | unpack_json arguments | format \"cmd\" as param_1_name | copy cmd as param_1 | format \"workdir\" as param_2_name | copy workdir as param_2 | format \"yield_time_ms\" as param_3_name | copy yield_time_ms as param_3 | format \"max_output_tokens\" as param_4_name | copy max_output_tokens as param_4 | format \"sandbox_permissions\" as param_5_name | copy sandbox_permissions as param_5 | fields call_number, _time, trace_id, tool_name, param_1_name, param_1, param_2_name, param_2, param_3_name, param_3, param_4_name, param_4, param_5_name, param_5, arguments | sort by (call_number asc)",
+          "maxLines": 500,
+          "queryType": "instant",
+          "refId": "A"
+        }
+      ],
+      "title": "Tool Call Trajectory",
+      "transformations": [
+        {
+          "id": "extractFields",
+          "options": {
+            "format": "json",
+            "keepTime": true,
+            "replace": true,
+            "source": "labels"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "indexByName": {
+              "Time": 1,
+              "arguments": 14,
+              "call_number": 0,
+              "param_1": 5,
+              "param_1_name": 4,
+              "param_2": 7,
+              "param_2_name": 6,
+              "param_3": 9,
+              "param_3_name": 8,
+              "param_4": 11,
+              "param_4_name": 10,
+              "param_5": 13,
+              "param_5_name": 12,
+              "tool_name": 3,
+              "trace_id": 2
+            },
+            "renameByName": {
+              "Time": "time"
+            }
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "victoriametrics-logs-datasource",
+        "uid": "victorialogs"
+      },
+      "description": "Raw codex.tool_result events for the selected Linear issue. Expand labels to see arguments/output/call_id/trace_id.",
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 42
+      },
+      "id": 5,
+      "options": {
+        "dedupStrategy": "none",
+        "enableInfiniteScrolling": false,
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showControls": false,
+        "showFieldSelector": false,
+        "showLabels": true,
+        "showLevel": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "timestampResolution": "ms",
+        "unwrappedColumns": false,
+        "wrapLogMessage": true
+      },
+      "pluginVersion": "13.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "expr": "linear.issue.identifier:=\"$linear_issue\" trace_id:~\"$trace_id\" _msg:codex.tool_result tool_name:~\"$tool_name\" | fields _time, tool_name, arguments, call_id, duration_ms, success, trace_id, conversation.id | sort by (_time desc)",
+          "maxLines": 500,
+          "queryType": "instant",
+          "refId": "A"
+        }
+      ],
+      "title": "Raw Tool Calls",
+      "type": "logs"
+    },
+    {
+      "datasource": {
+        "type": "victoriametrics-logs-datasource",
+        "uid": "victorialogs"
+      },
+      "description": "Unique repeated tool call shapes for the selected Linear issue, formatted like the trajectory table and ordered by repeat_count. Empty means no exact repeats.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "footer": {
+              "reducers": []
+            },
+            "inspect": true
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "repeat_count"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "tool_name"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 150
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/param_[1-5]_name/"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/param_[1-5]$/"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 420
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "arguments"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 1100
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 11,
+        "w": 24,
+        "x": 0,
+        "y": 52
+      },
+      "id": 3,
+      "options": {
+        "cellHeight": "sm",
+        "frameIndex": 3,
+        "showHeader": true
+      },
+      "pluginVersion": "13.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "expr": "linear.issue.identifier:=\"$linear_issue\" trace_id:~\"$trace_id\" _msg:codex.tool_result | filter tool_name:~\"$tool_name\" | unpack_json arguments | format \"cmd\" as param_1_name | copy cmd as param_1 | format \"workdir\" as param_2_name | copy workdir as param_2 | format \"yield_time_ms\" as param_3_name | copy yield_time_ms as param_3 | format \"max_output_tokens\" as param_4_name | copy max_output_tokens as param_4 | format \"sandbox_permissions\" as param_5_name | copy sandbox_permissions as param_5 | stats by (tool_name, param_1_name, param_1, param_2_name, param_2, param_3_name, param_3, param_4_name, param_4, param_5_name, param_5, arguments) count() | filter \"count(*)\":>1",
+          "queryType": "stats",
+          "refId": "A"
+        }
+      ],
+      "title": "Repeated Exact Tool Calls",
+      "transformations": [
+        {
+          "id": "labelsToFields",
+          "options": {
+            "mode": "columns"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "indexByName": {
+              "Value": 0,
+              "arguments": 12,
+              "param_1": 3,
+              "param_1_name": 2,
+              "param_2": 5,
+              "param_2_name": 4,
+              "param_3": 7,
+              "param_3_name": 6,
+              "param_4": 9,
+              "param_4_name": 8,
+              "param_5": 11,
+              "param_5_name": 10,
+              "tool_name": 1
+            },
+            "renameByName": {
+              "Value": "repeat_count"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": {},
+            "sort": [
+              {
+                "desc": true,
+                "field": "repeat_count"
+              }
+            ]
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "victoriametrics-logs-datasource",
+        "uid": "victorialogs"
+      },
+      "description": "Related codex.tool_decision events for the selected Linear issue.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 63
+      },
+      "id": 6,
+      "options": {
+        "dedupStrategy": "none",
+        "enableInfiniteScrolling": false,
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showControls": false,
+        "showFieldSelector": false,
+        "showLabels": true,
+        "showLevel": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "timestampResolution": "ms",
+        "unwrappedColumns": false,
+        "wrapLogMessage": true
+      },
+      "pluginVersion": "13.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "expr": "linear.issue.identifier:=\"$linear_issue\" trace_id:~\"$trace_id\" _msg:codex.tool_decision | fields _time, tool_name, call_id, decision, source, reason, trace_id, conversation.id | sort by (_time desc)",
+          "maxLines": 300,
+          "queryType": "instant",
+          "refId": "A"
+        }
+      ],
+      "title": "Tool Decisions",
+      "type": "logs"
+    }
+  ],
+  "preload": false,
+  "refresh": "10s",
+  "schemaVersion": 42,
+  "tags": ["codex", "otel", "tools", "linear"],
+  "templating": {
+    "list": [
+      {
+        "allowCustomValue": true,
+        "current": {
+          "text": "ANA-231",
+          "value": "ANA-231"
+        },
+        "datasource": {
+          "type": "victoriametrics-logs-datasource",
+          "uid": "victorialogs"
+        },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Linear Issue",
+        "multi": false,
+        "name": "linear_issue",
+        "options": [],
+        "query": {
+          "field": "linear.issue.identifier",
+          "limit": 200,
+          "query": "_msg:codex.tool_result linear.issue.identifier:*",
+          "refId": "VictoriaLogsVariableQueryEditor-VariableQuery",
+          "type": "fieldValue"
+        },
+        "refresh": 2,
+        "regex": "",
+        "regexApplyTo": "value",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "allowCustomValue": true,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "victoriametrics-logs-datasource",
+          "uid": "victorialogs"
+        },
+        "hide": 0,
+        "includeAll": true,
+        "label": "Trace",
+        "multi": true,
+        "name": "trace_id",
+        "options": [],
+        "query": {
+          "field": "trace_id",
+          "limit": 200,
+          "query": "linear.issue.identifier:=\"$linear_issue\" _msg:codex.tool_result",
+          "refId": "VictoriaLogsVariableQueryEditor-VariableQuery",
+          "type": "fieldValue"
+        },
+        "refresh": 2,
+        "regex": "",
+        "regexApplyTo": "value",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "allowCustomValue": true,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "victoriametrics-logs-datasource",
+          "uid": "victorialogs"
+        },
+        "hide": 0,
+        "includeAll": true,
+        "label": "Tool",
+        "multi": true,
+        "name": "tool_name",
+        "options": [],
+        "query": {
+          "field": "tool_name",
+          "limit": 100,
+          "query": "linear.issue.identifier:=\"$linear_issue\" _msg:codex.tool_result trace_id:~\"$trace_id\"",
+          "refId": "VictoriaLogsVariableQueryEditor-VariableQuery",
+          "type": "fieldValue"
+        },
+        "refresh": 2,
+        "regex": "",
+        "regexApplyTo": "value",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": ["5s", "10s", "30s", "1m", "5m"]
+  },
+  "timezone": "browser",
+  "title": "Codex Tool Calls by Linear Issue",
+  "uid": "codex-tool-calls-by-linear",
+  "version": 1
+}

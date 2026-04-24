@@ -1397,8 +1397,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       accounts_allow_host_auth_fallback: true,
       accounts_max_concurrent_sessions_per_account: 2,
       accounts_exhausted_cooldown_ms: 123_000,
-      accounts_daily_token_budget: 10_000,
-      accounts_monthly_token_budget: 200_000
+      accounts_daily_token_budget: 10_000
     )
 
     config = Config.settings!()
@@ -1410,7 +1409,6 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.accounts.max_concurrent_sessions_per_account == 2
     assert config.accounts.exhausted_cooldown_ms == 123_000
     assert config.accounts.daily_token_budget == 10_000
-    assert config.accounts.monthly_token_budget == 200_000
   end
 
   test "config accepts common account boolean spellings" do

@@ -817,7 +817,6 @@ defmodule SymphonyElixir.ExtensionsTest do
 
   defp static_snapshot do
     today = Date.utc_today() |> Date.to_iso8601()
-    month = Date.utc_today() |> Calendar.strftime("%Y-%m")
 
     %{
       running: [
@@ -845,8 +844,7 @@ defmodule SymphonyElixir.ExtensionsTest do
             },
             token_totals: %{
               "total" => %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12},
-              "daily" => %{"period" => today, "input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12},
-              "monthly" => %{"period" => month, "input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12}
+              "daily" => %{"period" => today, "input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12}
             }
           },
           account_id: "claude-primary",

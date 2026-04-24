@@ -1,0 +1,1798 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "links": [
+    {
+      "asDropdown": false,
+      "icon": "",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": true,
+      "title": "Open in Linear",
+      "tooltip": "",
+      "type": "link",
+      "url": "https://linear.app/issue/${linear_issue}"
+    },
+    {
+      "asDropdown": false,
+      "icon": "",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": true,
+      "title": "Open VictoriaLogs",
+      "tooltip": "",
+      "type": "link",
+      "url": "http://localhost:11342"
+    }
+  ],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": {
+        "type": "victoriametrics-logs-datasource",
+        "uid": "victorialogs"
+      },
+      "description": "Total tool calls, unique tool names, and unique sessions for the selected Linear issue.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "13.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "expr": "linear.issue.identifier:=\"$linear_issue\" session.id:~\"$session_id\" _msg:claude_code.tool_result tool_name:~\"$tool_name\" | stats count() as tool_calls, count_uniq(tool_name) as unique_tools, count_uniq(session.id) as unique_sessions",
+          "queryType": "stats",
+          "refId": "A"
+        }
+      ],
+      "title": "Selected Issue Summary",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "victoriametrics-logs-datasource",
+        "uid": "victorialogs"
+      },
+      "description": "Edit/Write/NotebookEdit summary for the selected Linear issue. No data means this issue made no file-editing tool calls.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Tool Calls Before First Write"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Avg Tools Before Write"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Num Writes"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 16,
+        "x": 8,
+        "y": 0
+      },
+      "id": 7,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "13.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "expr": "linear.issue.identifier:=\"$linear_issue\" session.id:~\"$session_id\" _msg:claude_code.tool_result | sort by (_time asc) rank as call_number | filter tool_name:~\"^(Edit|Write|NotebookEdit)$\" | math (call_number - 1) as tools_before_write | stats min(tools_before_write) as tool_calls_before_first_write, avg(tools_before_write) as avg_tools_before_write, count() as num_writes",
+          "queryType": "stats",
+          "refId": "A"
+        }
+      ],
+      "title": "Write Summary",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "indexByName": {
+              "avg_tools_before_write": 1,
+              "num_writes": 2,
+              "tool_calls_before_first_write": 0
+            },
+            "renameByName": {
+              "avg_tools_before_write": "Avg Tools Before Write",
+              "num_writes": "Num Writes",
+              "tool_calls_before_first_write": "Tool Calls Before First Write"
+            }
+          }
+        }
+      ],
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "victoriametrics-logs-datasource",
+        "uid": "victorialogs"
+      },
+      "description": "Total input, output, cache-read, and cache-creation tokens plus cost across all api_request events for the selected Linear issue, within the dashboard time range.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "total_input_tokens"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Total Input Tokens"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "total_output_tokens"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Total Output Tokens"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "total_cache_read_tokens"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Total Cache Read Tokens"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "total_cache_creation_tokens"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Total Cache Creation Tokens"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "total_cost_usd"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Total Cost (USD)"
+              },
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 4
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "id": 10,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "13.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "expr": "linear.issue.identifier:=\"$linear_issue\" session.id:~\"$session_id\" _msg:api_request input_tokens:* | stats sum(input_tokens) as total_input_tokens, sum(output_tokens) as total_output_tokens, sum(cache_read_tokens) as total_cache_read_tokens, sum(cache_creation_tokens) as total_cache_creation_tokens, sum(cost_usd) as total_cost_usd",
+          "queryType": "stats",
+          "refId": "A"
+        }
+      ],
+      "title": "Token Totals & Cost",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "victoriametrics-logs-datasource",
+        "uid": "victorialogs"
+      },
+      "description": "Tool-call event markers over token usage for the selected Linear issue, across all its sessions within the dashboard time range.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "opacity",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 3,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "input_tokens"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Input Tokens"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 12
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "output_tokens"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Output Tokens"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cache_read_tokens"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Cache Read Tokens"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "purple",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 18
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cache_creation_tokens"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Cache Creation Tokens"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "yellow",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 12
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "all_tool_event"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "All Tool Calls"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "gray",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "bars"
+              },
+              {
+                "id": "custom.barAlignment",
+                "value": 0
+              },
+              {
+                "id": "custom.barWidthFactor",
+                "value": 0.012
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 35
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "hidden"
+              },
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": true,
+                  "viz": false
+                }
+              },
+              {
+                "id": "min",
+                "value": 0
+              },
+              {
+                "id": "max",
+                "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "bash_event"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Bash"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "bars"
+              },
+              {
+                "id": "custom.barAlignment",
+                "value": 0
+              },
+              {
+                "id": "custom.barWidthFactor",
+                "value": 0.012
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 100
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "hidden"
+              },
+              {
+                "id": "min",
+                "value": 0
+              },
+              {
+                "id": "max",
+                "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "edit_event"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Edit/Write/NotebookEdit"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "bars"
+              },
+              {
+                "id": "custom.barAlignment",
+                "value": 0
+              },
+              {
+                "id": "custom.barWidthFactor",
+                "value": 0.012
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 100
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "hidden"
+              },
+              {
+                "id": "min",
+                "value": 0
+              },
+              {
+                "id": "max",
+                "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "read_event"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Read/Grep/Glob"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "cyan",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "bars"
+              },
+              {
+                "id": "custom.barAlignment",
+                "value": 0
+              },
+              {
+                "id": "custom.barWidthFactor",
+                "value": 0.012
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 100
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "hidden"
+              },
+              {
+                "id": "min",
+                "value": 0
+              },
+              {
+                "id": "max",
+                "value": 1
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 10
+      },
+      "id": 9,
+      "options": {
+        "annotations": {
+          "clustering": -1,
+          "multiLane": false
+        },
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "13.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "expr": "linear.issue.identifier:=\"$linear_issue\" session.id:~\"$session_id\" _msg:api_request input_tokens:* | fields _time, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens | sort by (_time asc)",
+          "maxLines": 1000,
+          "queryType": "instant",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "expr": "linear.issue.identifier:=\"$linear_issue\" session.id:~\"$session_id\" _msg:claude_code.tool_result tool_name:~\"$tool_name\" | math 1 as all_tool_event | fields _time, all_tool_event | sort by (_time asc)",
+          "maxLines": 2000,
+          "queryType": "instant",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "expr": "linear.issue.identifier:=\"$linear_issue\" session.id:~\"$session_id\" _msg:claude_code.tool_result tool_name:=Bash tool_name:~\"$tool_name\" | math 1 as bash_event | fields _time, bash_event | sort by (_time asc)",
+          "maxLines": 2000,
+          "queryType": "instant",
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "expr": "linear.issue.identifier:=\"$linear_issue\" session.id:~\"$session_id\" _msg:claude_code.tool_result tool_name:~\"^(Edit|Write|NotebookEdit)$\" tool_name:~\"$tool_name\" | math 1 as edit_event | fields _time, edit_event | sort by (_time asc)",
+          "maxLines": 2000,
+          "queryType": "instant",
+          "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "expr": "linear.issue.identifier:=\"$linear_issue\" session.id:~\"$session_id\" _msg:claude_code.tool_result tool_name:~\"^(Read|Grep|Glob)$\" tool_name:~\"$tool_name\" | math 1 as read_event | fields _time, read_event | sort by (_time asc)",
+          "maxLines": 2000,
+          "queryType": "instant",
+          "refId": "E"
+        }
+      ],
+      "title": "Issue Timeline",
+      "transformations": [
+        {
+          "id": "extractFields",
+          "options": {
+            "format": "json",
+            "keepTime": true,
+            "replace": false,
+            "source": "Line"
+          }
+        },
+        {
+          "id": "convertFieldType",
+          "options": {
+            "conversions": [
+              {
+                "destinationType": "number",
+                "targetField": "input_tokens"
+              },
+              {
+                "destinationType": "number",
+                "targetField": "output_tokens"
+              },
+              {
+                "destinationType": "number",
+                "targetField": "cache_read_tokens"
+              },
+              {
+                "destinationType": "number",
+                "targetField": "cache_creation_tokens"
+              },
+              {
+                "destinationType": "number",
+                "targetField": "all_tool_event"
+              },
+              {
+                "destinationType": "number",
+                "targetField": "bash_event"
+              },
+              {
+                "destinationType": "number",
+                "targetField": "edit_event"
+              },
+              {
+                "destinationType": "number",
+                "targetField": "read_event"
+              }
+            ]
+          }
+        }
+      ],
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "victoriametrics-logs-datasource",
+        "uid": "victorialogs"
+      },
+      "description": "Count of calls by tool_name for the selected Linear issue.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "footer": {
+              "reducers": []
+            },
+            "inspect": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        }
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 19
+      },
+      "id": 4,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "pluginVersion": "13.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "expr": "linear.issue.identifier:=\"$linear_issue\" session.id:~\"$session_id\" _msg:claude_code.tool_result | filter tool_name:~\"$tool_name\" | stats by (tool_name) count() | sort by (\"count(*)\" desc)",
+          "maxLines": 100,
+          "queryType": "instant",
+          "refId": "A"
+        }
+      ],
+      "title": "Calls By Tool",
+      "transformations": [
+        {
+          "id": "extractFields",
+          "options": {
+            "format": "json",
+            "keepTime": false,
+            "replace": true,
+            "source": "labels"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Line": true
+            },
+            "indexByName": {
+              "count(*)": 1,
+              "tool_name": 0
+            },
+            "renameByName": {
+              "count(*)": "count"
+            }
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "victoriametrics-logs-datasource",
+        "uid": "victorialogs"
+      },
+      "description": "Chronological tool calls for the selected Linear issue (across all sessions). call_number is the global sequence number. Dedicated columns surface the key tool_input field for each tool (command / file_path / pattern / query / skill / args / url / description); the raw tool_input column stays available as a fallback for tools with other free-form inputs such as Edit, Write, TodoWrite, and Agent.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "footer": {
+              "reducers": []
+            },
+            "inspect": true
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "call_number"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 116
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "time"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 210
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "tool_name"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 150
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "session.id"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 300
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "duration_ms"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              },
+              {
+                "id": "unit",
+                "value": "ms"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "success"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "tool_result_size_bytes"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 140
+              },
+              {
+                "id": "unit",
+                "value": "bytes"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "in_command"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "command"
+              },
+              {
+                "id": "custom.width",
+                "value": 420
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "in_file_path"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "file_path"
+              },
+              {
+                "id": "custom.width",
+                "value": 400
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "in_pattern"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "pattern"
+              },
+              {
+                "id": "custom.width",
+                "value": 240
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "in_query"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "query"
+              },
+              {
+                "id": "custom.width",
+                "value": 240
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "in_skill"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "skill"
+              },
+              {
+                "id": "custom.width",
+                "value": 140
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "in_args"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "args"
+              },
+              {
+                "id": "custom.width",
+                "value": 300
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "in_url"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "url"
+              },
+              {
+                "id": "custom.width",
+                "value": 280
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "in_description"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "description"
+              },
+              {
+                "id": "custom.width",
+                "value": 280
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "tool_input"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 650
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 16,
+        "w": 24,
+        "x": 0,
+        "y": 26
+      },
+      "id": 8,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "pluginVersion": "13.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "expr": "linear.issue.identifier:=\"$linear_issue\" session.id:~\"$session_id\" _msg:claude_code.tool_result | sort by (_time asc) rank as call_number | filter tool_name:~\"$tool_name\" | unpack_json from tool_input result_prefix \"in_\" | fields call_number, _time, session.id, tool_name, duration_ms, success, tool_result_size_bytes, use_id, in_command, in_file_path, in_pattern, in_query, in_skill, in_args, in_url, in_description, tool_input | sort by (call_number asc)",
+          "maxLines": 500,
+          "queryType": "instant",
+          "refId": "A"
+        }
+      ],
+      "title": "Tool Call Trajectory",
+      "transformations": [
+        {
+          "id": "extractFields",
+          "options": {
+            "format": "json",
+            "keepTime": true,
+            "replace": true,
+            "source": "labels"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "indexByName": {
+              "Time": 1,
+              "call_number": 0,
+              "duration_ms": 4,
+              "in_args": 13,
+              "in_command": 8,
+              "in_description": 15,
+              "in_file_path": 9,
+              "in_pattern": 10,
+              "in_query": 11,
+              "in_skill": 12,
+              "in_url": 14,
+              "session.id": 2,
+              "success": 5,
+              "tool_input": 16,
+              "tool_name": 3,
+              "tool_result_size_bytes": 6,
+              "use_id": 7
+            },
+            "renameByName": {
+              "Time": "time"
+            }
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "victoriametrics-logs-datasource",
+        "uid": "victorialogs"
+      },
+      "description": "Raw claude_code.tool_result events for the selected Linear issue. Expand labels to see duration, success, tool sizes, identifiers, and the full tool_input JSON.",
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 42
+      },
+      "id": 5,
+      "options": {
+        "dedupStrategy": "none",
+        "enableInfiniteScrolling": false,
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showControls": false,
+        "showFieldSelector": false,
+        "showLabels": true,
+        "showLevel": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "timestampResolution": "ms",
+        "unwrappedColumns": false,
+        "wrapLogMessage": true
+      },
+      "pluginVersion": "13.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "expr": "linear.issue.identifier:=\"$linear_issue\" session.id:~\"$session_id\" _msg:claude_code.tool_result tool_name:~\"$tool_name\" | fields _time, tool_name, tool_input, tool_parameters, duration_ms, success, tool_result_size_bytes, use_id, session.id, prompt.id | sort by (_time desc)",
+          "maxLines": 500,
+          "queryType": "instant",
+          "refId": "A"
+        }
+      ],
+      "title": "Raw Tool Calls",
+      "type": "logs"
+    },
+    {
+      "datasource": {
+        "type": "victoriametrics-logs-datasource",
+        "uid": "victorialogs"
+      },
+      "description": "Unique repeated tool call shapes for the selected Linear issue, formatted like the trajectory table and ordered by repeat_count. Empty means no exact repeats.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "footer": {
+              "reducers": []
+            },
+            "inspect": true
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "repeat_count"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "tool_name"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 150
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "in_command"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "command"
+              },
+              {
+                "id": "custom.width",
+                "value": 420
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "in_file_path"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "file_path"
+              },
+              {
+                "id": "custom.width",
+                "value": 400
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "in_pattern"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "pattern"
+              },
+              {
+                "id": "custom.width",
+                "value": 240
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "in_query"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "query"
+              },
+              {
+                "id": "custom.width",
+                "value": 240
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "in_skill"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "skill"
+              },
+              {
+                "id": "custom.width",
+                "value": 140
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "in_args"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "args"
+              },
+              {
+                "id": "custom.width",
+                "value": 300
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "in_url"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "url"
+              },
+              {
+                "id": "custom.width",
+                "value": 280
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "in_description"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "description"
+              },
+              {
+                "id": "custom.width",
+                "value": 280
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "tool_input"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 1100
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 11,
+        "w": 24,
+        "x": 0,
+        "y": 52
+      },
+      "id": 12,
+      "options": {
+        "cellHeight": "sm",
+        "frameIndex": 3,
+        "showHeader": true
+      },
+      "pluginVersion": "13.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "expr": "linear.issue.identifier:=\"$linear_issue\" session.id:~\"$session_id\" _msg:claude_code.tool_result | filter tool_name:~\"$tool_name\" | unpack_json from tool_input result_prefix \"in_\" | stats by (tool_name, in_command, in_file_path, in_pattern, in_query, in_skill, in_args, in_url, in_description, tool_input) count() | filter \"count(*)\":>1",
+          "queryType": "stats",
+          "refId": "A"
+        }
+      ],
+      "title": "Repeated Exact Tool Calls",
+      "transformations": [
+        {
+          "id": "labelsToFields",
+          "options": {
+            "mode": "columns"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "indexByName": {
+              "Value": 0,
+              "in_args": 7,
+              "in_command": 2,
+              "in_description": 9,
+              "in_file_path": 3,
+              "in_pattern": 4,
+              "in_query": 5,
+              "in_skill": 6,
+              "in_url": 8,
+              "tool_input": 10,
+              "tool_name": 1
+            },
+            "renameByName": {
+              "Value": "repeat_count"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": {},
+            "sort": [
+              {
+                "desc": true,
+                "field": "repeat_count"
+              }
+            ]
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "victoriametrics-logs-datasource",
+        "uid": "victorialogs"
+      },
+      "description": "Related claude_code.tool_decision events for the selected Linear issue (permission prompts, auto-approvals, denials).",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 63
+      },
+      "id": 6,
+      "options": {
+        "dedupStrategy": "none",
+        "enableInfiniteScrolling": false,
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showControls": false,
+        "showFieldSelector": false,
+        "showLabels": true,
+        "showLevel": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "timestampResolution": "ms",
+        "unwrappedColumns": false,
+        "wrapLogMessage": true
+      },
+      "pluginVersion": "13.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "expr": "linear.issue.identifier:=\"$linear_issue\" session.id:~\"$session_id\" _msg:claude_code.tool_decision | fields _time, tool_name, use_id, decision, source, session.id, prompt.id | sort by (_time desc)",
+          "maxLines": 300,
+          "queryType": "instant",
+          "refId": "A"
+        }
+      ],
+      "title": "Tool Decisions",
+      "type": "logs"
+    },
+    {
+      "datasource": {
+        "type": "victoriametrics-logs-datasource",
+        "uid": "victorialogs"
+      },
+      "description": "API requests and errors for the selected Linear issue with token usage, cost, and model.",
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 71
+      },
+      "id": 11,
+      "options": {
+        "dedupStrategy": "none",
+        "enableInfiniteScrolling": false,
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showControls": false,
+        "showFieldSelector": false,
+        "showLabels": true,
+        "showLevel": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "timestampResolution": "ms",
+        "unwrappedColumns": false,
+        "wrapLogMessage": true
+      },
+      "pluginVersion": "13.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "expr": "linear.issue.identifier:=\"$linear_issue\" session.id:~\"$session_id\" (_msg:api_request OR _msg:claude_code.api_error) | fields _time, _msg, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd, duration_ms, request_id, session.id | sort by (_time desc)",
+          "maxLines": 300,
+          "queryType": "instant",
+          "refId": "A"
+        }
+      ],
+      "title": "API Requests & Errors",
+      "type": "logs"
+    }
+  ],
+  "preload": false,
+  "refresh": "10s",
+  "schemaVersion": 42,
+  "tags": ["claude", "claude-code", "tools", "linear"],
+  "templating": {
+    "list": [
+      {
+        "allowCustomValue": true,
+        "current": {
+          "text": "ANA-227",
+          "value": "ANA-227"
+        },
+        "datasource": {
+          "type": "victoriametrics-logs-datasource",
+          "uid": "victorialogs"
+        },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Linear Issue",
+        "multi": false,
+        "name": "linear_issue",
+        "options": [],
+        "query": {
+          "field": "linear.issue.identifier",
+          "limit": 200,
+          "query": "_msg:claude_code.tool_result linear.issue.identifier:*",
+          "refId": "VictoriaLogsVariableQueryEditor-VariableQuery",
+          "type": "fieldValue"
+        },
+        "refresh": 2,
+        "regex": "",
+        "regexApplyTo": "value",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "allowCustomValue": true,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "victoriametrics-logs-datasource",
+          "uid": "victorialogs"
+        },
+        "hide": 0,
+        "includeAll": true,
+        "label": "Session (Trace)",
+        "multi": true,
+        "name": "session_id",
+        "options": [],
+        "query": {
+          "field": "session.id",
+          "limit": 200,
+          "query": "linear.issue.identifier:=\"$linear_issue\" _msg:claude_code.tool_result",
+          "refId": "VictoriaLogsVariableQueryEditor-VariableQuery",
+          "type": "fieldValue"
+        },
+        "refresh": 2,
+        "regex": "",
+        "regexApplyTo": "value",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "allowCustomValue": true,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "victoriametrics-logs-datasource",
+          "uid": "victorialogs"
+        },
+        "hide": 0,
+        "includeAll": true,
+        "label": "Tool",
+        "multi": true,
+        "name": "tool_name",
+        "options": [],
+        "query": {
+          "field": "tool_name",
+          "limit": 100,
+          "query": "linear.issue.identifier:=\"$linear_issue\" _msg:claude_code.tool_result session.id:~\"$session_id\"",
+          "refId": "VictoriaLogsVariableQueryEditor-VariableQuery",
+          "type": "fieldValue"
+        },
+        "refresh": 2,
+        "regex": "",
+        "regexApplyTo": "value",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": ["5s", "10s", "30s", "1m", "5m"]
+  },
+  "timezone": "browser",
+  "title": "Claude Code Tool Calls by Linear Issue",
+  "uid": "claude-tool-calls-by-linear",
+  "version": 3
+}

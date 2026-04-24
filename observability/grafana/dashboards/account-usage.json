@@ -438,7 +438,7 @@
             "type": "victoriametrics-logs-datasource",
             "uid": "victorialogs"
           },
-          "expr": "event.name:api_request input_tokens:~\".+\" symphony.backend:\"claude\" symphony.backend:~\"${backend:regex}\" user.account_id:~\".+\" user.account_id:~\"${account_id:regex}\" user.email:~\".+\" user.email:~\"${account_email:regex}\" | copy symphony.backend as backend | copy user.account_id as account_id | copy user.email as account_email | format \"input_tokens\" as token_type | stats by (backend, account_id, account_email, token_type) sum(input_tokens) as value",
+          "expr": "_msg:=api_request input_tokens:~\".+\" symphony.backend:\"claude\" symphony.backend:~\"${backend:regex}\" symphony.account.id:~\".+\" symphony.account.id:~\"${account_id:regex}\" user.email:~\".+\" user.email:~\"${account_email:regex}\" | copy symphony.backend as backend | copy symphony.account.id as account_id | copy user.email as account_email | format \"input_tokens\" as token_type | stats by (backend, account_id, account_email, token_type) sum(input_tokens) as value",
           "queryType": "stats",
           "refId": "F"
         },
@@ -447,7 +447,7 @@
             "type": "victoriametrics-logs-datasource",
             "uid": "victorialogs"
           },
-          "expr": "event.name:api_request cache_read_tokens:~\".+\" symphony.backend:\"claude\" symphony.backend:~\"${backend:regex}\" user.account_id:~\".+\" user.account_id:~\"${account_id:regex}\" user.email:~\".+\" user.email:~\"${account_email:regex}\" | copy symphony.backend as backend | copy user.account_id as account_id | copy user.email as account_email | format \"cache_read_tokens\" as token_type | stats by (backend, account_id, account_email, token_type) sum(cache_read_tokens) as value",
+          "expr": "_msg:=api_request cache_read_tokens:~\".+\" symphony.backend:\"claude\" symphony.backend:~\"${backend:regex}\" symphony.account.id:~\".+\" symphony.account.id:~\"${account_id:regex}\" user.email:~\".+\" user.email:~\"${account_email:regex}\" | copy symphony.backend as backend | copy symphony.account.id as account_id | copy user.email as account_email | format \"cache_read_tokens\" as token_type | stats by (backend, account_id, account_email, token_type) sum(cache_read_tokens) as value",
           "queryType": "stats",
           "refId": "G"
         },
@@ -456,7 +456,7 @@
             "type": "victoriametrics-logs-datasource",
             "uid": "victorialogs"
           },
-          "expr": "event.name:api_request cache_creation_tokens:~\".+\" symphony.backend:\"claude\" symphony.backend:~\"${backend:regex}\" user.account_id:~\".+\" user.account_id:~\"${account_id:regex}\" user.email:~\".+\" user.email:~\"${account_email:regex}\" | copy symphony.backend as backend | copy user.account_id as account_id | copy user.email as account_email | format \"cache_creation_tokens\" as token_type | stats by (backend, account_id, account_email, token_type) sum(cache_creation_tokens) as value",
+          "expr": "_msg:=api_request cache_creation_tokens:~\".+\" symphony.backend:\"claude\" symphony.backend:~\"${backend:regex}\" symphony.account.id:~\".+\" symphony.account.id:~\"${account_id:regex}\" user.email:~\".+\" user.email:~\"${account_email:regex}\" | copy symphony.backend as backend | copy symphony.account.id as account_id | copy user.email as account_email | format \"cache_creation_tokens\" as token_type | stats by (backend, account_id, account_email, token_type) sum(cache_creation_tokens) as value",
           "queryType": "stats",
           "refId": "H"
         },
@@ -465,7 +465,7 @@
             "type": "victoriametrics-logs-datasource",
             "uid": "victorialogs"
           },
-          "expr": "event.name:api_request output_tokens:~\".+\" symphony.backend:\"claude\" symphony.backend:~\"${backend:regex}\" user.account_id:~\".+\" user.account_id:~\"${account_id:regex}\" user.email:~\".+\" user.email:~\"${account_email:regex}\" | copy symphony.backend as backend | copy user.account_id as account_id | copy user.email as account_email | format \"output_tokens\" as token_type | stats by (backend, account_id, account_email, token_type) sum(output_tokens) as value",
+          "expr": "_msg:=api_request output_tokens:~\".+\" symphony.backend:\"claude\" symphony.backend:~\"${backend:regex}\" symphony.account.id:~\".+\" symphony.account.id:~\"${account_id:regex}\" user.email:~\".+\" user.email:~\"${account_email:regex}\" | copy symphony.backend as backend | copy symphony.account.id as account_id | copy user.email as account_email | format \"output_tokens\" as token_type | stats by (backend, account_id, account_email, token_type) sum(output_tokens) as value",
           "queryType": "stats",
           "refId": "I"
         },
@@ -474,7 +474,7 @@
             "type": "victoriametrics-logs-datasource",
             "uid": "victorialogs"
           },
-          "expr": "event.name:api_request input_tokens:~\".+\" output_tokens:~\".+\" symphony.backend:\"claude\" symphony.backend:~\"${backend:regex}\" user.account_id:~\".+\" user.account_id:~\"${account_id:regex}\" user.email:~\".+\" user.email:~\"${account_email:regex}\" | copy symphony.backend as backend | copy user.account_id as account_id | copy user.email as account_email | format \"total_tokens\" as token_type | stats by (backend, account_id, account_email, token_type) sum(input_tokens) as input_tokens, sum(output_tokens) as output_tokens | math (input_tokens + output_tokens) as value | fields backend, account_id, account_email, token_type, value",
+          "expr": "_msg:=api_request input_tokens:~\".+\" output_tokens:~\".+\" symphony.backend:\"claude\" symphony.backend:~\"${backend:regex}\" symphony.account.id:~\".+\" symphony.account.id:~\"${account_id:regex}\" user.email:~\".+\" user.email:~\"${account_email:regex}\" | copy symphony.backend as backend | copy symphony.account.id as account_id | copy user.email as account_email | format \"total_tokens\" as token_type | stats by (backend, account_id, account_email, token_type) sum(input_tokens) as input_tokens, sum(output_tokens) as output_tokens | math (input_tokens + output_tokens) as value | fields backend, account_id, account_email, token_type, value",
           "queryType": "stats",
           "refId": "J"
         }
@@ -595,7 +595,7 @@
             "type": "victoriametrics-metrics-datasource",
             "uid": "victoriametrics"
           },
-          "expr": "label_set(last_over_time(symphony_account_rate_limit_used{backend=~\"${backend:regex}\",account_id=~\"${account_id:regex}\",account_email=~\"${account_email:regex}\"}[10m]), \"measure\", \"used\") or label_set(last_over_time(symphony_account_rate_limit_limit{backend=~\"${backend:regex}\",account_id=~\"${account_id:regex}\",account_email=~\"${account_email:regex}\"}[10m]), \"measure\", \"limit\") or label_set(last_over_time(symphony_account_rate_limit_remaining{backend=~\"${backend:regex}\",account_id=~\"${account_id:regex}\",account_email=~\"${account_email:regex}\"}[10m]), \"measure\", \"remaining\") or label_set(last_over_time(symphony_account_rate_limit_usage_percent{backend=~\"${backend:regex}\",account_id=~\"${account_id:regex}\",account_email=~\"${account_email:regex}\"}[10m]), \"measure\", \"usage_percent\") or label_set(1000 * last_over_time(symphony_account_rate_limit_reset_timestamp_seconds{backend=~\"${backend:regex}\",account_id=~\"${account_id:regex}\",account_email=~\"${account_email:regex}\"}[10m]), \"measure\", \"reset_at\")",
+          "expr": "label_set(last_over_time(symphony_account_rate_limit_used{backend=~\"${backend:regex}\",account_id=~\"${account_id:regex}\",account_email=~\"${account_email:regex}\"}[10m]), \"__name__\", \"rate_limit\", \"measure\", \"used\") or label_set(last_over_time(symphony_account_rate_limit_limit{backend=~\"${backend:regex}\",account_id=~\"${account_id:regex}\",account_email=~\"${account_email:regex}\"}[10m]), \"__name__\", \"rate_limit\", \"measure\", \"limit\") or label_set(last_over_time(symphony_account_rate_limit_remaining{backend=~\"${backend:regex}\",account_id=~\"${account_id:regex}\",account_email=~\"${account_email:regex}\"}[10m]), \"__name__\", \"rate_limit\", \"measure\", \"remaining\") or label_set(last_over_time(symphony_account_rate_limit_usage_percent{backend=~\"${backend:regex}\",account_id=~\"${account_id:regex}\",account_email=~\"${account_email:regex}\"}[10m]), \"__name__\", \"rate_limit\", \"measure\", \"usage_percent\") or label_set(1000 * last_over_time(symphony_account_rate_limit_reset_timestamp_seconds{backend=~\"${backend:regex}\",account_id=~\"${account_id:regex}\",account_email=~\"${account_email:regex}\"}[10m]), \"__name__\", \"rate_limit\", \"measure\", \"reset_at\")",
           "instant": true,
           "refId": "A"
         },

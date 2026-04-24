@@ -494,7 +494,12 @@ defmodule SymphonyElixir.Accounts do
 
       {:error, unavailable_error(backend, skipped, "no usable #{backend} accounts")}
     else
-      account = choose_round_robin(backend, usable, settings)
+      account =
+        case accounts_settings.rotation_strategy do
+          "least_usage" -> choose_least_usage(usable)
+          _ -> choose_round_robin(backend, usable, settings)
+        end
+
       {:ok, account}
     end
   end
@@ -518,9 +523,6 @@ defmodule SymphonyElixir.Accounts do
 
       budget_exhausted?(account, accounts_settings, :daily) ->
         "daily token budget exhausted"
-
-      budget_exhausted?(account, accounts_settings, :monthly) ->
-        "monthly token budget exhausted"
 
       true ->
         nil
@@ -552,13 +554,6 @@ defmodule SymphonyElixir.Accounts do
     is_integer(budget) and budget > 0 and usage_total >= budget
   end
 
-  defp budget_exhausted?(account, accounts_settings, :monthly) do
-    budget = account.monthly_token_budget || accounts_settings.monthly_token_budget
-    month = Date.utc_today() |> Calendar.strftime("%Y-%m")
-    usage_total = token_total_for_period(account.token_totals, "monthly", month)
-    is_integer(budget) and budget > 0 and usage_total >= budget
-  end
-
   defp token_total_for_period(token_totals, period_key, current_period) when is_map(token_totals) do
     period = Map.get(token_totals, period_key, %{})
 
@@ -570,6 +565,46 @@ defmodule SymphonyElixir.Accounts do
   end
 
   defp token_total_for_period(_token_totals, _period_key, _current_period), do: 0
+
+  # Selects the account with the lowest usage across both the 5-hour session
+  # and rolling weekly windows. Scoring uses `max(session_pct, weekly_pct)` so
+  # whichever bucket is closest to its upstream limit dominates — this balances
+  # weekly consumption across accounts while preventing any single account from
+  # being picked when its session budget is near exhaustion.
+  defp choose_least_usage(accounts) do
+    accounts
+    |> Enum.sort_by(&least_usage_sort_key/1)
+    |> List.first()
+  end
+
+  defp least_usage_sort_key(account) do
+    periods = Map.get(account, :rate_limit_periods) || %{}
+    session_pct = bucket_usage_pct(Map.get(periods, "session"))
+    weekly_pct = bucket_usage_pct(Map.get(periods, "weekly"))
+    primary = max(session_pct, weekly_pct)
+
+    weekly_tokens = bucket_total_tokens(Map.get(periods, "weekly"))
+    session_tokens = bucket_total_tokens(Map.get(periods, "session"))
+
+    {primary, weekly_tokens, session_tokens, account.id}
+  end
+
+  defp bucket_usage_pct(nil), do: 0.0
+
+  defp bucket_usage_pct(bucket) when is_map(bucket) do
+    limit = integer_value(Map.get(bucket, "limit"))
+    remaining = integer_value(Map.get(bucket, "remaining"))
+
+    if limit > 0 do
+      used = max(0, limit - remaining)
+      used / limit
+    else
+      0.0
+    end
+  end
+
+  defp bucket_total_tokens(nil), do: 0
+  defp bucket_total_tokens(bucket) when is_map(bucket), do: integer_value(Map.get(bucket, "total_tokens"))
 
   defp choose_round_robin(backend, accounts, settings) do
     sorted_accounts = Enum.sort_by(accounts, & &1.id)
@@ -676,8 +711,7 @@ defmodule SymphonyElixir.Accounts do
       last_success_at: normalize_optional_string(Map.get(state, "last_success_at")),
       token_totals: Map.get(state, "token_totals", default_token_totals()),
       rate_limit_periods: Map.get(state, "rate_limit_periods", %{}),
-      daily_token_budget: positive_integer_value(Map.get(metadata, "daily_token_budget")) || settings.daily_token_budget,
-      monthly_token_budget: positive_integer_value(Map.get(metadata, "monthly_token_budget")) || settings.monthly_token_budget
+      daily_token_budget: positive_integer_value(Map.get(metadata, "daily_token_budget")) || settings.daily_token_budget
     }
   end
 
@@ -704,7 +738,6 @@ defmodule SymphonyElixir.Accounts do
       "email" => Keyword.get(attrs, :email, Map.get(existing, "email")),
       "worker_host" => Keyword.get(attrs, :worker_host, Map.get(existing, "worker_host")),
       "daily_token_budget" => Keyword.get(attrs, :daily_token_budget, Map.get(existing, "daily_token_budget")),
-      "monthly_token_budget" => Keyword.get(attrs, :monthly_token_budget, Map.get(existing, "monthly_token_budget")),
       "created_at" => Map.get(existing, "created_at", now),
       "updated_at" => now
     })
@@ -1149,20 +1182,17 @@ defmodule SymphonyElixir.Accounts do
   defp default_token_totals do
     %{
       "total" => %{"input_tokens" => 0, "output_tokens" => 0, "total_tokens" => 0},
-      "daily" => %{"period" => Date.utc_today() |> Date.to_iso8601(), "input_tokens" => 0, "output_tokens" => 0, "total_tokens" => 0},
-      "monthly" => %{"period" => Date.utc_today() |> Calendar.strftime("%Y-%m"), "input_tokens" => 0, "output_tokens" => 0, "total_tokens" => 0}
+      "daily" => %{"period" => Date.utc_today() |> Date.to_iso8601(), "input_tokens" => 0, "output_tokens" => 0, "total_tokens" => 0}
     }
   end
 
   defp update_usage_totals(token_totals, delta, timestamp) do
     daily_period = DateTime.to_date(timestamp) |> Date.to_iso8601()
-    monthly_period = DateTime.to_date(timestamp) |> Calendar.strftime("%Y-%m")
 
     token_totals
     |> Map.merge(default_token_totals(), fn _key, _default, value -> value end)
     |> update_usage_period("total", nil, delta)
     |> update_usage_period("daily", daily_period, delta)
-    |> update_usage_period("monthly", monthly_period, delta)
   end
 
   defp update_usage_period(token_totals, key, period, delta) do
@@ -1599,8 +1629,7 @@ defmodule SymphonyElixir.Accounts do
       rotation_strategy: Map.get(accounts, :rotation_strategy, "usage_aware_round_robin"),
       max_concurrent_sessions_per_account: Map.get(accounts, :max_concurrent_sessions_per_account, 1),
       exhausted_cooldown_ms: Map.get(accounts, :exhausted_cooldown_ms, 300_000),
-      daily_token_budget: Map.get(accounts, :daily_token_budget),
-      monthly_token_budget: Map.get(accounts, :monthly_token_budget)
+      daily_token_budget: Map.get(accounts, :daily_token_budget)
     }
   end
 
@@ -1612,8 +1641,7 @@ defmodule SymphonyElixir.Accounts do
       rotation_strategy: Map.get(accounts, :rotation_strategy, "usage_aware_round_robin"),
       max_concurrent_sessions_per_account: Map.get(accounts, :max_concurrent_sessions_per_account, 1),
       exhausted_cooldown_ms: Map.get(accounts, :exhausted_cooldown_ms, 300_000),
-      daily_token_budget: Map.get(accounts, :daily_token_budget),
-      monthly_token_budget: Map.get(accounts, :monthly_token_budget)
+      daily_token_budget: Map.get(accounts, :daily_token_budget)
     }
   end
 
@@ -1712,8 +1740,7 @@ defmodule SymphonyElixir.Accounts do
       rotation_strategy: "usage_aware_round_robin",
       max_concurrent_sessions_per_account: 1,
       exhausted_cooldown_ms: 300_000,
-      daily_token_budget: nil,
-      monthly_token_budget: nil
+      daily_token_budget: nil
     }
   end
 

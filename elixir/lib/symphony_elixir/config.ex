@@ -55,7 +55,7 @@ defmodule SymphonyElixir.Config do
           max_concurrent_sessions_per_account: pos_integer(),
           exhausted_cooldown_ms: non_neg_integer(),
           daily_token_budget: pos_integer() | nil,
-          monthly_token_budget: pos_integer() | nil
+          claude_rate_limit_probe_interval_ms: pos_integer()
         }
 
   @type linear_project_route :: %{
@@ -375,7 +375,7 @@ defmodule SymphonyElixir.Config do
       max_concurrent_sessions_per_account: accounts.max_concurrent_sessions_per_account,
       exhausted_cooldown_ms: accounts.exhausted_cooldown_ms,
       daily_token_budget: accounts.daily_token_budget,
-      monthly_token_budget: accounts.monthly_token_budget
+      claude_rate_limit_probe_interval_ms: accounts.claude_rate_limit_probe_interval_ms
     }
   end
 

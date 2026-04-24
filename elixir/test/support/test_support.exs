@@ -167,7 +167,7 @@ defmodule SymphonyElixir.TestSupport do
           accounts_max_concurrent_sessions_per_account: 1,
           accounts_exhausted_cooldown_ms: 300_000,
           accounts_daily_token_budget: nil,
-          accounts_monthly_token_budget: nil,
+          accounts_claude_rate_limit_probe_interval_ms: nil,
           agent_backend: "opencode",
           default_effort: nil,
           max_concurrent_agents: 10,
@@ -244,7 +244,7 @@ defmodule SymphonyElixir.TestSupport do
     accounts_max_concurrent_sessions_per_account = Keyword.get(config, :accounts_max_concurrent_sessions_per_account)
     accounts_exhausted_cooldown_ms = Keyword.get(config, :accounts_exhausted_cooldown_ms)
     accounts_daily_token_budget = Keyword.get(config, :accounts_daily_token_budget)
-    accounts_monthly_token_budget = Keyword.get(config, :accounts_monthly_token_budget)
+    accounts_claude_rate_limit_probe_interval_ms = Keyword.get(config, :accounts_claude_rate_limit_probe_interval_ms)
     agent_backend = Keyword.get(config, :agent_backend)
     default_effort = Keyword.get(config, :default_effort)
     max_concurrent_agents = Keyword.get(config, :max_concurrent_agents)
@@ -324,7 +324,7 @@ defmodule SymphonyElixir.TestSupport do
           accounts_max_concurrent_sessions_per_account,
           accounts_exhausted_cooldown_ms,
           accounts_daily_token_budget,
-          accounts_monthly_token_budget
+          accounts_claude_rate_limit_probe_interval_ms
         ),
         "agent:",
         "  backend: #{yaml_value(agent_backend)}",
@@ -443,7 +443,7 @@ defmodule SymphonyElixir.TestSupport do
           accounts_max_concurrent_sessions_per_account: 1,
           accounts_exhausted_cooldown_ms: 300_000,
           accounts_daily_token_budget: nil,
-          accounts_monthly_token_budget: nil,
+          accounts_claude_rate_limit_probe_interval_ms: nil,
           agent_backend: "codex",
           default_effort: nil,
           max_concurrent_agents: 10,
@@ -517,7 +517,7 @@ defmodule SymphonyElixir.TestSupport do
     accounts_max_concurrent_sessions_per_account = Keyword.get(config, :accounts_max_concurrent_sessions_per_account)
     accounts_exhausted_cooldown_ms = Keyword.get(config, :accounts_exhausted_cooldown_ms)
     accounts_daily_token_budget = Keyword.get(config, :accounts_daily_token_budget)
-    accounts_monthly_token_budget = Keyword.get(config, :accounts_monthly_token_budget)
+    accounts_claude_rate_limit_probe_interval_ms = Keyword.get(config, :accounts_claude_rate_limit_probe_interval_ms)
     agent_backend = Keyword.get(config, :agent_backend)
     default_effort = Keyword.get(config, :default_effort)
     max_concurrent_agents = Keyword.get(config, :max_concurrent_agents)
@@ -603,7 +603,7 @@ defmodule SymphonyElixir.TestSupport do
           accounts_max_concurrent_sessions_per_account,
           accounts_exhausted_cooldown_ms,
           accounts_daily_token_budget,
-          accounts_monthly_token_budget
+          accounts_claude_rate_limit_probe_interval_ms
         ),
         "agent:",
         "  backend: #{yaml_value(agent_backend)}",
@@ -754,7 +754,7 @@ defmodule SymphonyElixir.TestSupport do
          max_concurrent_sessions_per_account,
          exhausted_cooldown_ms,
          daily_token_budget,
-         monthly_token_budget
+         claude_rate_limit_probe_interval_ms
        ) do
     [
       "accounts:",
@@ -765,7 +765,8 @@ defmodule SymphonyElixir.TestSupport do
       "  max_concurrent_sessions_per_account: #{yaml_value(max_concurrent_sessions_per_account)}",
       "  exhausted_cooldown_ms: #{yaml_value(exhausted_cooldown_ms)}",
       !is_nil(daily_token_budget) && "  daily_token_budget: #{yaml_value(daily_token_budget)}",
-      !is_nil(monthly_token_budget) && "  monthly_token_budget: #{yaml_value(monthly_token_budget)}"
+      !is_nil(claude_rate_limit_probe_interval_ms) &&
+        "  claude_rate_limit_probe_interval_ms: #{yaml_value(claude_rate_limit_probe_interval_ms)}"
     ]
     |> Enum.reject(&(&1 in [nil, false]))
     |> Enum.join("\n")

@@ -253,7 +253,6 @@ defmodule SymphonyElixirWeb.Presenter do
           account
           |> Accounts.account_summary()
           |> Map.put(:daily_token_budget, Map.get(account, :daily_token_budget))
-          |> Map.put(:monthly_token_budget, Map.get(account, :monthly_token_budget))
         end)
 
       _ ->
@@ -306,9 +305,7 @@ defmodule SymphonyElixirWeb.Presenter do
   defp account_usage_entry(account, running_count) do
     token_totals = map_value(account, :token_totals) || %{}
     daily_tokens = token_period_total(token_totals, "daily")
-    monthly_tokens = token_period_total(token_totals, "monthly")
     daily_budget = positive_integer(map_value(account, :daily_token_budget))
-    monthly_budget = positive_integer(map_value(account, :monthly_token_budget))
     rate_limits = map_value(account, :latest_rate_limits)
 
     %{
@@ -323,11 +320,8 @@ defmodule SymphonyElixirWeb.Presenter do
       token_totals: token_totals,
       total_tokens: token_period_total(token_totals, "total"),
       daily_tokens: daily_tokens,
-      monthly_tokens: monthly_tokens,
       daily_token_budget: daily_budget,
-      monthly_token_budget: monthly_budget,
       daily_budget_percent: percent_of(daily_tokens, daily_budget),
-      monthly_budget_percent: percent_of(monthly_tokens, monthly_budget),
       latest_rate_limits: rate_limits,
       rate_limit_buckets: rate_limit_bucket_payloads(rate_limits),
       latest_reset_at: map_value(account, :latest_reset_at),

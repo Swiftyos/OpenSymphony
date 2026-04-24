@@ -462,12 +462,15 @@ Fields:
   - When true, dispatch may use the host's ambient provider auth if no managed account exists.
 - `rotation_strategy` (string)
   - Default: `usage_aware_round_robin`
+  - Options:
+    - `usage_aware_round_robin` — cycle through accounts in ID order.
+    - `least_usage` — pick the account with the lowest combined usage across the 5-hour session and rolling weekly rate-limit windows. Scored as `max(session_pct, weekly_pct)` so weekly consumption is balanced across accounts while avoiding any account whose session budget is near exhaustion.
 - `max_concurrent_sessions_per_account` (integer)
   - Default: `1`
 - `exhausted_cooldown_ms` (integer)
   - Default: `300000` (5 minutes)
-- `daily_token_budget` / `monthly_token_budget` (integer, optional)
-  - Local best-effort token budgets. Accounts at or over budget are skipped.
+- `daily_token_budget` (integer, optional)
+  - Local best-effort token budget. Accounts at or over budget are skipped.
 
 Account CLI:
 

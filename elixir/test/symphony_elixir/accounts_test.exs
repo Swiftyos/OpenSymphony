@@ -61,6 +61,86 @@ defmodule SymphonyElixir.AccountsTest do
     assert reason =~ "cooling down until"
   end
 
+  test "least_usage selector picks the account with lowest max(session, weekly) usage" do
+    store_root = temp_accounts_root!("least-usage")
+    settings = accounts_settings!(store_root, accounts_rotation_strategy: "least_usage")
+
+    future_reset = DateTime.utc_now() |> DateTime.add(3_600, :second) |> DateTime.to_iso8601()
+
+    # Account "a": 80% session usage, 10% weekly -> score 0.80
+    {:ok, a} = Accounts.create_or_update("claude", "a", [email: "a@example.com"], settings)
+
+    Accounts.record_rate_limits(
+      a,
+      %{
+        "limit_id" => "claude",
+        "session" => %{"limit" => 100, "remaining" => 20, "reset_at" => future_reset},
+        "weekly" => %{"limit" => 1_000, "remaining" => 900, "reset_at" => future_reset}
+      },
+      settings
+    )
+
+    # Account "b": 10% session usage, 50% weekly -> score 0.50 (wins)
+    {:ok, b} = Accounts.create_or_update("claude", "b", [email: "b@example.com"], settings)
+
+    Accounts.record_rate_limits(
+      b,
+      %{
+        "limit_id" => "claude",
+        "session" => %{"limit" => 100, "remaining" => 90, "reset_at" => future_reset},
+        "weekly" => %{"limit" => 1_000, "remaining" => 500, "reset_at" => future_reset}
+      },
+      settings
+    )
+
+    # Account "c": 90% session usage, 5% weekly -> score 0.90 (near session exhaustion, avoided)
+    {:ok, c} = Accounts.create_or_update("claude", "c", [email: "c@example.com"], settings)
+
+    Accounts.record_rate_limits(
+      c,
+      %{
+        "limit_id" => "claude",
+        "session" => %{"limit" => 100, "remaining" => 10, "reset_at" => future_reset},
+        "weekly" => %{"limit" => 1_000, "remaining" => 950, "reset_at" => future_reset}
+      },
+      settings
+    )
+
+    # Repeated calls are deterministic — score is stable until usage changes.
+    assert {:ok, %{id: "b"}} = Accounts.select_for_dispatch("claude", nil, %{}, settings)
+    assert {:ok, %{id: "b"}} = Accounts.select_for_dispatch("claude", nil, %{}, settings)
+
+    # When "b" is taken by a running session, the next pick should be "a" (score 0.80)
+    # rather than "c" (score 0.90), proving session usage is respected.
+    running = %{"issue-1" => %{backend: "claude", account_id: "b"}}
+    assert {:ok, %{id: "a"}} = Accounts.select_for_dispatch("claude", nil, running, settings)
+
+    _ = {a, b, c}
+  end
+
+  test "least_usage selector prefers fresh accounts with no rate-limit snapshot" do
+    store_root = temp_accounts_root!("least-usage-fresh")
+    settings = accounts_settings!(store_root, accounts_rotation_strategy: "least_usage")
+
+    future_reset = DateTime.utc_now() |> DateTime.add(3_600, :second) |> DateTime.to_iso8601()
+
+    {:ok, _fresh} = Accounts.create_or_update("claude", "fresh", [email: "fresh@example.com"], settings)
+
+    {:ok, used} = Accounts.create_or_update("claude", "used", [email: "used@example.com"], settings)
+
+    Accounts.record_rate_limits(
+      used,
+      %{
+        "limit_id" => "claude",
+        "session" => %{"limit" => 100, "remaining" => 50, "reset_at" => future_reset},
+        "weekly" => %{"limit" => 1_000, "remaining" => 900, "reset_at" => future_reset}
+      },
+      settings
+    )
+
+    assert {:ok, %{id: "fresh"}} = Accounts.select_for_dispatch("claude", nil, %{}, settings)
+  end
+
   test "selector skips accounts over local token budgets" do
     store_root = temp_accounts_root!("budget")
     settings = accounts_settings!(store_root)

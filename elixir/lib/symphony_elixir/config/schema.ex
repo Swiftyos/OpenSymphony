@@ -194,7 +194,7 @@ defmodule SymphonyElixir.Config.Schema do
     use Ecto.Schema
     import Ecto.Changeset
 
-    @rotation_strategies ["usage_aware_round_robin"]
+    @rotation_strategies ["usage_aware_round_robin", "least_usage"]
 
     @primary_key false
     embedded_schema do
@@ -205,12 +205,16 @@ defmodule SymphonyElixir.Config.Schema do
       field(:max_concurrent_sessions_per_account, :integer, default: 1)
       field(:exhausted_cooldown_ms, :integer, default: 300_000)
       field(:daily_token_budget, :integer)
-      field(:monthly_token_budget, :integer)
+      field(:claude_rate_limit_probe_interval_ms, :integer, default: 900_000)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
-      attrs = normalize_boolean_attrs(attrs, [:enabled, :allow_host_auth_fallback])
+      attrs =
+        normalize_boolean_attrs(attrs, [
+          :enabled,
+          :allow_host_auth_fallback
+        ])
 
       schema
       |> cast(
@@ -223,7 +227,7 @@ defmodule SymphonyElixir.Config.Schema do
           :max_concurrent_sessions_per_account,
           :exhausted_cooldown_ms,
           :daily_token_budget,
-          :monthly_token_budget
+          :claude_rate_limit_probe_interval_ms
         ],
         empty_values: []
       )
@@ -232,7 +236,7 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:max_concurrent_sessions_per_account, greater_than: 0)
       |> validate_number(:exhausted_cooldown_ms, greater_than_or_equal_to: 0)
       |> validate_number(:daily_token_budget, greater_than: 0)
-      |> validate_number(:monthly_token_budget, greater_than: 0)
+      |> validate_number(:claude_rate_limit_probe_interval_ms, greater_than_or_equal_to: 60_000)
     end
 
     defp normalize_boolean_attrs(attrs, fields) when is_map(attrs) do

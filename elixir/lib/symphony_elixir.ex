@@ -35,7 +35,8 @@ defmodule SymphonyElixir.Application do
       config_store,
       SymphonyElixir.Orchestrator,
       SymphonyElixir.HttpServer,
-      SymphonyElixir.StatusDashboard
+      SymphonyElixir.StatusDashboard,
+      SymphonyElixir.ClaudeCode.RateLimitPoller
     ]
 
     Supervisor.start_link(
