@@ -1,0 +1,92 @@
+api:
+  enabled: true
+  address: 0.0.0.0:8686
+
+sources:
+  cli_logs:
+    type: file
+    include:
+      - /var/log/agent/*.jsonl
+    read_from: beginning
+
+  otlp_ingest:
+    type: opentelemetry
+    use_otlp_decoding: true
+    grpc:
+      address: 0.0.0.0:4317
+    http:
+      address: 0.0.0.0:4318
+
+  vector_internal_metrics:
+    type: internal_metrics
+
+transforms:
+  parse_cli_logs:
+    type: remap
+    inputs:
+      - cli_logs
+    source: |
+      . = parse_json!(string!(.message))
+      if exists(.message) {
+        ._msg = string!(.message)
+      }
+
+  guard_cli_logs:
+    type: filter
+    inputs:
+      - parse_cli_logs
+    condition: 'exists(.dev_env) && is_string(.dev_env) && .dev_env != ""'
+
+sinks:
+  victorialogs:
+    type: loki
+    inputs:
+      - guard_cli_logs
+    endpoint: http://victorialogs:9428
+    healthcheck:
+      enabled: false
+    path: /insert/loki/api/v1/push
+    out_of_order_action: accept
+    encoding:
+      codec: json
+    labels:
+      dev_env: "{{ dev_env }}"
+      service: "agent-cli"
+      level: "{{ level }}"
+
+  vector_metrics:
+    type: prometheus_exporter
+    inputs:
+      - vector_internal_metrics
+    address: 0.0.0.0:9598
+
+  victoriatraces:
+    type: opentelemetry
+    inputs:
+      - otlp_ingest.traces
+    protocol:
+      encoding:
+        codec: otlp
+      type: http
+      uri: http://victoriatraces:10428/insert/opentelemetry/v1/traces
+
+  victorialogs_otlp:
+    type: opentelemetry
+    inputs:
+      - otlp_ingest.logs
+    protocol:
+      encoding:
+        codec: otlp
+      type: http
+      # Codex emits structured OTel log records that may not include a body.
+      uri: http://victorialogs:9428/insert/opentelemetry/v1/logs?_msg_field=message,event.original,body,error.message,event.name
+
+  victoriametrics_otlp:
+    type: opentelemetry
+    inputs:
+      - otlp_ingest.metrics
+    protocol:
+      encoding:
+        codec: otlp
+      type: http
+      uri: http://victoriametrics:8428/opentelemetry/v1/metrics

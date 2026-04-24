@@ -1,0 +1,918 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "links": [
+    {
+      "includeVars": true,
+      "keepTime": true,
+      "targetBlank": true,
+      "title": "Open VictoriaMetrics",
+      "type": "link",
+      "url": "http://localhost:11341"
+    },
+    {
+      "includeVars": true,
+      "keepTime": true,
+      "targetBlank": true,
+      "title": "Open VictoriaLogs",
+      "type": "link",
+      "url": "http://localhost:11342"
+    }
+  ],
+  "panels": [
+    {
+      "datasource": {
+        "type": "victoriametrics-metrics-datasource",
+        "uid": "victoriametrics"
+      },
+      "description": "Accounts currently marked limited or exhausted in Symphony account state.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 3
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-metrics-datasource",
+            "uid": "victoriametrics"
+          },
+          "expr": "count(last_over_time(symphony_account_state_info{backend=~\"${backend:regex}\",account_id=~\"${account_id:regex}\",account_email=~\"${account_email:regex}\",state=~\"limited|exhausted\"}[10m]))",
+          "instant": true,
+          "legendFormat": "limited_accounts",
+          "refId": "A"
+        }
+      ],
+      "title": "Limited / Exhausted",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "victoriametrics-metrics-datasource",
+        "uid": "victoriametrics"
+      },
+      "description": "Earliest weekly reset across the currently filtered accounts.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "dateTimeAsIso"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-metrics-datasource",
+            "uid": "victoriametrics"
+          },
+          "expr": "min(1000 * last_over_time(symphony_account_rate_limit_reset_timestamp_seconds{backend=~\"${backend:regex}\",account_id=~\"${account_id:regex}\",account_email=~\"${account_email:regex}\",bucket=\"weekly\"}[10m]))",
+          "instant": true,
+          "legendFormat": "next_weekly_reset",
+          "refId": "A"
+        }
+      ],
+      "title": "Next Weekly Reset",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "victoriametrics-metrics-datasource",
+        "uid": "victoriametrics"
+      },
+      "description": "Distinct managed accounts currently exposed by Symphony.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "id": 3,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-metrics-datasource",
+            "uid": "victoriametrics"
+          },
+          "expr": "count(last_over_time(symphony_account_state_info{backend=~\"${backend:regex}\",account_id=~\"${account_id:regex}\",account_email=~\"${account_email:regex}\"}[10m]))",
+          "instant": true,
+          "legendFormat": "accounts",
+          "refId": "A"
+        }
+      ],
+      "title": "Managed Accounts",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "victoriametrics-metrics-datasource",
+        "uid": "victoriametrics"
+      },
+      "description": "Current active weekly billing-cycle buckets exported by Symphony.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "id": 4,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-metrics-datasource",
+            "uid": "victoriametrics"
+          },
+          "expr": "count(last_over_time(symphony_account_usage_period_usage_percent{backend=~\"${backend:regex}\",account_id=~\"${account_id:regex}\",account_email=~\"${account_email:regex}\",bucket=\"weekly\",period_status=\"active\"}[10m]))",
+          "instant": true,
+          "legendFormat": "active_weekly_cycles",
+          "refId": "A"
+        }
+      ],
+      "title": "Active Weekly Cycles",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "datasource",
+        "uid": "-- Mixed --"
+      },
+      "description": "Per-account token usage across Codex and Claude. Codex rows come from VictoriaLogs codex.sse_event entries; Claude rows come from VictoriaLogs api_request entries.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "input_tokens"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 130
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cache_read_tokens"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 150
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cache_creation_tokens"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 165
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "output_tokens"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 135
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "total_tokens"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 135
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 11,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "id": 5,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "expr": "event.name:codex.sse_event input_token_count:~\".+\" symphony.backend:~\"${backend:regex}\" symphony.account.id:~\".+\" symphony.account.id:~\"${account_id:regex}\" user.email:~\".+\" user.email:~\"${account_email:regex}\" | copy symphony.backend as backend | copy symphony.account.id as account_id | copy user.email as account_email | format \"input_tokens\" as token_type | stats by (backend, account_id, account_email, token_type) sum(input_token_count) as value",
+          "queryType": "stats",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "expr": "event.name:codex.sse_event cached_token_count:~\".+\" symphony.backend:~\"${backend:regex}\" symphony.account.id:~\".+\" symphony.account.id:~\"${account_id:regex}\" user.email:~\".+\" user.email:~\"${account_email:regex}\" | copy symphony.backend as backend | copy symphony.account.id as account_id | copy user.email as account_email | format \"cache_read_tokens\" as token_type | stats by (backend, account_id, account_email, token_type) sum(cached_token_count) as value",
+          "queryType": "stats",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "expr": "event.name:codex.sse_event input_token_count:~\".+\" symphony.backend:~\"${backend:regex}\" symphony.account.id:~\".+\" symphony.account.id:~\"${account_id:regex}\" user.email:~\".+\" user.email:~\"${account_email:regex}\" | copy symphony.backend as backend | copy symphony.account.id as account_id | copy user.email as account_email | format \"cache_creation_tokens\" as token_type | stats by (backend, account_id, account_email, token_type) count() as samples | math (0) as value | fields backend, account_id, account_email, token_type, value",
+          "queryType": "stats",
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "expr": "event.name:codex.sse_event output_token_count:~\".+\" symphony.backend:~\"${backend:regex}\" symphony.account.id:~\".+\" symphony.account.id:~\"${account_id:regex}\" user.email:~\".+\" user.email:~\"${account_email:regex}\" | copy symphony.backend as backend | copy symphony.account.id as account_id | copy user.email as account_email | format \"output_tokens\" as token_type | stats by (backend, account_id, account_email, token_type) sum(output_token_count) as value",
+          "queryType": "stats",
+          "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "expr": "event.name:codex.sse_event input_token_count:~\".+\" output_token_count:~\".+\" symphony.backend:~\"${backend:regex}\" symphony.account.id:~\".+\" symphony.account.id:~\"${account_id:regex}\" user.email:~\".+\" user.email:~\"${account_email:regex}\" | copy symphony.backend as backend | copy symphony.account.id as account_id | copy user.email as account_email | format \"total_tokens\" as token_type | stats by (backend, account_id, account_email, token_type) sum(input_token_count) as input_tokens, sum(output_token_count) as output_tokens | math (input_tokens + output_tokens) as value | fields backend, account_id, account_email, token_type, value",
+          "queryType": "stats",
+          "refId": "E"
+        },
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "expr": "event.name:api_request input_tokens:~\".+\" symphony.backend:\"claude\" symphony.backend:~\"${backend:regex}\" user.account_id:~\".+\" user.account_id:~\"${account_id:regex}\" user.email:~\".+\" user.email:~\"${account_email:regex}\" | copy symphony.backend as backend | copy user.account_id as account_id | copy user.email as account_email | format \"input_tokens\" as token_type | stats by (backend, account_id, account_email, token_type) sum(input_tokens) as value",
+          "queryType": "stats",
+          "refId": "F"
+        },
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "expr": "event.name:api_request cache_read_tokens:~\".+\" symphony.backend:\"claude\" symphony.backend:~\"${backend:regex}\" user.account_id:~\".+\" user.account_id:~\"${account_id:regex}\" user.email:~\".+\" user.email:~\"${account_email:regex}\" | copy symphony.backend as backend | copy user.account_id as account_id | copy user.email as account_email | format \"cache_read_tokens\" as token_type | stats by (backend, account_id, account_email, token_type) sum(cache_read_tokens) as value",
+          "queryType": "stats",
+          "refId": "G"
+        },
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "expr": "event.name:api_request cache_creation_tokens:~\".+\" symphony.backend:\"claude\" symphony.backend:~\"${backend:regex}\" user.account_id:~\".+\" user.account_id:~\"${account_id:regex}\" user.email:~\".+\" user.email:~\"${account_email:regex}\" | copy symphony.backend as backend | copy user.account_id as account_id | copy user.email as account_email | format \"cache_creation_tokens\" as token_type | stats by (backend, account_id, account_email, token_type) sum(cache_creation_tokens) as value",
+          "queryType": "stats",
+          "refId": "H"
+        },
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "expr": "event.name:api_request output_tokens:~\".+\" symphony.backend:\"claude\" symphony.backend:~\"${backend:regex}\" user.account_id:~\".+\" user.account_id:~\"${account_id:regex}\" user.email:~\".+\" user.email:~\"${account_email:regex}\" | copy symphony.backend as backend | copy user.account_id as account_id | copy user.email as account_email | format \"output_tokens\" as token_type | stats by (backend, account_id, account_email, token_type) sum(output_tokens) as value",
+          "queryType": "stats",
+          "refId": "I"
+        },
+        {
+          "datasource": {
+            "type": "victoriametrics-logs-datasource",
+            "uid": "victorialogs"
+          },
+          "expr": "event.name:api_request input_tokens:~\".+\" output_tokens:~\".+\" symphony.backend:\"claude\" symphony.backend:~\"${backend:regex}\" user.account_id:~\".+\" user.account_id:~\"${account_id:regex}\" user.email:~\".+\" user.email:~\"${account_email:regex}\" | copy symphony.backend as backend | copy user.account_id as account_id | copy user.email as account_email | format \"total_tokens\" as token_type | stats by (backend, account_id, account_email, token_type) sum(input_tokens) as input_tokens, sum(output_tokens) as output_tokens | math (input_tokens + output_tokens) as value | fields backend, account_id, account_email, token_type, value",
+          "queryType": "stats",
+          "refId": "J"
+        }
+      ],
+      "title": "Per-Account Token Usage",
+      "transformations": [
+        {
+          "id": "labelsToFields",
+          "options": {
+            "mode": "columns",
+            "valueLabel": "token_type"
+          }
+        },
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Value": true,
+              "__name__": true
+            },
+            "indexByName": {
+              "account_email": 2,
+              "account_id": 1,
+              "backend": 0,
+              "cache_creation_tokens": 5,
+              "cache_read_tokens": 4,
+              "input_tokens": 3,
+              "output_tokens": 6,
+              "total_tokens": 7
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": {},
+            "sort": [
+              {
+                "desc": true,
+                "field": "total_tokens"
+              }
+            ]
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "victoriametrics-metrics-datasource",
+        "uid": "victoriametrics"
+      },
+      "description": "Current session and weekly quota state from Symphony's /metrics endpoint, merged with current account state.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "usage_percent"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "reset_at"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsIso"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 16
+      },
+      "id": 6,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-metrics-datasource",
+            "uid": "victoriametrics"
+          },
+          "expr": "label_set(last_over_time(symphony_account_rate_limit_used{backend=~\"${backend:regex}\",account_id=~\"${account_id:regex}\",account_email=~\"${account_email:regex}\"}[10m]), \"measure\", \"used\") or label_set(last_over_time(symphony_account_rate_limit_limit{backend=~\"${backend:regex}\",account_id=~\"${account_id:regex}\",account_email=~\"${account_email:regex}\"}[10m]), \"measure\", \"limit\") or label_set(last_over_time(symphony_account_rate_limit_remaining{backend=~\"${backend:regex}\",account_id=~\"${account_id:regex}\",account_email=~\"${account_email:regex}\"}[10m]), \"measure\", \"remaining\") or label_set(last_over_time(symphony_account_rate_limit_usage_percent{backend=~\"${backend:regex}\",account_id=~\"${account_id:regex}\",account_email=~\"${account_email:regex}\"}[10m]), \"measure\", \"usage_percent\") or label_set(1000 * last_over_time(symphony_account_rate_limit_reset_timestamp_seconds{backend=~\"${backend:regex}\",account_id=~\"${account_id:regex}\",account_email=~\"${account_email:regex}\"}[10m]), \"measure\", \"reset_at\")",
+          "instant": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "victoriametrics-metrics-datasource",
+            "uid": "victoriametrics"
+          },
+          "expr": "last_over_time(symphony_account_state_info{backend=~\"${backend:regex}\",account_id=~\"${account_id:regex}\",account_email=~\"${account_email:regex}\"}[10m])",
+          "instant": true,
+          "refId": "B"
+        }
+      ],
+      "title": "Current Limit Used",
+      "transformations": [
+        {
+          "id": "labelsToFields",
+          "options": {
+            "mode": "columns",
+            "valueLabel": "measure"
+          }
+        },
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Value": true,
+              "__name__": true
+            },
+            "indexByName": {
+              "account_email": 2,
+              "account_id": 1,
+              "backend": 0,
+              "bucket": 6,
+              "credential_kind": 4,
+              "limit": 8,
+              "limit_id": 5,
+              "remaining": 10,
+              "reset_at": 12,
+              "state": 3,
+              "usage_percent": 11,
+              "used": 7
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": {},
+            "sort": [
+              {
+                "desc": true,
+                "field": "usage_percent"
+              }
+            ]
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "victoriametrics-metrics-datasource",
+        "uid": "victoriametrics"
+      },
+      "description": "Weekly billing-cycle rows aligned to each account reset boundary. Closed rows come from usage_periods.csv; active rows come from live account state.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "usage_percent"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "period_started_at"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 210
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "reset_at"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 210
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 26
+      },
+      "id": 7,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "victoriametrics-metrics-datasource",
+            "uid": "victoriametrics"
+          },
+          "expr": "last_over_time(symphony_account_usage_period_tokens{backend=~\"${backend:regex}\",account_id=~\"${account_id:regex}\",account_email=~\"${account_email:regex}\",bucket=\"weekly\"}[10m])",
+          "instant": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "victoriametrics-metrics-datasource",
+            "uid": "victoriametrics"
+          },
+          "expr": "label_set(last_over_time(symphony_account_usage_period_limit{backend=~\"${backend:regex}\",account_id=~\"${account_id:regex}\",account_email=~\"${account_email:regex}\",bucket=\"weekly\"}[10m]), \"measure\", \"limit\") or label_set(last_over_time(symphony_account_usage_period_used{backend=~\"${backend:regex}\",account_id=~\"${account_id:regex}\",account_email=~\"${account_email:regex}\",bucket=\"weekly\"}[10m]), \"measure\", \"used\") or label_set(last_over_time(symphony_account_usage_period_remaining{backend=~\"${backend:regex}\",account_id=~\"${account_id:regex}\",account_email=~\"${account_email:regex}\",bucket=\"weekly\"}[10m]), \"measure\", \"remaining\") or label_set(last_over_time(symphony_account_usage_period_usage_percent{backend=~\"${backend:regex}\",account_id=~\"${account_id:regex}\",account_email=~\"${account_email:regex}\",bucket=\"weekly\"}[10m]), \"measure\", \"usage_percent\")",
+          "instant": true,
+          "refId": "B"
+        }
+      ],
+      "title": "Weekly Billing-Cycle Usage",
+      "transformations": [
+        {
+          "id": "labelsToFields",
+          "options": {
+            "mode": "columns",
+            "valueLabel": "token_type"
+          }
+        },
+        {
+          "id": "labelsToFields",
+          "options": {
+            "mode": "columns",
+            "valueLabel": "measure"
+          }
+        },
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Value": true,
+              "__name__": true,
+              "bucket": true,
+              "period": true
+            },
+            "indexByName": {
+              "account_email": 2,
+              "account_id": 1,
+              "backend": 0,
+              "input_tokens": 6,
+              "limit": 9,
+              "limit_id": 3,
+              "output_tokens": 7,
+              "period_started_at": 4,
+              "period_status": 5,
+              "remaining": 11,
+              "reset_at": 12,
+              "total_tokens": 8,
+              "usage_percent": 13,
+              "used": 10
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": {},
+            "sort": [
+              {
+                "desc": true,
+                "field": "reset_at"
+              }
+            ]
+          }
+        }
+      ],
+      "type": "table"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 41,
+  "tags": [
+    "accounts",
+    "usage",
+    "codex",
+    "claude",
+    "observability"
+  ],
+  "templating": {
+    "list": [
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "includeAll": true,
+        "label": "Backend",
+        "multi": false,
+        "name": "backend",
+        "options": [],
+        "query": "codex,claude",
+        "refresh": 1,
+        "type": "custom"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "victoriametrics-metrics-datasource",
+          "uid": "victoriametrics"
+        },
+        "definition": "label_values(symphony_account_state_info{backend=~\"${backend:regex}\"}, account_id)",
+        "includeAll": true,
+        "label": "Account ID",
+        "multi": true,
+        "name": "account_id",
+        "options": [],
+        "query": {
+          "query": "label_values(symphony_account_state_info{backend=~\"${backend:regex}\"}, account_id)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "victoriametrics-metrics-datasource",
+          "uid": "victoriametrics"
+        },
+        "definition": "label_values(symphony_account_state_info{backend=~\"${backend:regex}\",account_id=~\"${account_id:regex}\"}, account_email)",
+        "includeAll": true,
+        "label": "Account Email",
+        "multi": true,
+        "name": "account_email",
+        "options": [],
+        "query": {
+          "query": "label_values(symphony_account_state_info{backend=~\"${backend:regex}\",account_id=~\"${account_id:regex}\"}, account_email)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-30d",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "30s",
+      "1m",
+      "5m",
+      "15m",
+      "1h"
+    ]
+  },
+  "timezone": "browser",
+  "title": "Account Usage",
+  "uid": "account-usage",
+  "version": 1
+}

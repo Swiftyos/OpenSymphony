@@ -1,0 +1,73 @@
+services:
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:latest
+    command:
+      - --storageDataPath=/storage
+      - --opentelemetry.usePrometheusNaming=true
+    ports:
+      - "11341:8428"
+    volumes:
+      - ./.data/victoriametrics:/storage
+
+  vmagent:
+    image: victoriametrics/vmagent:latest
+    command:
+      - --promscrape.config=/etc/vmagent/prometheus.yml
+      - --remoteWrite.url=http://victoriametrics:8428/api/v1/write
+    depends_on:
+      - victoriametrics
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./vmagent/prometheus.yml:/etc/vmagent/prometheus.yml:ro
+      - ../.workspace/observability/vmagent/targets:/etc/vmagent/targets:ro
+
+  victorialogs:
+    image: victoriametrics/victoria-logs:latest
+    command:
+      - --storageDataPath=/storage
+    ports:
+      - "11342:9428"
+    volumes:
+      - ./.data/victorialogs:/storage
+
+  victoriatraces:
+    image: victoriametrics/victoria-traces:latest
+    command:
+      - --storageDataPath=/storage
+    ports:
+      - "11343:10428"
+    volumes:
+      - ./.data/victoriatraces:/storage
+
+  vector:
+    image: timberio/vector:latest-alpine
+    depends_on:
+      - victorialogs
+      - victoriametrics
+      - victoriatraces
+    ports:
+      - "11338:4317"
+      - "11339:4318"
+      - "11340:8686"
+    volumes:
+      - ./vector/vector.yaml:/etc/vector/vector.yaml:ro
+      - ../.workspace/observability/logs:/var/log/agent
+
+  grafana:
+    image: grafana/grafana-oss:latest
+    depends_on:
+      - victoriametrics
+      - victorialogs
+      - victoriatraces
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_INSTALL_PLUGINS: victoriametrics-metrics-datasource,victoriametrics-logs-datasource
+    ports:
+      - "11337:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ./.data/grafana:/var/lib/grafana

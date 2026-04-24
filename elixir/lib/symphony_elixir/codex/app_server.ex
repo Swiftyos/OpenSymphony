@@ -4,9 +4,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   """
 
   require Logger
-  alias SymphonyElixir.{Accounts, Codex.DynamicTool, Config, SSH, Telemetry}
-
-  @codex_config_marker "# managed-by: symphony"
+  alias SymphonyElixir.{Accounts, Codex.DynamicTool, Codex.TraceLog, Config, SSH, Telemetry}
 
   @initialize_id 1
   @thread_start_id 2
@@ -46,8 +44,9 @@ defmodule SymphonyElixir.Codex.AppServer do
     command = Keyword.get(opts, :command) || Config.codex_command(Keyword.get(opts, :effort))
     issue = Keyword.get(opts, :issue)
 
+    command = codex_launch_command(command, issue)
+
     with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
-         :ok <- maybe_write_codex_config(expanded_workspace, issue),
          {:ok, port} <- start_port(expanded_workspace, worker_host, command, issue, account) do
       metadata = port_metadata(port, worker_host, account)
 
@@ -90,6 +89,7 @@ defmodule SymphonyElixir.Codex.AppServer do
         opts \\ []
       ) do
     on_message = Keyword.get(opts, :on_message, &default_on_message/1)
+    turn_number = Keyword.get(opts, :turn_number, 1)
 
     tool_executor =
       Keyword.get(opts, :tool_executor, fn tool, arguments ->
@@ -100,44 +100,49 @@ defmodule SymphonyElixir.Codex.AppServer do
       {:ok, turn_id} ->
         session_id = "#{thread_id}-#{turn_id}"
         Logger.info("Codex session started for #{issue_context(issue)} session_id=#{session_id}")
+        TraceLog.put_context(trace_context(issue, session_id, thread_id, turn_id, turn_number))
 
-        emit_message(
-          on_message,
-          :session_started,
-          %{
-            session_id: session_id,
-            thread_id: thread_id,
-            turn_id: turn_id
-          },
-          metadata
-        )
+        try do
+          emit_message(
+            on_message,
+            :session_started,
+            %{
+              session_id: session_id,
+              thread_id: thread_id,
+              turn_id: turn_id
+            },
+            metadata
+          )
 
-        case await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
-          {:ok, result} ->
-            Logger.info("Codex session completed for #{issue_context(issue)} session_id=#{session_id}")
+          case await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
+            {:ok, result} ->
+              Logger.info("Codex session completed for #{issue_context(issue)} session_id=#{session_id}")
 
-            {:ok,
-             %{
-               result: result,
-               session_id: session_id,
-               thread_id: thread_id,
-               turn_id: turn_id
-             }}
+              {:ok,
+               %{
+                 result: result,
+                 session_id: session_id,
+                 thread_id: thread_id,
+                 turn_id: turn_id
+               }}
 
-          {:error, reason} ->
-            Logger.warning("Codex session ended with error for #{issue_context(issue)} session_id=#{session_id}: #{inspect(reason)}")
+            {:error, reason} ->
+              Logger.warning("Codex session ended with error for #{issue_context(issue)} session_id=#{session_id}: #{inspect(reason)}")
 
-            emit_message(
-              on_message,
-              :turn_ended_with_error,
-              %{
-                session_id: session_id,
-                reason: reason
-              },
-              metadata
-            )
+              emit_message(
+                on_message,
+                :turn_ended_with_error,
+                %{
+                  session_id: session_id,
+                  reason: reason
+                },
+                metadata
+              )
 
-            {:error, reason}
+              {:error, reason}
+          end
+        after
+          TraceLog.clear_context()
         end
 
       {:error, reason} ->
@@ -185,49 +190,104 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp maybe_write_codex_config(_workspace, nil), do: :ok
-
-  defp maybe_write_codex_config(workspace, issue) do
-    with true <- Config.telemetry_enabled?(),
-         endpoint when is_binary(endpoint) and endpoint != "" <- Config.telemetry_otlp_endpoint() do
-      write_codex_config(workspace, issue, endpoint)
-    else
-      _ -> :ok
+  defp codex_launch_command(command, issue) do
+    case codex_telemetry_overrides(issue) do
+      [] -> command
+      overrides -> Enum.join([command | overrides], " ")
     end
   end
 
-  defp write_codex_config(workspace, issue, endpoint) do
-    config_path = Path.join(workspace, ".codex")
-    config_file = Path.join(config_path, "config.toml")
+  defp codex_telemetry_overrides(issue) do
+    case codex_telemetry_exporter_settings() do
+      nil ->
+        []
 
-    if user_managed_config?(config_file) do
-      Logger.warning("Skipping codex telemetry config write at #{config_file}: existing file is not managed by symphony")
+      %{endpoint: endpoint, protocol: protocol, log_user_prompt: log_user_prompt, log_tool_details: log_tool_details} ->
+        exporter = codex_exporter_override(protocol, endpoint)
 
-      :ok
-    else
-      :ok = File.mkdir_p(config_path)
-      File.write!(config_file, render_codex_config_toml(issue, endpoint))
+        base_overrides = [
+          "-c " <> shell_escape(~s(otel.environment="#{escape_toml_string(codex_telemetry_environment(issue))}")),
+          "-c " <> shell_escape("otel.exporter=#{exporter}"),
+          "-c " <> shell_escape("otel.trace_exporter=#{exporter}"),
+          "-c " <> shell_escape("otel.log_user_prompt=#{log_user_prompt}"),
+          "-c " <> shell_escape("otel.log_tool_details=#{log_tool_details}")
+        ]
+
+        if Config.settings!().telemetry.include_metrics do
+          base_overrides ++ ["-c " <> shell_escape("otel.metrics_exporter=#{exporter}")]
+        else
+          base_overrides
+        end
     end
   end
 
-  defp user_managed_config?(path) do
-    case File.read(path) do
-      {:ok, contents} -> not String.contains?(contents, @codex_config_marker)
-      {:error, _} -> false
+  defp codex_telemetry_exporter_settings do
+    settings = Config.settings!()
+    telemetry = settings.telemetry
+
+    if telemetry.enabled do
+      metrics_candidate =
+        telemetry_signal_candidate(
+          telemetry.include_metrics,
+          telemetry.otlp_metrics_endpoint,
+          telemetry.otlp_metrics_protocol,
+          telemetry.otlp_protocol
+        )
+
+      logs_candidate =
+        telemetry_signal_candidate(
+          telemetry.include_logs,
+          telemetry.otlp_logs_endpoint,
+          telemetry.otlp_logs_protocol,
+          telemetry.otlp_protocol
+        )
+
+      traces_candidate =
+        telemetry_signal_candidate(
+          telemetry.include_traces,
+          telemetry.otlp_traces_endpoint,
+          telemetry.otlp_traces_protocol,
+          telemetry.otlp_protocol
+        )
+
+      [
+        metrics_candidate,
+        logs_candidate,
+        traces_candidate,
+        telemetry_signal_candidate(true, telemetry.otlp_endpoint, telemetry.otlp_protocol, telemetry.otlp_protocol)
+      ]
+      |> Enum.find_value(fn
+        nil ->
+          nil
+
+        {endpoint, protocol} ->
+          %{
+            endpoint: endpoint,
+            protocol: protocol,
+            log_user_prompt: telemetry.log_user_prompts,
+            log_tool_details: telemetry.log_tool_details
+          }
+      end)
     end
   end
 
-  defp render_codex_config_toml(issue, endpoint) do
-    protocol = Config.telemetry_otlp_protocol()
+  defp telemetry_signal_candidate(false, _endpoint, _protocol, _fallback_protocol), do: nil
+
+  defp telemetry_signal_candidate(true, endpoint, protocol, fallback_protocol) do
+    with endpoint when is_binary(endpoint) <- normalize_optional_string(endpoint) do
+      {endpoint, normalize_optional_string(protocol) || normalize_optional_string(fallback_protocol) || "grpc"}
+    end
+  end
+
+  defp codex_telemetry_environment(issue) when is_map(issue) do
     identifier = Map.get(issue, :identifier) || Map.get(issue, "identifier") || "unknown"
-    exporter_inner = codex_exporter_inner(protocol, endpoint)
+    "symphony-#{identifier}"
+  end
 
-    """
-    #{@codex_config_marker}
-    [otel]
-    exporter = { #{codex_exporter_key(protocol)} = { #{exporter_inner} } }
-    environment = "symphony-#{escape_toml_string(identifier)}"
-    """
+  defp codex_telemetry_environment(_issue), do: "symphony-unknown"
+
+  defp codex_exporter_override(protocol, endpoint) do
+    "{ #{codex_exporter_key(protocol)} = { #{codex_exporter_inner(protocol, endpoint)} } }"
   end
 
   defp codex_exporter_inner("grpc", endpoint) do
@@ -245,6 +305,17 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp codex_http_encoding("http/json"), do: "json"
   defp codex_http_encoding(_), do: "binary"
+
+  defp normalize_optional_string(nil), do: nil
+
+  defp normalize_optional_string(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp normalize_optional_string(value), do: value
 
   defp escape_toml_string(value) do
     value
@@ -1095,6 +1166,17 @@ defmodule SymphonyElixir.Codex.AppServer do
     "issue_id=#{issue_id} issue_identifier=#{identifier}"
   end
 
+  defp trace_context(issue, session_id, thread_id, turn_id, turn_number) do
+    %{
+      issue_id: Map.get(issue, :id) || Map.get(issue, "id"),
+      issue_identifier: Map.get(issue, :identifier) || Map.get(issue, "identifier"),
+      session_id: session_id,
+      thread_id: thread_id,
+      turn_id: turn_id,
+      turn_number: turn_number
+    }
+  end
+
   defp stop_port(port) when is_port(port) do
     case :erlang.port_info(port) do
       :undefined ->
@@ -1112,7 +1194,15 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp emit_message(on_message, event, details, metadata) when is_function(on_message, 1) do
-    message = metadata |> Map.merge(details) |> Map.put(:event, event) |> Map.put(:timestamp, DateTime.utc_now())
+    message =
+      metadata
+      |> Map.merge(TraceLog.context_metadata())
+      |> Map.merge(details)
+      |> Map.put(:event, event)
+      |> Map.put(:timestamp, DateTime.utc_now())
+      |> TraceLog.with_sequence()
+
+    TraceLog.emit(message)
     on_message.(message)
   end
 

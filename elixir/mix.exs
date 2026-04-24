@@ -24,6 +24,7 @@ defmodule SymphonyElixir.MixProject do
           SymphonyElixir.Codex.AppServer,
           SymphonyElixir.OpenCode.AppServer,
           SymphonyElixir.Codex.DynamicTool,
+          SymphonyElixir.Codex.TraceLog,
           SymphonyElixir.OpenCode.Tooling,
           SymphonyElixir.HttpServer,
           SymphonyElixir.StatusDashboard,

@@ -273,8 +273,9 @@ projects:
 - In multi-project mode, if a route's `WORKFLOW.md` is missing or invalid, Symphony does not boot.
 - If a later reload fails, Symphony keeps running with the last known good config and logs the
   reload error until the file is fixed.
-- `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
-  `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
+- `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard, Prometheus
+  metrics, and JSON API at `/`, `/metrics`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and
+  `/api/v1/refresh`.
 
 ## Backend support
 
@@ -316,6 +317,11 @@ unavailable, the issue stays in retry/backoff until an account becomes usable.
 Each account directory also gets `usage_periods.csv` when Codex or Claude reports a `session` or
 `weekly` rate-limit reset. Rows include the reset transition, usage percentage, weekly percentage
 where applicable, and local token totals accumulated during that provider period.
+
+To feed the local Grafana `Account Usage` dashboard, run Symphony with `--port 4001` or set
+`server.port: 4001`. When the observability stack runs in Docker, also set `server.host: 0.0.0.0`
+so `vmagent` can scrape `host.docker.internal:4001/metrics`. Otherwise the quota and
+billing-cycle panels stay empty even though the endpoint works from your local browser.
 
 ### Codex
 

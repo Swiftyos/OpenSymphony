@@ -204,9 +204,17 @@ defmodule SymphonyElixir.TestSupport do
           telemetry_enabled: false,
           telemetry_otlp_endpoint: nil,
           telemetry_otlp_protocol: "grpc",
+          telemetry_otlp_traces_endpoint: nil,
+          telemetry_otlp_traces_protocol: nil,
+          telemetry_otlp_logs_endpoint: nil,
+          telemetry_otlp_logs_protocol: nil,
+          telemetry_otlp_metrics_endpoint: nil,
+          telemetry_otlp_metrics_protocol: nil,
           telemetry_include_traces: true,
           telemetry_include_metrics: true,
           telemetry_include_logs: true,
+          telemetry_log_user_prompts: false,
+          telemetry_log_tool_details: false,
           telemetry_resource_attributes: %{},
           server_port: nil,
           server_host: nil,
@@ -273,9 +281,17 @@ defmodule SymphonyElixir.TestSupport do
     telemetry_enabled = Keyword.get(config, :telemetry_enabled)
     telemetry_otlp_endpoint = Keyword.get(config, :telemetry_otlp_endpoint)
     telemetry_otlp_protocol = Keyword.get(config, :telemetry_otlp_protocol)
+    telemetry_otlp_traces_endpoint = Keyword.get(config, :telemetry_otlp_traces_endpoint)
+    telemetry_otlp_traces_protocol = Keyword.get(config, :telemetry_otlp_traces_protocol)
+    telemetry_otlp_logs_endpoint = Keyword.get(config, :telemetry_otlp_logs_endpoint)
+    telemetry_otlp_logs_protocol = Keyword.get(config, :telemetry_otlp_logs_protocol)
+    telemetry_otlp_metrics_endpoint = Keyword.get(config, :telemetry_otlp_metrics_endpoint)
+    telemetry_otlp_metrics_protocol = Keyword.get(config, :telemetry_otlp_metrics_protocol)
     telemetry_include_traces = Keyword.get(config, :telemetry_include_traces)
     telemetry_include_metrics = Keyword.get(config, :telemetry_include_metrics)
     telemetry_include_logs = Keyword.get(config, :telemetry_include_logs)
+    telemetry_log_user_prompts = Keyword.get(config, :telemetry_log_user_prompts)
+    telemetry_log_tool_details = Keyword.get(config, :telemetry_log_tool_details)
     telemetry_resource_attributes = Keyword.get(config, :telemetry_resource_attributes)
     server_port = Keyword.get(config, :server_port)
     server_host = Keyword.get(config, :server_host)
@@ -341,7 +357,23 @@ defmodule SymphonyElixir.TestSupport do
         "  stall_timeout_ms: #{yaml_value(claude_stall_timeout_ms)}",
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
-        telemetry_yaml(telemetry_enabled, telemetry_otlp_endpoint, telemetry_otlp_protocol, telemetry_include_traces, telemetry_include_metrics, telemetry_include_logs, telemetry_resource_attributes),
+        telemetry_yaml(
+          telemetry_enabled,
+          telemetry_otlp_endpoint,
+          telemetry_otlp_protocol,
+          telemetry_otlp_traces_endpoint,
+          telemetry_otlp_traces_protocol,
+          telemetry_otlp_logs_endpoint,
+          telemetry_otlp_logs_protocol,
+          telemetry_otlp_metrics_endpoint,
+          telemetry_otlp_metrics_protocol,
+          telemetry_include_traces,
+          telemetry_include_metrics,
+          telemetry_include_logs,
+          telemetry_log_user_prompts,
+          telemetry_log_tool_details,
+          telemetry_resource_attributes
+        ),
         server_yaml(server_port, server_host),
         instance_yaml(instance_name),
         "---",
@@ -443,9 +475,17 @@ defmodule SymphonyElixir.TestSupport do
           telemetry_enabled: false,
           telemetry_otlp_endpoint: nil,
           telemetry_otlp_protocol: "grpc",
+          telemetry_otlp_traces_endpoint: nil,
+          telemetry_otlp_traces_protocol: nil,
+          telemetry_otlp_logs_endpoint: nil,
+          telemetry_otlp_logs_protocol: nil,
+          telemetry_otlp_metrics_endpoint: nil,
+          telemetry_otlp_metrics_protocol: nil,
           telemetry_include_traces: true,
           telemetry_include_metrics: true,
           telemetry_include_logs: true,
+          telemetry_log_user_prompts: false,
+          telemetry_log_tool_details: false,
           telemetry_resource_attributes: %{},
           server_port: nil,
           server_host: nil,
@@ -509,9 +549,17 @@ defmodule SymphonyElixir.TestSupport do
     telemetry_enabled = Keyword.get(config, :telemetry_enabled)
     telemetry_otlp_endpoint = Keyword.get(config, :telemetry_otlp_endpoint)
     telemetry_otlp_protocol = Keyword.get(config, :telemetry_otlp_protocol)
+    telemetry_otlp_traces_endpoint = Keyword.get(config, :telemetry_otlp_traces_endpoint)
+    telemetry_otlp_traces_protocol = Keyword.get(config, :telemetry_otlp_traces_protocol)
+    telemetry_otlp_logs_endpoint = Keyword.get(config, :telemetry_otlp_logs_endpoint)
+    telemetry_otlp_logs_protocol = Keyword.get(config, :telemetry_otlp_logs_protocol)
+    telemetry_otlp_metrics_endpoint = Keyword.get(config, :telemetry_otlp_metrics_endpoint)
+    telemetry_otlp_metrics_protocol = Keyword.get(config, :telemetry_otlp_metrics_protocol)
     telemetry_include_traces = Keyword.get(config, :telemetry_include_traces)
     telemetry_include_metrics = Keyword.get(config, :telemetry_include_metrics)
     telemetry_include_logs = Keyword.get(config, :telemetry_include_logs)
+    telemetry_log_user_prompts = Keyword.get(config, :telemetry_log_user_prompts)
+    telemetry_log_tool_details = Keyword.get(config, :telemetry_log_tool_details)
     telemetry_resource_attributes = Keyword.get(config, :telemetry_resource_attributes)
     server_port = Keyword.get(config, :server_port)
     server_host = Keyword.get(config, :server_host)
@@ -587,7 +635,23 @@ defmodule SymphonyElixir.TestSupport do
         "  read_timeout_ms: #{yaml_value(claude_read_timeout_ms)}",
         "  stall_timeout_ms: #{yaml_value(claude_stall_timeout_ms)}",
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
-        telemetry_yaml(telemetry_enabled, telemetry_otlp_endpoint, telemetry_otlp_protocol, telemetry_include_traces, telemetry_include_metrics, telemetry_include_logs, telemetry_resource_attributes),
+        telemetry_yaml(
+          telemetry_enabled,
+          telemetry_otlp_endpoint,
+          telemetry_otlp_protocol,
+          telemetry_otlp_traces_endpoint,
+          telemetry_otlp_traces_protocol,
+          telemetry_otlp_logs_endpoint,
+          telemetry_otlp_logs_protocol,
+          telemetry_otlp_metrics_endpoint,
+          telemetry_otlp_metrics_protocol,
+          telemetry_include_traces,
+          telemetry_include_metrics,
+          telemetry_include_logs,
+          telemetry_log_user_prompts,
+          telemetry_log_tool_details,
+          telemetry_resource_attributes
+        ),
         server_yaml(server_port, server_host),
         instance_yaml(instance_name),
         "projects: #{yaml_value(projects)}"
@@ -717,17 +781,58 @@ defmodule SymphonyElixir.TestSupport do
     |> Enum.join("\n")
   end
 
-  defp telemetry_yaml(false, _endpoint, _protocol, _traces, _metrics, _logs, _attrs), do: nil
+  defp telemetry_yaml(
+         false,
+         _endpoint,
+         _protocol,
+         _traces_endpoint,
+         _traces_protocol,
+         _logs_endpoint,
+         _logs_protocol,
+         _metrics_endpoint,
+         _metrics_protocol,
+         _traces,
+         _metrics,
+         _logs,
+         _log_user_prompts,
+         _log_tool_details,
+         _attrs
+       ),
+       do: nil
 
-  defp telemetry_yaml(true, endpoint, protocol, traces, metrics, logs, attrs) do
+  defp telemetry_yaml(
+         true,
+         endpoint,
+         protocol,
+         traces_endpoint,
+         traces_protocol,
+         logs_endpoint,
+         logs_protocol,
+         metrics_endpoint,
+         metrics_protocol,
+         traces,
+         metrics,
+         logs,
+         log_user_prompts,
+         log_tool_details,
+         attrs
+       ) do
     [
       "telemetry:",
       "  enabled: true",
       "  otlp_endpoint: #{yaml_value(endpoint)}",
       "  otlp_protocol: #{yaml_value(protocol)}",
+      "  otlp_traces_endpoint: #{yaml_value(traces_endpoint)}",
+      "  otlp_traces_protocol: #{yaml_value(traces_protocol)}",
+      "  otlp_logs_endpoint: #{yaml_value(logs_endpoint)}",
+      "  otlp_logs_protocol: #{yaml_value(logs_protocol)}",
+      "  otlp_metrics_endpoint: #{yaml_value(metrics_endpoint)}",
+      "  otlp_metrics_protocol: #{yaml_value(metrics_protocol)}",
       "  include_traces: #{yaml_value(traces)}",
       "  include_metrics: #{yaml_value(metrics)}",
       "  include_logs: #{yaml_value(logs)}",
+      "  log_user_prompts: #{yaml_value(log_user_prompts)}",
+      "  log_tool_details: #{yaml_value(log_tool_details)}",
       telemetry_resource_attributes_yaml(attrs)
     ]
     |> Enum.reject(&is_nil/1)

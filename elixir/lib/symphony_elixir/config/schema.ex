@@ -869,6 +869,7 @@ defmodule SymphonyElixir.Config.Schema do
   defp normalize_keys(value) when is_list(value), do: Enum.map(value, &normalize_keys/1)
   defp normalize_keys(value), do: value
 
+  @spec normalize_optional_string(term()) :: term()
   def normalize_optional_string(nil), do: nil
 
   def normalize_optional_string(value) when is_binary(value) do
@@ -880,6 +881,7 @@ defmodule SymphonyElixir.Config.Schema do
 
   def normalize_optional_string(value), do: value
 
+  @spec normalize_optional_effort(term()) :: term()
   def normalize_optional_effort(nil), do: nil
 
   def normalize_optional_effort(value) when is_binary(value) do

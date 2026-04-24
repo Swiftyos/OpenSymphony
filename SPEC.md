@@ -514,17 +514,30 @@ Fields:
 - `otlp_protocol` (string)
   - Default: `grpc`
   - Supported values: `grpc`, `http/protobuf`, `http/json`
+- `otlp_traces_endpoint`, `otlp_logs_endpoint`, `otlp_metrics_endpoint` (string)
+  - Optional signal-specific OTLP collector endpoints.
+- `otlp_traces_protocol`, `otlp_logs_protocol`, `otlp_metrics_protocol` (string)
+  - Optional signal-specific protocols. Supported values match `otlp_protocol`.
 - `include_traces` (boolean)
   - Default: `true`
 - `include_metrics` (boolean)
   - Default: `true`
 - `include_logs` (boolean)
   - Default: `true`
+- `log_user_prompts` (boolean)
+  - Default: `false`
+- `log_tool_details` (boolean)
+  - Default: `false`
+  - When enabled, agent telemetry may include tool arguments and other detailed tool-call payloads.
 - `resource_attributes` (map)
   - Default: `{}`
   - Static key-value pairs merged into `OTEL_RESOURCE_ATTRIBUTES` for every agent session.
 
 When enabled, the orchestrator injects OpenTelemetry environment variables into each agent process and tags all signals with the current Linear issue (`linear.issue.id`, `linear.issue.identifier`), backend (`symphony.backend`), instance (`symphony.instance`), and selected managed account when present (`symphony.account.id`, `symphony.account.email`, `symphony.account.backend`, `symphony.account.state`, `symphony.account.credential_kind`).
+
+Claude Code is enabled through `CLAUDE_CODE_*` and `OTEL_*` environment variables. Codex receives the shared `OTEL_RESOURCE_ATTRIBUTES` environment variable and equivalent Codex `[otel]` settings as `codex app-server -c otel.*` launch overrides. Symphony passes `otel.exporter` for logs, `otel.trace_exporter` for traces, `otel.metrics_exporter` when metrics are enabled, `otel.log_user_prompt`, and `otel.log_tool_details` so installed Codex binaries and newer docs reach the same collector with consistent privacy/detail settings. For Codex exporter selection, Symphony prefers the metrics-specific endpoint when `include_metrics` is true, then logs, traces, and finally the generic `otlp_endpoint`.
+
+When local observability is enabled through the development wrapper (`AGENT_OBSERVABILITY=1`), Symphony also writes `codex_trace` JSONL events to stderr. These events are ordered by `sequence` and tagged with `session_id`, `thread_id`, `turn_id`, `step`, `issue_id`, and `issue_identifier` so operators can reconstruct a run timeline from VictoriaLogs by filtering on `event="codex_trace"` and the target session or issue.
 
 ### 5.4 Prompt Template Contract
 

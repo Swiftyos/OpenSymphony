@@ -98,6 +98,10 @@ defmodule SymphonyElixir.SpecsCheck do
 
   defp consume_form({:@, _, _}, state, _module_name, _file, _exemptions), do: state
 
+  defp consume_form({:def, _meta, [_head_ast]}, state, _module_name, _file, _exemptions) do
+    state
+  end
+
   defp consume_form({:def, meta, [head_ast, _]} = _form, state, module_name, file, exemptions) do
     {name, arity} = def_head_to_identifier(head_ast)
 

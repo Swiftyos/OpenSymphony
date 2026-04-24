@@ -4,10 +4,18 @@ defmodule SymphonyElixir.AgentRunner do
   """
 
   require Logger
+
   alias SymphonyElixir.AgentRoute
+  alias SymphonyElixir.AppServer
   alias SymphonyElixir.ClaudeCode.Tooling, as: ClaudeCodeTooling
   alias SymphonyElixir.Codex.AppServer, as: CodexAppServer
-  alias SymphonyElixir.{AppServer, Config, IssueConfig, Linear.Issue, OpenCode.Tooling, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.Config
+  alias SymphonyElixir.IssueConfig
+  alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.OpenCode.Tooling
+  alias SymphonyElixir.PromptBuilder
+  alias SymphonyElixir.Tracker
+  alias SymphonyElixir.Workspace
 
   @type worker_host :: String.t() | nil
 
@@ -145,7 +153,8 @@ defmodule SymphonyElixir.AgentRunner do
              app_session,
              prompt,
              issue,
-             on_message: codex_message_handler(codex_update_recipient, issue)
+             on_message: codex_message_handler(codex_update_recipient, issue),
+             turn_number: turn_number
            ) do
       Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
 
@@ -383,5 +392,5 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp format_run_failure(reason), do: inspect(reason, limit: 10)
+  defp format_run_failure(reason), do: inspect(reason, limit: :infinity, printable_limit: :infinity)
 end

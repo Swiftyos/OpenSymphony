@@ -6,7 +6,7 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
   use Phoenix.Controller, formats: [:json]
 
   alias Plug.Conn
-  alias SymphonyElixirWeb.{Endpoint, Presenter}
+  alias SymphonyElixirWeb.{Endpoint, Presenter, PrometheusMetrics}
 
   @spec state(Conn.t(), map()) :: Conn.t()
   def state(conn, _params) do
@@ -35,6 +35,15 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
       {:error, :unavailable} ->
         error_response(conn, 503, "orchestrator_unavailable", "Orchestrator is unavailable")
     end
+  end
+
+  @spec metrics(Conn.t(), map()) :: Conn.t()
+  def metrics(conn, _params) do
+    body = PrometheusMetrics.render()
+
+    conn
+    |> put_resp_header("content-type", "text/plain; version=0.0.4; charset=utf-8")
+    |> send_resp(200, body)
   end
 
   @spec method_not_allowed(Conn.t(), map()) :: Conn.t()

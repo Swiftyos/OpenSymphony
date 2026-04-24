@@ -1412,7 +1412,11 @@ defmodule SymphonyElixir.Accounts do
       Map.get(bucket, "reset_at") ||
         Map.get(bucket, :reset_at) ||
         Map.get(bucket, "resetAt") ||
-        Map.get(bucket, :resetAt)
+        Map.get(bucket, :resetAt) ||
+        Map.get(bucket, "resets_at") ||
+        Map.get(bucket, :resets_at) ||
+        Map.get(bucket, "resetsAt") ||
+        Map.get(bucket, :resetsAt)
 
     normalize_datetime_string(reset_at)
   end
@@ -1542,12 +1546,25 @@ defmodule SymphonyElixir.Accounts do
 
   defp normalize_datetime_string(%DateTime{} = timestamp), do: DateTime.to_iso8601(timestamp)
 
+  defp normalize_datetime_string(value) when is_integer(value) and value > 0 do
+    case DateTime.from_unix(value) do
+      {:ok, timestamp} -> DateTime.to_iso8601(timestamp)
+      _ -> Integer.to_string(value)
+    end
+  end
+
   defp normalize_datetime_string(value) when is_binary(value) do
     value = String.trim(value)
 
     case DateTime.from_iso8601(value) do
-      {:ok, timestamp, _offset} -> DateTime.to_iso8601(timestamp)
-      _ -> if(value == "", do: nil, else: value)
+      {:ok, timestamp, _offset} ->
+        DateTime.to_iso8601(timestamp)
+
+      _ ->
+        case Integer.parse(value) do
+          {unix_seconds, ""} -> normalize_datetime_string(unix_seconds)
+          _ -> if(value == "", do: nil, else: value)
+        end
     end
   end
 

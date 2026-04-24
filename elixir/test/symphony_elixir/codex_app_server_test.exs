@@ -464,6 +464,108 @@ defmodule SymphonyElixir.CodexAppServerTest do
     end
   end
 
+  test "codex backend emits ordered local observability trace events for a run" do
+    test_root = temp_root!("trace-jsonl")
+    previous_observability = System.get_env("AGENT_OBSERVABILITY")
+    previous_dev_id = System.get_env("DEV_ID")
+
+    on_exit(fn ->
+      restore_env("AGENT_OBSERVABILITY", previous_observability)
+      restore_env("DEV_ID", previous_dev_id)
+    end)
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-TRACE")
+      codex_binary = Path.join(test_root, "fake-codex")
+      File.mkdir_p!(workspace)
+
+      System.put_env("AGENT_OBSERVABILITY", "1")
+      System.put_env("DEV_ID", "trace-test")
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+
+      while IFS= read -r line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-trace"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-trace"}}}'
+            printf '%s\\n' '{"method":"item/agentMessage/delta","params":{"delta":"hello operator"}}'
+            printf '%s\\n' '{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"git status --short"}}}'
+            printf '%s\\n' '{"id":77,"method":"item/tool/call","params":{"name":"linear_graphql","callId":"call-trace","threadId":"thread-trace","turnId":"turn-trace","arguments":{"query":"query Viewer { viewer { id } }"}}}'
+            ;;
+          5)
+            printf '%s\\n' '{"method":"turn/completed","params":{"turn":{"status":"completed"}}}'
+            exit 0
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        agent_backend: "codex",
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server",
+        telemetry_enabled: true,
+        telemetry_otlp_endpoint: "http://localhost:11338",
+        telemetry_log_tool_details: true
+      )
+
+      issue = issue_fixture("MT-TRACE", "Trace JSONL")
+
+      tool_executor = fn _tool, _arguments ->
+        %{"success" => true, "output" => ~s({"ok":true})}
+      end
+
+      stderr =
+        ExUnit.CaptureIO.capture_io(:stderr, fn ->
+          assert {:ok, _result} =
+                   AppServer.run(workspace, "Trace this run", issue,
+                     tool_executor: tool_executor,
+                     turn_number: 1
+                   )
+        end)
+
+      trace_events =
+        stderr
+        |> String.split("\n", trim: true)
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.filter(&(&1["event"] == "codex_trace"))
+
+      sequences = Enum.map(trace_events, & &1["sequence"])
+      assert sequences == Enum.sort(sequences)
+      assert Enum.all?(trace_events, &(&1["session_id"] == "thread-trace-turn-trace"))
+      assert Enum.all?(trace_events, &(&1["issue_identifier"] == "MT-TRACE"))
+      assert Enum.any?(trace_events, &(&1["trace_kind"] == "session_started"))
+      assert Enum.any?(trace_events, &(&1["trace_kind"] == "assistant_text_delta" and &1["text"] == "hello operator"))
+      assert Enum.any?(trace_events, &(&1["trace_kind"] == "command_started" and &1["command"] == "git status --short"))
+
+      assert Enum.any?(trace_events, fn event ->
+               event["trace_kind"] == "dynamic_tool_completed" and
+                 event["tool_name"] == "linear_graphql" and
+                 get_in(event, ["tool_arguments", "query"]) == "query Viewer { viewer { id } }"
+             end)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "codex backend launches over ssh for remote workers" do
     test_root = temp_root!("remote-ssh")
     previous_path = System.get_env("PATH")
@@ -587,7 +689,7 @@ defmodule SymphonyElixir.CodexAppServerTest do
     end
   end
 
-  test "codex backend writes .codex/config.toml and injects telemetry env vars when telemetry is enabled" do
+  test "codex backend passes otel config overrides and injects telemetry env vars when telemetry is enabled" do
     test_root = temp_root!("telemetry")
     trace_env = "SYMP_TEST_CODEX_TRACE_#{System.unique_integer([:positive])}"
     previous_trace = System.get_env(trace_env)
@@ -601,54 +703,7 @@ defmodule SymphonyElixir.CodexAppServerTest do
       trace_file = Path.join(test_root, "codex-telemetry.trace")
       File.mkdir_p!(workspace)
       System.put_env(trace_env, trace_file)
-
-      File.write!(codex_binary, """
-      #!/bin/sh
-      trace_file="${#{trace_env}:-/tmp/codex-telemetry.trace}"
-      count=0
-
-      if [ -n "${OTEL_RESOURCE_ATTRIBUTES:-}" ]; then
-        printf 'ENV:OTEL_RESOURCE_ATTRIBUTES=%s\n' "$OTEL_RESOURCE_ATTRIBUTES" >> "$trace_file"
-      fi
-
-      if [ -n "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ]; then
-        printf 'ENV:OTEL_EXPORTER_OTLP_ENDPOINT=%s\n' "$OTEL_EXPORTER_OTLP_ENDPOINT" >> "$trace_file"
-      fi
-
-      if [ -n "${OTEL_EXPORTER_OTLP_PROTOCOL:-}" ]; then
-        printf 'ENV:OTEL_EXPORTER_OTLP_PROTOCOL=%s\n' "$OTEL_EXPORTER_OTLP_PROTOCOL" >> "$trace_file"
-      fi
-
-      if [ -n "${CODEX_HOME:-}" ]; then
-        printf 'ENV:CODEX_HOME=%s\n' "$CODEX_HOME" >> "$trace_file"
-      fi
-
-      while IFS= read -r line; do
-        count=$((count + 1))
-        printf 'JSON:%s\n' "$line" >> "$trace_file"
-
-        case "$count" in
-          1)
-            printf '%s\n' '{"id":1,"result":{}}'
-            ;;
-          2)
-            printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-tel"}}}'
-            ;;
-          3)
-            printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn-tel"}}}'
-            ;;
-          4)
-            printf '%s\n' '{"method":"turn/completed"}'
-            exit 0
-            ;;
-          *)
-            exit 0
-            ;;
-        esac
-      done
-      """)
-
-      File.chmod!(codex_binary, 0o755)
+      write_fake_codex_telemetry_launcher!(codex_binary, trace_env)
 
       issue = issue_fixture("MT-1001-TEL", "Telemetry test")
 
@@ -678,14 +733,16 @@ defmodule SymphonyElixir.CodexAppServerTest do
       assert {:ok, _result} = AppServer.run(workspace, "Telemetry test", issue, account: account)
 
       codex_config_path = Path.join(workspace, ".codex/config.toml")
-      assert File.exists?(codex_config_path)
-
-      codex_config = File.read!(codex_config_path)
-      assert codex_config =~ ~s([otel])
-      assert codex_config =~ ~s(exporter = { otlp-grpc = { endpoint = "http://localhost:11338" } })
-      assert codex_config =~ ~s(environment = "symphony-MT-1001-TEL")
+      refute File.exists?(codex_config_path)
 
       trace = File.read!(trace_file)
+      assert trace =~ ~s(ARGV:app-server)
+      assert trace =~ ~s(-c otel.environment="symphony-MT-1001-TEL")
+      assert trace =~ ~s(-c otel.exporter={ otlp-grpc = { endpoint = "http://localhost:11338" } })
+      assert trace =~ ~s(-c otel.trace_exporter={ otlp-grpc = { endpoint = "http://localhost:11338" } })
+      assert trace =~ ~s(-c otel.metrics_exporter={ otlp-grpc = { endpoint = "http://localhost:11338" } })
+      assert trace =~ ~s(-c otel.log_user_prompt=false)
+      assert trace =~ ~s(-c otel.log_tool_details=false)
       assert trace =~ "ENV:OTEL_RESOURCE_ATTRIBUTES="
       assert trace =~ "linear.issue.id=issue-MT-1001-TEL"
       assert trace =~ "linear.issue.identifier=MT-1001-TEL"
@@ -718,23 +775,13 @@ defmodule SymphonyElixir.CodexAppServerTest do
       File.write!(user_config_path, user_config)
 
       codex_binary = Path.join(test_root, "fake-codex")
+      trace_env = "SYMP_TEST_CODEX_TRACE_#{System.unique_integer([:positive])}"
+      previous_trace = System.get_env(trace_env)
 
-      File.write!(codex_binary, """
-      #!/bin/sh
-      count=0
-      while IFS= read -r line; do
-        count=$((count + 1))
-        case "$count" in
-          1) printf '%s\n' '{"id":1,"result":{}}' ;;
-          2) printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-pres"}}}' ;;
-          3) printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn-pres"}}}' ;;
-          4) printf '%s\n' '{"method":"turn/completed"}'; exit 0 ;;
-          *) exit 0 ;;
-        esac
-      done
-      """)
+      on_exit(fn -> restore_env(trace_env, previous_trace) end)
 
-      File.chmod!(codex_binary, 0o755)
+      System.put_env(trace_env, Path.join(test_root, "codex-preserve.trace"))
+      write_fake_codex_telemetry_launcher!(codex_binary, trace_env)
 
       write_workflow_file!(Workflow.workflow_file_path(),
         agent_backend: "codex",
@@ -754,8 +801,12 @@ defmodule SymphonyElixir.CodexAppServerTest do
     end
   end
 
-  test "codex backend escapes TOML special characters in identifier and endpoint" do
+  test "codex backend escapes TOML override special characters in identifier and endpoint" do
     test_root = temp_root!("telemetry-escape")
+    trace_env = "SYMP_TEST_CODEX_TRACE_#{System.unique_integer([:positive])}"
+    previous_trace = System.get_env(trace_env)
+
+    on_exit(fn -> restore_env(trace_env, previous_trace) end)
 
     try do
       workspace_root = Path.join(test_root, "workspaces")
@@ -763,23 +814,9 @@ defmodule SymphonyElixir.CodexAppServerTest do
       File.mkdir_p!(workspace)
 
       codex_binary = Path.join(test_root, "fake-codex")
-
-      File.write!(codex_binary, """
-      #!/bin/sh
-      count=0
-      while IFS= read -r line; do
-        count=$((count + 1))
-        case "$count" in
-          1) printf '%s\n' '{"id":1,"result":{}}' ;;
-          2) printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-esc"}}}' ;;
-          3) printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn-esc"}}}' ;;
-          4) printf '%s\n' '{"method":"turn/completed"}'; exit 0 ;;
-          *) exit 0 ;;
-        esac
-      done
-      """)
-
-      File.chmod!(codex_binary, 0o755)
+      trace_file = Path.join(test_root, "codex-escape.trace")
+      System.put_env(trace_env, trace_file)
+      write_fake_codex_telemetry_launcher!(codex_binary, trace_env)
 
       issue = %Issue{
         id: "issue-mt-esc",
@@ -802,16 +839,20 @@ defmodule SymphonyElixir.CodexAppServerTest do
 
       assert {:ok, _result} = AppServer.run(workspace, "Escape", issue)
 
-      toml = File.read!(Path.join(workspace, ".codex/config.toml"))
-      assert toml =~ ~s(environment = "symphony-MT-\\"E\\\\SC")
-      assert toml =~ ~s(endpoint = "http://\\"evil\\"/path")
+      trace = File.read!(trace_file)
+      assert trace =~ ~s(otel.environment="symphony-MT-\\"E\\\\SC")
+      assert trace =~ ~s(endpoint = "http://\\"evil\\"/path")
     after
       File.rm_rf(test_root)
     end
   end
 
-  test "codex backend http/json protocol emits json encoding in TOML" do
+  test "codex backend http/json protocol emits json encoding in otel override" do
     test_root = temp_root!("telemetry-json")
+    trace_env = "SYMP_TEST_CODEX_TRACE_#{System.unique_integer([:positive])}"
+    previous_trace = System.get_env(trace_env)
+
+    on_exit(fn -> restore_env(trace_env, previous_trace) end)
 
     try do
       workspace_root = Path.join(test_root, "workspaces")
@@ -819,23 +860,9 @@ defmodule SymphonyElixir.CodexAppServerTest do
       File.mkdir_p!(workspace)
 
       codex_binary = Path.join(test_root, "fake-codex")
-
-      File.write!(codex_binary, """
-      #!/bin/sh
-      count=0
-      while IFS= read -r line; do
-        count=$((count + 1))
-        case "$count" in
-          1) printf '%s\n' '{"id":1,"result":{}}' ;;
-          2) printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-json"}}}' ;;
-          3) printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn-json"}}}' ;;
-          4) printf '%s\n' '{"method":"turn/completed"}'; exit 0 ;;
-          *) exit 0 ;;
-        esac
-      done
-      """)
-
-      File.chmod!(codex_binary, 0o755)
+      trace_file = Path.join(test_root, "codex-json.trace")
+      System.put_env(trace_env, trace_file)
+      write_fake_codex_telemetry_launcher!(codex_binary, trace_env)
 
       write_workflow_file!(Workflow.workflow_file_path(),
         agent_backend: "codex",
@@ -849,8 +876,55 @@ defmodule SymphonyElixir.CodexAppServerTest do
       assert {:ok, _result} =
                AppServer.run(workspace, "Json encoding", issue_fixture("MT-JSON", "Json"))
 
-      toml = File.read!(Path.join(workspace, ".codex/config.toml"))
-      assert toml =~ ~s(otlp-http = { endpoint = "http://localhost:4318", protocol = "json" })
+      trace = File.read!(trace_file)
+      assert trace =~ ~s(otel.exporter={ otlp-http = { endpoint = "http://localhost:4318", protocol = "json" } })
+      assert trace =~ ~s(otel.trace_exporter={ otlp-http = { endpoint = "http://localhost:4318", protocol = "json" } })
+      assert trace =~ ~s(otel.metrics_exporter={ otlp-http = { endpoint = "http://localhost:4318", protocol = "json" } })
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "codex backend prefers metrics-specific telemetry endpoint for otel override" do
+    test_root = temp_root!("telemetry-metrics")
+    trace_env = "SYMP_TEST_CODEX_TRACE_#{System.unique_integer([:positive])}"
+    previous_trace = System.get_env(trace_env)
+
+    on_exit(fn -> restore_env(trace_env, previous_trace) end)
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-METRICS")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-metrics.trace")
+      File.mkdir_p!(workspace)
+      System.put_env(trace_env, trace_file)
+      write_fake_codex_telemetry_launcher!(codex_binary, trace_env)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        agent_backend: "codex",
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server",
+        telemetry_enabled: true,
+        telemetry_otlp_endpoint: "http://generic.example:4317",
+        telemetry_otlp_protocol: "grpc",
+        telemetry_otlp_metrics_endpoint: "http://metrics.example:4318/v1/metrics",
+        telemetry_otlp_metrics_protocol: "http/json",
+        telemetry_include_metrics: true,
+        telemetry_log_user_prompts: true,
+        telemetry_log_tool_details: true
+      )
+
+      assert {:ok, _result} =
+               AppServer.run(workspace, "Metrics endpoint", issue_fixture("MT-METRICS", "Metrics"))
+
+      trace = File.read!(trace_file)
+      assert trace =~ ~s(otel.exporter={ otlp-http = { endpoint = "http://metrics.example:4318/v1/metrics", protocol = "json" } })
+      assert trace =~ ~s(otel.trace_exporter={ otlp-http = { endpoint = "http://metrics.example:4318/v1/metrics", protocol = "json" } })
+      assert trace =~ ~s(otel.metrics_exporter={ otlp-http = { endpoint = "http://metrics.example:4318/v1/metrics", protocol = "json" } })
+      assert trace =~ ~s(-c otel.log_user_prompt=true)
+      assert trace =~ ~s(-c otel.log_tool_details=true)
+      refute trace =~ ~s(endpoint = "http://generic.example:4317")
     after
       File.rm_rf(test_root)
     end
@@ -873,5 +947,34 @@ defmodule SymphonyElixir.CodexAppServerTest do
       System.tmp_dir!(),
       "symphony-elixir-codex-app-server-#{suffix}-#{System.unique_integer([:positive])}"
     )
+  end
+
+  defp write_fake_codex_telemetry_launcher!(codex_binary, trace_env) do
+    File.write!(codex_binary, """
+    #!/bin/sh
+    trace_file="${#{trace_env}:-/tmp/codex-telemetry.trace}"
+    count=0
+
+    printf 'ARGV:%s\\n' "$*" >> "$trace_file"
+
+    env | grep -E '^(CODEX_HOME=|OTEL_)' | while IFS= read -r line; do
+      printf 'ENV:%s\\n' "$line" >> "$trace_file"
+    done
+
+    while IFS= read -r line; do
+      count=$((count + 1))
+      printf 'JSON:%s\\n' "$line" >> "$trace_file"
+
+      case "$count" in
+        1) printf '%s\\n' '{"id":1,"result":{}}' ;;
+        2) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-tel"}}}' ;;
+        3) printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-tel"}}}' ;;
+        4) printf '%s\\n' '{"method":"turn/completed"}'; exit 0 ;;
+        *) exit 0 ;;
+      esac
+    done
+    """)
+
+    File.chmod!(codex_binary, 0o755)
   end
 end

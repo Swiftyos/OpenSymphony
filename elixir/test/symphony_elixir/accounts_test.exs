@@ -220,6 +220,10 @@ defmodule SymphonyElixir.AccountsTest do
       settings
     )
 
+    Accounts.record_usage(account, %{input_tokens: 2, output_tokens: 1, total_tokens: 3})
+
+    {:ok, refreshed_account} = Accounts.get("codex", "history", settings)
+
     csv = File.read!(Path.join(account.account_dir, "usage_periods.csv"))
 
     assert csv =~ "logged_at,backend,account_id,account_email,limit_id,bucket,period"
@@ -227,6 +231,83 @@ defmodule SymphonyElixir.AccountsTest do
     assert csv =~ "#{first_session_reset},#{second_session_reset},100,25,75,75.00,,10,5,15"
     assert csv =~ ",codex,history,history@example.com,gpt-5,weekly,weekly,"
     assert csv =~ "#{first_weekly_reset},#{second_weekly_reset},1000,500,500,50.00,50.00,10,5,15"
+
+    assert refreshed_account.rate_limit_periods["session"] == %{
+             "bucket" => "session",
+             "period" => "session",
+             "limit_id" => "gpt-5",
+             "started_at" => refreshed_account.rate_limit_periods["session"]["started_at"],
+             "reset_at" => second_session_reset,
+             "last_seen_at" => refreshed_account.rate_limit_periods["session"]["last_seen_at"],
+             "limit" => 100,
+             "remaining" => 100,
+             "input_tokens" => 2,
+             "output_tokens" => 1,
+             "total_tokens" => 3
+           }
+
+    assert refreshed_account.rate_limit_periods["weekly"] == %{
+             "bucket" => "weekly",
+             "period" => "weekly",
+             "limit_id" => "gpt-5",
+             "started_at" => refreshed_account.rate_limit_periods["weekly"]["started_at"],
+             "reset_at" => second_weekly_reset,
+             "last_seen_at" => refreshed_account.rate_limit_periods["weekly"]["last_seen_at"],
+             "limit" => 1_000,
+             "remaining" => 1_000,
+             "input_tokens" => 2,
+             "output_tokens" => 1,
+             "total_tokens" => 3
+           }
+  end
+
+  test "primary and secondary rate-limit buckets rotate session and weekly periods from unix reset timestamps" do
+    store_root = temp_accounts_root!("usage-periods-unix")
+    settings = accounts_settings!(store_root)
+    first_session_reset_unix = DateTime.utc_now() |> DateTime.add(5 * 60 * 60, :second) |> DateTime.to_unix()
+    second_session_reset_unix = DateTime.utc_now() |> DateTime.add(10 * 60 * 60, :second) |> DateTime.to_unix()
+    first_weekly_reset_unix = DateTime.utc_now() |> DateTime.add(7 * 24 * 60 * 60, :second) |> DateTime.to_unix()
+    second_weekly_reset_unix = DateTime.utc_now() |> DateTime.add(14 * 24 * 60 * 60, :second) |> DateTime.to_unix()
+    first_session_reset = DateTime.from_unix!(first_session_reset_unix) |> DateTime.to_iso8601()
+    second_session_reset = DateTime.from_unix!(second_session_reset_unix) |> DateTime.to_iso8601()
+    first_weekly_reset = DateTime.from_unix!(first_weekly_reset_unix) |> DateTime.to_iso8601()
+    second_weekly_reset = DateTime.from_unix!(second_weekly_reset_unix) |> DateTime.to_iso8601()
+
+    {:ok, account} =
+      Accounts.create_or_update("codex", "history-unix", [email: "history-unix@example.com"], settings)
+
+    Accounts.record_rate_limits(
+      account,
+      %{
+        "limitId" => "codex_bengalfox",
+        "primary" => %{"limit" => 100, "remaining" => 25, "resetsAt" => first_session_reset_unix},
+        "secondary" => %{"limit" => 1_000, "remaining" => 500, "resetsAt" => first_weekly_reset_unix}
+      },
+      settings
+    )
+
+    Accounts.record_usage(account, %{input_tokens: 10, output_tokens: 5, total_tokens: 15})
+
+    Accounts.record_rate_limits(
+      account,
+      %{
+        "limitId" => "codex_bengalfox",
+        "primary" => %{"limit" => 100, "remaining" => 100, "resetsAt" => second_session_reset_unix},
+        "secondary" => %{"limit" => 1_000, "remaining" => 1_000, "resetsAt" => second_weekly_reset_unix}
+      },
+      settings
+    )
+
+    {:ok, refreshed_account} = Accounts.get("codex", "history-unix", settings)
+    csv = File.read!(Path.join(account.account_dir, "usage_periods.csv"))
+
+    assert csv =~ ",codex,history-unix,history-unix@example.com,codex_bengalfox,session,session,"
+    assert csv =~ "#{first_session_reset},#{second_session_reset},100,25,75,75.00,,10,5,15"
+    assert csv =~ ",codex,history-unix,history-unix@example.com,codex_bengalfox,weekly,weekly,"
+    assert csv =~ "#{first_weekly_reset},#{second_weekly_reset},1000,500,500,50.00,50.00,10,5,15"
+
+    assert refreshed_account.rate_limit_periods["session"]["reset_at"] == second_session_reset
+    assert refreshed_account.rate_limit_periods["weekly"]["reset_at"] == second_weekly_reset
   end
 
   defp accounts_settings!(store_root, overrides \\ []) do
