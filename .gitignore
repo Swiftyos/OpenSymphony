@@ -1,0 +1,6 @@
+.DS_Store
+/.workspace/
+/observability/.data/
+symphony-*.yml
+/local/*
+
