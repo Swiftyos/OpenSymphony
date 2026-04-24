@@ -741,6 +741,7 @@ defmodule SymphonyElixir.CodexAppServerTest do
       assert trace =~ ~s(-c otel.exporter={ otlp-grpc = { endpoint = "http://localhost:11338" } })
       assert trace =~ ~s(-c otel.trace_exporter={ otlp-grpc = { endpoint = "http://localhost:11338" } })
       assert trace =~ ~s(-c otel.metrics_exporter={ otlp-grpc = { endpoint = "http://localhost:11338" } })
+      assert trace =~ ~s(-c analytics_enabled=true)
       assert trace =~ ~s(-c otel.log_user_prompt=false)
       assert trace =~ ~s(-c otel.log_tool_details=false)
       assert trace =~ "ENV:OTEL_RESOURCE_ATTRIBUTES="

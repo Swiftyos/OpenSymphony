@@ -214,7 +214,14 @@ defmodule SymphonyElixir.Codex.AppServer do
         ]
 
         if Config.settings!().telemetry.include_metrics do
-          base_overrides ++ ["-c " <> shell_escape("otel.metrics_exporter=#{exporter}")]
+          base_overrides ++
+            [
+              "-c " <> shell_escape("otel.metrics_exporter=#{exporter}"),
+              # Codex app-server gates metrics emission on `analytics_enabled` — without
+              # this the `otel.metrics_exporter` override above is a no-op and no OTLP
+              # metrics leave the process. Logs and traces have no such gate.
+              "-c " <> shell_escape("analytics_enabled=true")
+            ]
         else
           base_overrides
         end
