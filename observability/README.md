@@ -41,10 +41,17 @@ The dashboard includes:
 
 ## Symphony `/metrics`
 
-vmagent scrapes Symphony from `host.docker.internal:4001`, so the local contract is:
+vmagent supports scraping multiple Symphony instances running on the host. By default it scrapes
+`host.docker.internal:4000` and `host.docker.internal:4001`, each tagged with its own
+`instance_name` label so metrics from different instances can be distinguished in Grafana.
 
-- run Symphony with `--port 4001`, or
-- set `server.port: 4001` in `symphony.yml`
+To add or rename instances, edit the `symphony` job in `vmagent/prometheus.yml` and restart the
+vmagent container so the new bind-mounted config is picked up.
+
+The local contract for each instance:
+
+- run it on a unique port (e.g. `4000`, `4001`, …), either via `--port <port>` or
+  `server.port: <port>` in that instance's `symphony.yml`
 - when scraping from the Docker-based local observability stack, set `server.host: 0.0.0.0`
   so `vmagent` can reach the endpoint through `host.docker.internal`
 
@@ -54,6 +61,6 @@ When the server is enabled, Symphony exposes:
 - JSON state endpoints under `/api/v1/*`
 - Prometheus exposition text at `/metrics`
 
-If Symphony is not listening on `0.0.0.0:4001`, the limit and billing-cycle panels in
-`Account Usage` stay empty even though provider token panels may still populate from direct OTEL
-traffic.
+If no Symphony instance is listening on a scraped port (by default `0.0.0.0:4000` or
+`0.0.0.0:4001`), the limit and billing-cycle panels in `Account Usage` stay empty even though
+provider token panels may still populate from direct OTEL traffic.

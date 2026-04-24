@@ -318,10 +318,13 @@ Each account directory also gets `usage_periods.csv` when Codex or Claude report
 `weekly` rate-limit reset. Rows include the reset transition, usage percentage, weekly percentage
 where applicable, and local token totals accumulated during that provider period.
 
-To feed the local Grafana `Account Usage` dashboard, run Symphony with `--port 4001` or set
-`server.port: 4001`. When the observability stack runs in Docker, also set `server.host: 0.0.0.0`
-so `vmagent` can scrape `host.docker.internal:4001/metrics`. Otherwise the quota and
-billing-cycle panels stay empty even though the endpoint works from your local browser.
+To feed the local Grafana `Account Usage` dashboard, run Symphony with `--port 4000` or
+`--port 4001` (or set `server.port` to one of the ports scraped by vmagent). The observability
+stack scrapes both ports by default so multiple Symphony instances on the same host can export
+metrics side-by-side, each tagged with its own `instance_name` label. When the observability
+stack runs in Docker, also set `server.host: 0.0.0.0` so `vmagent` can reach
+`host.docker.internal:<port>/metrics`. Otherwise the quota and billing-cycle panels stay empty
+even though the endpoint works from your local browser.
 
 ### Codex
 
