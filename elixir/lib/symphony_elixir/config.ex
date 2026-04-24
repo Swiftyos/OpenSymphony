@@ -238,6 +238,41 @@ defmodule SymphonyElixir.Config do
     settings!().instance.name
   end
 
+  @spec log_dir() :: Path.t() | nil
+  def log_dir do
+    case settings() do
+      {:ok, %{log: %{dir: dir}}} when is_binary(dir) and dir != "" -> dir
+      _ -> nil
+    end
+  end
+
+  @spec log_file_name() :: String.t()
+  def log_file_name do
+    case settings() do
+      {:ok, %{log: %{file_name: file_name}}} when is_binary(file_name) and file_name != "" ->
+        file_name
+
+      _ ->
+        "symphony.log"
+    end
+  end
+
+  @spec log_max_bytes() :: pos_integer() | nil
+  def log_max_bytes do
+    case settings() do
+      {:ok, %{log: %{max_bytes: bytes}}} when is_integer(bytes) and bytes > 0 -> bytes
+      _ -> nil
+    end
+  end
+
+  @spec log_max_files() :: pos_integer() | nil
+  def log_max_files do
+    case settings() do
+      {:ok, %{log: %{max_files: files}}} when is_integer(files) and files > 0 -> files
+      _ -> nil
+    end
+  end
+
   @spec telemetry_enabled?() :: boolean()
   def telemetry_enabled? do
     settings!().telemetry.enabled

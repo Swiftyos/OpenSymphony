@@ -632,6 +632,32 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule Log do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    alias SymphonyElixir.Config.Schema
+
+    @primary_key false
+    embedded_schema do
+      field(:dir, :string)
+      field(:file_name, :string, default: "symphony.log")
+      field(:max_bytes, :integer)
+      field(:max_files, :integer)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:dir, :file_name, :max_bytes, :max_files], empty_values: [])
+      |> update_change(:dir, &Schema.normalize_optional_string/1)
+      |> update_change(:file_name, &Schema.normalize_optional_string/1)
+      |> validate_number(:max_bytes, greater_than: 0)
+      |> validate_number(:max_files, greater_than: 0)
+    end
+  end
+
   embedded_schema do
     embeds_one(:tracker, Tracker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:polling, Polling, on_replace: :update, defaults_to_struct: true)
@@ -648,6 +674,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:telemetry, Telemetry, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
     embeds_one(:instance, Instance, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:log, Log, on_replace: :update, defaults_to_struct: true)
   end
 
   @spec parse(map(), keyword()) :: {:ok, %__MODULE__{}} | {:error, {:invalid_workflow_config, String.t()}}
@@ -774,6 +801,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:telemetry, with: &Telemetry.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
     |> cast_embed(:instance, with: &Instance.changeset/2)
+    |> cast_embed(:log, with: &Log.changeset/2)
   end
 
   defp finalize_settings(settings, raw_config, opts) do
@@ -838,6 +866,12 @@ defmodule SymphonyElixir.Config.Schema do
       | resource_attributes: normalize_resource_attributes(settings.telemetry.resource_attributes)
     }
 
+    log = %{
+      settings.log
+      | dir: resolve_optional_path_value(settings.log.dir, nil, base_dir),
+        file_name: normalize_optional_string(settings.log.file_name) || "symphony.log"
+    }
+
     %{
       settings
       | tracker: tracker,
@@ -848,7 +882,8 @@ defmodule SymphonyElixir.Config.Schema do
         codex: codex,
         opencode: opencode,
         claude: claude,
-        telemetry: telemetry
+        telemetry: telemetry,
+        log: log
     }
   end
 

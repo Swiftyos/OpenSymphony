@@ -7,6 +7,7 @@ defmodule SymphonyElixir.LogFile do
 
   @handler_id :symphony_disk_log
   @default_log_relative_path "log/symphony.log"
+  @default_file_name "symphony.log"
   @default_max_bytes 10 * 1024 * 1024
   @default_max_files 5
 
@@ -18,6 +19,12 @@ defmodule SymphonyElixir.LogFile do
   @spec default_log_file(Path.t()) :: Path.t()
   def default_log_file(logs_root) when is_binary(logs_root) do
     Path.join(logs_root, @default_log_relative_path)
+  end
+
+  @spec log_file_in_dir(Path.t(), String.t()) :: Path.t()
+  def log_file_in_dir(dir, file_name \\ @default_file_name)
+      when is_binary(dir) and is_binary(file_name) do
+    Path.join(dir, file_name)
   end
 
   @spec configure() :: :ok

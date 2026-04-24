@@ -15,6 +15,7 @@ defmodule SymphonyElixir.CLI do
           set_symphony_config_file_path: (String.t() -> :ok | {:error, term()}),
           validate_config: (-> :ok | {:error, term()}),
           set_logs_root: (String.t() -> :ok | {:error, term()}),
+          apply_log_settings_from_config: (-> :ok | {:error, term()}),
           set_server_port_override: (non_neg_integer() | nil -> :ok | {:error, term()}),
           ensure_all_started: (-> ensure_started_result()),
           accounts_login: (String.t(), String.t(), keyword() -> {:ok, map()} | {:error, term()}),
@@ -58,16 +59,14 @@ defmodule SymphonyElixir.CLI do
     case OptionParser.parse(args, strict: @switches) do
       {opts, [], []} ->
         with :ok <- require_guardrails_acknowledgement(opts),
-             :ok <- maybe_set_logs_root(opts, deps),
              :ok <- maybe_set_server_port(opts, deps) do
-          run(Path.expand("symphony.yml"), deps)
+          run(Path.expand("symphony.yml"), opts, deps)
         end
 
       {opts, [config_path], []} ->
         with :ok <- require_guardrails_acknowledgement(opts),
-             :ok <- maybe_set_logs_root(opts, deps),
              :ok <- maybe_set_server_port(opts, deps) do
-          run(config_path, deps)
+          run(config_path, opts, deps)
         end
 
       _ ->
@@ -75,8 +74,8 @@ defmodule SymphonyElixir.CLI do
     end
   end
 
-  @spec run(String.t(), deps()) :: :ok | {:error, String.t()}
-  def run(config_path, deps) do
+  @spec run(String.t(), keyword(), deps()) :: :ok | {:error, String.t()}
+  def run(config_path, opts, deps) do
     expanded_path = Path.expand(config_path)
     mode = startup_mode_for_path(expanded_path)
 
@@ -89,7 +88,8 @@ defmodule SymphonyElixir.CLI do
           :ok = deps.set_symphony_config_file_path.(expanded_path)
       end
 
-      with :ok <- validate_config(expanded_path, deps) do
+      with :ok <- maybe_set_logs_root(opts, deps),
+           :ok <- validate_config(expanded_path, deps) do
         case deps.ensure_all_started.() do
           {:ok, _started_apps} ->
             :ok
@@ -129,6 +129,7 @@ defmodule SymphonyElixir.CLI do
       set_symphony_config_file_path: &SymphonyElixir.SymphonyConfig.set_config_file_path/1,
       validate_config: &SymphonyElixir.Config.validate!/0,
       set_logs_root: &set_logs_root/1,
+      apply_log_settings_from_config: &apply_log_settings_from_config/0,
       set_server_port_override: &set_server_port_override/1,
       ensure_all_started: fn -> Application.ensure_all_started(:symphony_elixir) end,
       accounts_login: &Accounts.login/3,
@@ -461,7 +462,7 @@ defmodule SymphonyElixir.CLI do
   defp maybe_set_logs_root(opts, deps) do
     case Keyword.get_values(opts, :logs_root) do
       [] ->
-        :ok
+        deps.apply_log_settings_from_config.()
 
       values ->
         logs_root = values |> List.last() |> String.trim()
@@ -519,6 +520,31 @@ defmodule SymphonyElixir.CLI do
     Application.put_env(:symphony_elixir, :log_file, LogFile.default_log_file(logs_root))
     :ok
   end
+
+  defp apply_log_settings_from_config do
+    case SymphonyElixir.Config.settings() do
+      {:ok, %{log: log}} ->
+        apply_log_config(log)
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp apply_log_config(%{dir: dir} = log) when is_binary(dir) and dir != "" do
+    file_name = log.file_name || "symphony.log"
+    expanded_dir = Path.expand(dir)
+    Application.put_env(:symphony_elixir, :log_file, LogFile.log_file_in_dir(expanded_dir, file_name))
+    maybe_put_log_env(:log_file_max_bytes, Map.get(log, :max_bytes))
+    maybe_put_log_env(:log_file_max_files, Map.get(log, :max_files))
+    :ok
+  end
+
+  defp apply_log_config(_log), do: :ok
+
+  defp maybe_put_log_env(_key, nil), do: :ok
+  defp maybe_put_log_env(_key, value) when not is_integer(value) or value <= 0, do: :ok
+  defp maybe_put_log_env(key, value), do: Application.put_env(:symphony_elixir, key, value)
 
   defp maybe_set_server_port(opts, deps) do
     case Keyword.get_values(opts, :port) do

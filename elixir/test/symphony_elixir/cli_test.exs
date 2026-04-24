@@ -29,6 +29,10 @@ defmodule SymphonyElixir.CLITest do
         send(parent, :logs_root_set)
         :ok
       end,
+      apply_log_settings_from_config: fn ->
+        send(parent, :log_settings_applied)
+        :ok
+      end,
       set_server_port_override: fn _port ->
         send(parent, :port_set)
         :ok
@@ -74,6 +78,7 @@ defmodule SymphonyElixir.CLITest do
         :ok
       end,
       set_logs_root: fn _path -> :ok end,
+      apply_log_settings_from_config: fn -> :ok end,
       set_server_port_override: fn _port -> :ok end,
       ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
     }
@@ -109,6 +114,7 @@ defmodule SymphonyElixir.CLITest do
         :ok
       end,
       set_logs_root: fn _path -> :ok end,
+      apply_log_settings_from_config: fn -> :ok end,
       set_server_port_override: fn _port -> :ok end,
       ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
     }
@@ -143,6 +149,7 @@ defmodule SymphonyElixir.CLITest do
         :ok
       end,
       set_logs_root: fn _path -> :ok end,
+      apply_log_settings_from_config: fn -> :ok end,
       set_server_port_override: fn _port -> :ok end,
       ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
     }
@@ -166,6 +173,10 @@ defmodule SymphonyElixir.CLITest do
         send(parent, {:logs_root, path})
         :ok
       end,
+      apply_log_settings_from_config: fn ->
+        send(parent, :log_settings_applied)
+        :ok
+      end,
       set_server_port_override: fn _port -> :ok end,
       ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
     }
@@ -173,6 +184,32 @@ defmodule SymphonyElixir.CLITest do
     assert :ok = CLI.evaluate([@ack_flag, "--logs-root", "tmp/custom-logs", "WORKFLOW.md"], deps)
     assert_received {:logs_root, expanded_path}
     assert expanded_path == Path.expand("tmp/custom-logs")
+    refute_received :log_settings_applied
+  end
+
+  test "applies log settings from config when --logs-root is not passed" do
+    parent = self()
+
+    deps = %{
+      file_regular?: fn _path -> true end,
+      set_workflow_file_path: fn _path -> :ok end,
+      set_symphony_config_file_path: fn _path -> :ok end,
+      validate_config: fn -> :ok end,
+      set_logs_root: fn path ->
+        send(parent, {:logs_root, path})
+        :ok
+      end,
+      apply_log_settings_from_config: fn ->
+        send(parent, :log_settings_applied)
+        :ok
+      end,
+      set_server_port_override: fn _port -> :ok end,
+      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
+    }
+
+    assert :ok = CLI.evaluate([@ack_flag, "symphony.yml"], deps)
+    assert_received :log_settings_applied
+    refute_received {:logs_root, _path}
   end
 
   test "returns not found when workflow file does not exist" do
@@ -182,6 +219,7 @@ defmodule SymphonyElixir.CLITest do
       set_symphony_config_file_path: fn _path -> :ok end,
       validate_config: fn -> :ok end,
       set_logs_root: fn _path -> :ok end,
+      apply_log_settings_from_config: fn -> :ok end,
       set_server_port_override: fn _port -> :ok end,
       ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
     }
@@ -197,6 +235,7 @@ defmodule SymphonyElixir.CLITest do
       set_symphony_config_file_path: fn _path -> :ok end,
       validate_config: fn -> :ok end,
       set_logs_root: fn _path -> :ok end,
+      apply_log_settings_from_config: fn -> :ok end,
       set_server_port_override: fn _port -> :ok end,
       ensure_all_started: fn -> {:error, :boom} end
     }
@@ -221,6 +260,7 @@ defmodule SymphonyElixir.CLITest do
         {:error, {:invalid_workflow_config, "projects \"project-a\" workflow invalid"}}
       end,
       set_logs_root: fn _path -> :ok end,
+      apply_log_settings_from_config: fn -> :ok end,
       set_server_port_override: fn _port -> :ok end,
       ensure_all_started: fn ->
         send(parent, :started)
@@ -243,6 +283,7 @@ defmodule SymphonyElixir.CLITest do
       set_symphony_config_file_path: fn _path -> :ok end,
       validate_config: fn -> {:error, :missing_linear_api_token} end,
       set_logs_root: fn _path -> :ok end,
+      apply_log_settings_from_config: fn -> :ok end,
       set_server_port_override: fn _port -> :ok end,
       ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
     }
@@ -260,6 +301,7 @@ defmodule SymphonyElixir.CLITest do
       set_symphony_config_file_path: fn _path -> :ok end,
       validate_config: fn -> :ok end,
       set_logs_root: fn _path -> :ok end,
+      apply_log_settings_from_config: fn -> :ok end,
       set_server_port_override: fn _port -> :ok end,
       ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
     }
