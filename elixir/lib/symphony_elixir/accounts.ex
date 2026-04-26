@@ -1286,8 +1286,8 @@ defmodule SymphonyElixir.Accounts do
       "started_at" => now,
       "reset_at" => reset_at,
       "last_seen_at" => now,
-      "limit" => integer_value(Map.get(bucket, "limit") || Map.get(bucket, :limit)),
-      "remaining" => integer_value(Map.get(bucket, "remaining") || Map.get(bucket, :remaining)),
+      "limit" => maybe_integer_value(Map.get(bucket, "limit") || Map.get(bucket, :limit)),
+      "remaining" => maybe_integer_value(Map.get(bucket, "remaining") || Map.get(bucket, :remaining)),
       "input_tokens" => 0,
       "output_tokens" => 0,
       "total_tokens" => 0
@@ -1298,8 +1298,8 @@ defmodule SymphonyElixir.Accounts do
     period
     |> Map.put("limit_id", limit_id || Map.get(period, "limit_id"))
     |> Map.put("last_seen_at", now)
-    |> Map.put("limit", integer_value(Map.get(bucket, "limit") || Map.get(bucket, :limit)))
-    |> Map.put("remaining", integer_value(Map.get(bucket, "remaining") || Map.get(bucket, :remaining)))
+    |> Map.put("limit", coalesce_bucket_value(bucket, "limit", Map.get(period, "limit")))
+    |> Map.put("remaining", coalesce_bucket_value(bucket, "remaining", Map.get(period, "remaining")))
   end
 
   defp usage_period_row(account, period, next_bucket, next_reset_at, now) do
@@ -1477,7 +1477,20 @@ defmodule SymphonyElixir.Accounts do
 
     credits = Map.get(rate_limits, "credits") || Map.get(rate_limits, :credits)
 
-    zero_remaining?(primary) or zero_remaining?(secondary) or depleted_credits?(credits)
+    zero_remaining?(primary) or
+      zero_remaining?(secondary) or
+      depleted_credits?(credits) or
+      exhausted_by_used_percent?(primary) or
+      exhausted_by_used_percent?(secondary)
+  end
+
+  defp exhausted_by_used_percent?(nil), do: false
+
+  defp exhausted_by_used_percent?(bucket) when is_map(bucket) do
+    case Map.get(bucket, "usedPercent") || Map.get(bucket, :usedPercent) do
+      nil -> false
+      percent -> integer_value(percent) >= 100
+    end
   end
 
   defp limited_rate_limits?(rate_limits) when is_map(rate_limits) do
@@ -1499,18 +1512,25 @@ defmodule SymphonyElixir.Accounts do
   defp zero_remaining?(nil), do: false
 
   defp zero_remaining?(bucket) when is_map(bucket) do
-    case integer_value(Map.get(bucket, "remaining") || Map.get(bucket, :remaining)) do
-      0 -> true
-      _ -> false
+    case Map.get(bucket, "remaining") || Map.get(bucket, :remaining) do
+      nil -> false
+      value -> integer_value(value) == 0
     end
   end
 
   defp low_remaining?(nil), do: false
 
   defp low_remaining?(bucket) when is_map(bucket) do
-    remaining = integer_value(Map.get(bucket, "remaining") || Map.get(bucket, :remaining))
-    limit = integer_value(Map.get(bucket, "limit") || Map.get(bucket, :limit))
-    limit > 0 and remaining > 0 and remaining / limit < 0.1
+    remaining_raw = Map.get(bucket, "remaining") || Map.get(bucket, :remaining)
+    limit_raw = Map.get(bucket, "limit") || Map.get(bucket, :limit)
+
+    if is_nil(remaining_raw) or is_nil(limit_raw) do
+      false
+    else
+      remaining = integer_value(remaining_raw)
+      limit = integer_value(limit_raw)
+      limit > 0 and remaining > 0 and remaining / limit < 0.1
+    end
   end
 
   defp depleted_credits?(nil), do: false
@@ -1717,6 +1737,16 @@ defmodule SymphonyElixir.Accounts do
   end
 
   defp integer_value(_value), do: 0
+
+  defp maybe_integer_value(nil), do: nil
+  defp maybe_integer_value(value), do: integer_value(value)
+
+  defp coalesce_bucket_value(bucket, key, fallback) do
+    case Map.get(bucket, key) || Map.get(bucket, String.to_atom(key)) do
+      nil -> fallback
+      value -> integer_value(value)
+    end
+  end
 
   defp positive_integer_value(value) do
     case integer_value(value) do
