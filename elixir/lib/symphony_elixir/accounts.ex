@@ -1007,11 +1007,10 @@ defmodule SymphonyElixir.Accounts do
   end
 
   defp script_shell_command(script_path, transcript_path, executable_path, args) do
-    # Kept on one line per platform branch so coverage doesn't depend on the OS running the tests.
-    command =
-      if darwin?(),
-        do: shell_join([script_path, "-q", transcript_path, executable_path | args]),
-        else: shell_join([script_path, "-q", "-c", shell_join([executable_path | args]), transcript_path])
+    # Both argument lists are built so coverage doesn't depend on the OS running the tests.
+    darwin_parts = [script_path, "-q", transcript_path, executable_path | args]
+    other_parts = [script_path, "-q", "-c", shell_join([executable_path | args]), transcript_path]
+    command = shell_join(if darwin?(), do: darwin_parts, else: other_parts)
 
     command <> " </dev/tty >/dev/tty 2>&1"
   end

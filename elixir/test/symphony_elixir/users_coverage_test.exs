@@ -51,6 +51,9 @@ defmodule SymphonyElixir.UsersCoverageTest do
   defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
   defp restore_app_env(key, value), do: Application.put_env(:symphony_elixir, key, value)
 
+  defp restore_fetched_env(key, {:ok, value}), do: Application.put_env(:symphony_elixir, key, value)
+  defp restore_fetched_env(key, :error), do: Application.delete_env(:symphony_elixir, key)
+
   defp register!(username, email, extra \\ %{}) do
     base = %{"username" => username, "email" => email, "password" => @password, "setup_code" => Users.setup_code()}
     params = Map.merge(base, extra)
@@ -196,13 +199,17 @@ defmodule SymphonyElixir.UsersCoverageTest do
     end
 
     test "the default path is ~/.symphony/users.json when not configured" do
-      saved = Application.get_env(:symphony_elixir, :users_path)
+      # config/test.exs sets users_path: nil; deleting the key instead would make the
+      # app's Users server fall back to the real ~/.symphony/users.json.
+      saved = Application.fetch_env(:symphony_elixir, :users_path)
+      path = Path.join(tmp_dir!(), "users.json")
       Application.put_env(:symphony_elixir, :users_path, :default)
-      on_exit(fn -> restore_app_env(:users_path, saved) end)
 
       # The explicit path wins, but the default is still computed eagerly.
-      path = Path.join(tmp_dir!(), "users.json")
       pid = isolated_users!(path: path)
+      # Registered after isolated_users!/1 so it runs first: the app's Users server
+      # must restart with the test config, never with the real ~/.symphony path.
+      on_exit(fn -> restore_fetched_env(:users_path, saved) end)
       assert :sys.get_state(pid).path == path
     end
   end
