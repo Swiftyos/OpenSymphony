@@ -60,20 +60,11 @@ defmodule SymphonyElixirWeb.FactoryPresenter do
   end
 
   @doc """
-  Whether the dashboard may change the factory. Explicit `server.controls` wins;
-  otherwise only a loopback-bound server exposes controls (the page has no auth).
+  `server.controls: false` makes the dashboard read-only for everyone. Otherwise
+  each action is allowed per signed-in user (see `SymphonyElixir.Auth`).
   """
   @spec controls_enabled?(map()) :: boolean()
-  def controls_enabled?(settings) do
-    case settings.server.controls do
-      value when is_boolean(value) -> value
-      _ -> loopback?(settings.server.host)
-    end
-  end
-
-  defp loopback?(host) when host in ["127.0.0.1", "::1", "localhost"], do: true
-  defp loopback?("127." <> _rest), do: true
-  defp loopback?(_host), do: false
+  def controls_enabled?(settings), do: settings.server.controls != false
 
   defp price_row(row, pricing) do
     rates = Map.get(pricing, "#{row.backend}/#{row.model}") || Map.get(pricing, row.backend)

@@ -32,6 +32,9 @@ instance:
 
 server:
   port: 4000
+  # host: 0.0.0.0        # any non-loopback host turns on Linear API key sign-in
+  # auth: linear         # or force: local | linear
+  # controls: false      # read-only dashboard for everyone
 
 agent:
   backend: codex

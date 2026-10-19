@@ -504,9 +504,37 @@ stage label). In review, that means **Approve & merge** or **Send to rework**:
 Stage settings persist in `~/.symphony/factory_controls.json`. Changes apply instantly in the
 UI and roll back with a message if the server rejects them.
 
-The dashboard has no login, so controls are enabled by default only when the server binds to
-a loopback address. Set `server.controls: true` to allow them on other interfaces (put the
-dashboard behind your own auth first), or `false` to make the page read-only.
+Who can do what comes from Linear (see below). `server.controls: false` makes the page
+read-only for everyone.
+
+### Sign-in and permissions
+
+There are no Symphony accounts to manage. People sign in with their own **Linear personal
+API key**, and Symphony asks Linear who they are, which teams they're in, and whether they're
+an admin:
+
+![Sign in](../.github/media/dashboard-sign-in.png)
+
+| Who (in Linear)               | Can                                                            |
+| ----------------------------- | -------------------------------------------------------------- |
+| Workspace admin               | Everything, including stage controls for the whole factory     |
+| Team member                   | Move that team's issues (approve, rework, block, …)            |
+| Guest                         | View only                                                      |
+| Anyone outside the workspace  | Can't sign in (must match the organization of `tracker.api_key`) |
+
+- Changes are made **as the signed-in person** using their key, so Linear's history shows who
+  approved or blocked what.
+- The key is stored only in an encrypted, HTTP-only session cookie (30 days). Profiles and
+  team memberships are re-read from Linear every 10 minutes.
+- Session cookies are signed with `server.secret_key_base` (or `SYMPHONY_SECRET_KEY_BASE`). If
+  neither is set, Symphony generates one at `~/.symphony/secret_key_base`, so sessions survive
+  restarts.
+- The JSON API and `/metrics` accept a session or `Authorization: Bearer <Linear API key>`,
+  so a Prometheus scraper can use a key from a service account.
+
+Sign-in mode follows where the server listens. On a loopback address (the default
+`127.0.0.1`) there is no sign-in: you are the local operator. On any other address, Linear
+sign-in is required. Override this with `server.auth: local | linear`.
 
 ### Cost
 

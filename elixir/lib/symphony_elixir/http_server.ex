@@ -31,7 +31,9 @@ defmodule SymphonyElixir.HttpServer do
             url: [host: normalize_host(host)],
             orchestrator: orchestrator,
             snapshot_timeout_ms: snapshot_timeout_ms,
-            secret_key_base: secret_key_base()
+            secret_key_base: secret_key_base(),
+            # With sign-in on, refuse LiveView sockets opened from other sites.
+            check_origin: if(SymphonyElixir.Auth.mode() == :linear, do: :conn, else: false)
           ]
 
           endpoint_config =
@@ -82,7 +84,44 @@ defmodule SymphonyElixir.HttpServer do
   defp normalize_host(host) when is_binary(host), do: host
   defp normalize_host(host), do: to_string(host)
 
+  # Sessions carry the signed-in user's Linear key in an encrypted cookie, so the
+  # secret must be stable across restarts or everyone is signed out on deploy.
   defp secret_key_base do
+    configured = Config.settings!().server.secret_key_base || System.get_env("SYMPHONY_SECRET_KEY_BASE")
+
+    cond do
+      is_binary(configured) and byte_size(configured) >= 64 -> configured
+      path = secret_key_base_path() -> persisted_secret_key_base(path)
+      true -> generate_secret_key_base()
+    end
+  end
+
+  defp secret_key_base_path do
+    case Application.get_env(:symphony_elixir, :secret_key_base_path, :default) do
+      :default -> Path.expand("~/.symphony/secret_key_base")
+      path -> path
+    end
+  end
+
+  defp persisted_secret_key_base(path) do
+    case File.read(path) do
+      {:ok, secret} when byte_size(secret) >= 64 ->
+        String.trim(secret)
+
+      _ ->
+        secret = generate_secret_key_base()
+
+        with :ok <- File.mkdir_p(Path.dirname(path)),
+             :ok <- File.write(path, secret),
+             :ok <- File.chmod(path, 0o600) do
+          secret
+        else
+          _error -> secret
+        end
+    end
+  end
+
+  defp generate_secret_key_base do
     Base.encode64(:crypto.strong_rand_bytes(@secret_key_bytes), padding: false)
   end
 end

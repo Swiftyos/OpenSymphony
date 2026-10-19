@@ -635,15 +635,22 @@ defmodule SymphonyElixir.Config.Schema do
     embedded_schema do
       field(:port, :integer)
       field(:host, :string, default: "127.0.0.1")
-      # Dashboard controls that change the factory (stage settings, issue moves).
-      # nil = enabled only when bound to a loopback host, since the dashboard has no auth.
+      # false makes the dashboard read-only for everyone (kill switch).
       field(:controls, :boolean)
+      # Dashboard sign-in: "local" (no sign-in) or "linear" (Linear API key).
+      # nil = local on loopback hosts, linear everywhere else.
+      field(:auth, :string)
+      # Signs and encrypts session cookies. nil = generated once and kept in
+      # ~/.symphony/secret_key_base so sessions survive restarts.
+      field(:secret_key_base, :string)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:port, :host, :controls], empty_values: [])
+      |> cast(attrs, [:port, :host, :controls, :auth, :secret_key_base], empty_values: [])
+      |> validate_inclusion(:auth, ["local", "linear"])
+      |> validate_length(:secret_key_base, min: 64)
       |> validate_number(:port, greater_than_or_equal_to: 0)
     end
   end

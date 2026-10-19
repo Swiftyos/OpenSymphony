@@ -113,9 +113,10 @@ defmodule SymphonyElixir.Linear.Adapter do
     end
   end
 
-  @spec set_stage(String.t(), String.t(), String.t() | nil) :: :ok | {:error, term()}
-  def set_stage(issue_id, state_name, stage) when is_binary(issue_id) and is_binary(state_name) do
+  @spec set_stage(String.t(), String.t(), String.t() | nil, keyword()) :: :ok | {:error, term()}
+  def set_stage(issue_id, state_name, stage, opts \\ []) when is_binary(issue_id) and is_binary(state_name) do
     prefix = SymphonyElixir.IssueStage.label_prefix()
+    graphql_opts = Keyword.take(opts, [:api_key])
 
     variables = %{
       issueId: issue_id,
@@ -125,11 +126,11 @@ defmodule SymphonyElixir.Linear.Adapter do
       prefix: prefix
     }
 
-    with {:ok, response} <- client_module().graphql(@stage_lookup_query, variables),
+    with {:ok, response} <- client_module().graphql(@stage_lookup_query, variables, graphql_opts),
          {:ok, state_id} <- stage_state_id(response),
          {:ok, label_ids} <- stage_label_ids(response, prefix, stage),
          {:ok, update} <-
-           client_module().graphql(@set_stage_mutation, %{issueId: issue_id, stateId: state_id, labelIds: label_ids}),
+           client_module().graphql(@set_stage_mutation, %{issueId: issue_id, stateId: state_id, labelIds: label_ids}, graphql_opts),
          true <- get_in(update, ["data", "issueUpdate", "success"]) == true do
       :ok
     else

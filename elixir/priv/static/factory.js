@@ -734,7 +734,7 @@
       drawer.appendChild(form);
     }
 
-    if (!enabled) drawer.appendChild(el("p", "fx-drawer-note", "Read-only. Set server.controls: true to change the factory from here."));
+    if (!enabled && AGENT_STAGES[id]) drawer.appendChild(el("p", "fx-drawer-note", "Only Linear admins can change stage controls."));
 
     var listHead = el("div", "fx-drawer-subhead");
     listHead.appendChild(el("span", null, node.count + (node.count === 1 ? " issue" : " issues")));
@@ -750,6 +750,12 @@
 
     var list = el("div", "fx-drawer-list");
     var actions = STAGE_ACTIONS[id] || [];
+    var movable = this.data.movable_teams;
+    var canMove = function (issue) {
+      if (movable === "all") return true;
+      var team = (issue.issue || "").split("-")[0];
+      return Array.isArray(movable) && movable.indexOf(team) !== -1;
+    };
     node.issues.forEach(function (issue) {
       var row = el("div", "fx-issue-row");
       var info = el("div", "fx-issue-info");
@@ -766,7 +772,7 @@
       row.appendChild(info);
 
       var pending = self.state.pending[issue.issue];
-      if (actions.length && enabled && issue.id) {
+      if (actions.length && issue.id && canMove(issue)) {
         var buttons = el("div", "fx-issue-actions");
         if (pending) {
           buttons.appendChild(el("span", "fx-pending", pending + "…"));

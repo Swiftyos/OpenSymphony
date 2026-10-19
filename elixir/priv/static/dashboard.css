@@ -1469,6 +1469,149 @@ pre {
   overflow: auto;
 }
 
+/* ------------------------------------------------------------------ user + sign-in */
+
+.user-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 4px 2px 2px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+
+.user-avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.user-avatar-initial {
+  display: inline-grid;
+  place-items: center;
+  background: var(--raised-2);
+  color: var(--ink);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.user-name {
+  max-width: 160px;
+  overflow: hidden;
+  color: var(--ink);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.user-signout {
+  padding: 2px 8px;
+  border-radius: 999px;
+  color: var(--muted);
+}
+
+.user-signout:hover {
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.login-shell {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 24px 16px;
+}
+
+.login-card {
+  display: grid;
+  gap: 10px;
+  width: min(420px, 100%);
+  padding: 28px;
+  border: 1px solid var(--line-strong);
+  border-radius: 18px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.01)), var(--surface);
+  box-shadow: 0 30px 80px -30px rgba(0, 0, 0, 0.8);
+}
+
+.login-mark {
+  width: 40px;
+  height: 40px;
+}
+
+.login-title {
+  margin: 6px 0 0;
+  font-size: 1.35rem;
+  font-weight: 650;
+}
+
+.login-copy,
+.login-help {
+  margin: 0;
+  color: var(--ink-2);
+  font-size: 0.86rem;
+}
+
+.login-help {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.login-help a {
+  color: var(--ink-2);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.login-label {
+  margin-top: 8px;
+  color: var(--ink-2);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.login-input {
+  padding: 10px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.3);
+  color: var(--ink);
+  font: inherit;
+  font-family: var(--mono);
+}
+
+.login-input:focus {
+  outline: none;
+  border-color: var(--ink-2);
+}
+
+.login-error {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(208, 59, 59, 0.55);
+  border-radius: 9px;
+  color: var(--critical-ink);
+  font-size: 0.82rem;
+}
+
+.login-error::before {
+  content: "! ";
+  font-weight: 700;
+}
+
+.login-button {
+  padding: 10px 14px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--ink);
+  color: var(--page);
+  font-weight: 650;
+}
+
+.login-button:hover {
+  background: #ffffff;
+}
+
 /* ------------------------------------------------------------------ motion & a11y */
 
 @keyframes fx-dash {

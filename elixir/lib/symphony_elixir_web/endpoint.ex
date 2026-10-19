@@ -5,11 +5,20 @@ defmodule SymphonyElixirWeb.Endpoint do
 
   use Phoenix.Endpoint, otp_app: :symphony_elixir
 
+  # Encrypted (not just signed): the session holds the user's Linear API key.
   @session_options [
     store: :cookie,
     key: "_symphony_elixir_key",
-    signing_salt: "symphony-session"
+    signing_salt: "symphony-session",
+    encryption_salt: "symphony-session-encryption",
+    same_site: "Lax",
+    http_only: true,
+    max_age: 60 * 60 * 24 * 30
   ]
+
+  @doc false
+  @spec session_options() :: keyword()
+  def session_options, do: @session_options
 
   socket("/live", Phoenix.LiveView.Socket,
     websocket: [connect_info: [session: @session_options]],

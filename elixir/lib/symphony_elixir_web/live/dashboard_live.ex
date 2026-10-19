@@ -10,7 +10,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
-  alias SymphonyElixir.{Config, FactoryControls, IssueStage, Orchestrator, Tracker, UsageLedger}
+  alias SymphonyElixir.{Auth, Config, FactoryControls, IssueStage, Orchestrator, Tracker, UsageLedger}
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixirWeb.{Endpoint, FactoryPresenter, ObservabilityPubSub, Presenter}
   @runtime_tick_ms 1_000
@@ -57,7 +57,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   @impl true
   def handle_event("factory_control", %{"stage" => stage, "field" => field} = params, socket) do
     reply =
-      with :ok <- ensure_controls_enabled(),
+      with :ok <- authorize(socket, Auth.can_control?(socket.assigns.current_user), :not_admin),
            {:ok, controls} <- FactoryControls.put(stage, field, Map.get(params, "value")) do
         ObservabilityPubSub.broadcast_update()
         %{ok: true, controls: controls}
@@ -71,9 +71,9 @@ defmodule SymphonyElixirWeb.DashboardLive do
   def handle_event("factory_move", %{"id" => id, "issue" => identifier, "action" => action} = params, socket)
       when is_binary(id) and is_binary(identifier) do
     reply =
-      with :ok <- ensure_controls_enabled(),
+      with :ok <- authorize(socket, Auth.can_move?(socket.assigns.current_user, identifier), :not_team_member),
            {:ok, {state_name, stage}} <- Map.fetch(@moves, action) |> move_or_error(action),
-           :ok <- Tracker.set_stage(id, state_name, stage) do
+           :ok <- Tracker.set_stage(id, state_name, stage, api_key: socket.assigns[:linear_api_key]) do
         UsageLedger.observe_issue(%Issue{
           id: id,
           identifier: identifier,
@@ -94,14 +94,32 @@ defmodule SymphonyElixirWeb.DashboardLive do
     {:reply, reply, socket}
   end
 
-  defp ensure_controls_enabled do
-    if FactoryPresenter.controls_enabled?(Config.settings!()), do: :ok, else: {:error, :controls_disabled}
+  # Server enforces every permission; the client only hides what the user can't use.
+  defp authorize(_socket, allowed?, denied_reason) do
+    cond do
+      not FactoryPresenter.controls_enabled?(Config.settings!()) -> {:error, :controls_disabled}
+      allowed? -> :ok
+      true -> {:error, denied_reason}
+    end
+  end
+
+  # Per-user view of the factory payload: what this person may change.
+  defp factory_json(factory, user) do
+    enabled? = FactoryPresenter.controls_enabled?(Config.settings!())
+
+    factory
+    |> Map.put(:controls_enabled, enabled? and Auth.can_control?(user))
+    |> Map.put(:movable_teams, if(enabled?, do: Auth.movable_teams(user), else: []))
+    |> Jason.encode!()
   end
 
   defp move_or_error({:ok, move}, _action), do: {:ok, move}
   defp move_or_error(:error, action), do: {:error, {:unknown_action, action}}
 
-  defp describe_error(:controls_disabled), do: "Controls are disabled. Set server.controls: true to allow changes."
+  defp describe_error(:controls_disabled), do: "This dashboard is read-only (server.controls: false)."
+  defp describe_error(:not_admin), do: "Only Linear admins can change stage controls."
+  defp describe_error(:not_team_member), do: "You can only move issues from teams you belong to in Linear."
+  defp describe_error({:linear_api_status, 401}), do: "Linear rejected your key. Sign in again."
   defp describe_error({:stage_label_not_found, label}), do: "Create the Linear label #{label} first."
   defp describe_error(:state_not_found), do: "That Linear state does not exist for this team."
   defp describe_error(reason), do: inspect(reason)
@@ -146,6 +164,14 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <span class="meta-item numeric"><%= polling_label(@payload[:polling]) %></span>
           <a class="meta-link" href="/api/v1/state">API</a>
           <a class="meta-link" href="/metrics">Metrics</a>
+          <div :if={!@current_user.local} class="user-chip">
+            <img :if={@current_user.avatar_url} class="user-avatar" src={@current_user.avatar_url} alt="" />
+            <span :if={!@current_user.avatar_url} class="user-avatar user-avatar-initial">
+              <%= String.first(@current_user.name || "?") %>
+            </span>
+            <span class="user-name" title={user_title(@current_user)}><%= @current_user.name %></span>
+            <a class="user-signout" href="/logout">Sign out</a>
+          </div>
         </div>
       </header>
 
@@ -162,7 +188,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
           id="factory-data"
           phx-hook="FactoryData"
           data-target="factory"
-          data-json={Jason.encode!(@payload.factory)}
+          data-json={factory_json(@payload.factory, @current_user)}
           hidden
         >
         </div>
@@ -349,6 +375,19 @@ defmodule SymphonyElixirWeb.DashboardLive do
       <% end %>
     </section>
     """
+  end
+
+  defp user_title(user) do
+    teams = Enum.map_join(user.teams, ", ", & &1.key)
+
+    role =
+      cond do
+        user.admin -> "Linear admin"
+        user.guest -> "Guest (read-only)"
+        true -> "Member"
+      end
+
+    "#{user.email || user.name} · #{role}" <> if(teams != "", do: " · teams #{teams}", else: "")
   end
 
   defp load_payload do

@@ -26,7 +26,7 @@ defmodule SymphonyElixir.FactoryControlsTest do
   end
 
   defmodule StageLinearClient do
-    def graphql(query, variables) do
+    def graphql(query, variables, _opts \\ []) do
       send(self(), {:graphql_called, query, variables})
       [result | rest] = Process.get(:stage_results)
       Process.put(:stage_results, rest)
@@ -144,13 +144,12 @@ defmodule SymphonyElixir.FactoryControlsTest do
     assert payload.priced
   end
 
-  test "controls are only enabled on loopback unless explicitly configured" do
+  test "server.controls: false is a read-only kill switch" do
     write_workflow_file!(Workflow.workflow_file_path())
     settings = Config.settings!()
 
-    assert FactoryPresenter.controls_enabled?(%{settings | server: %{settings.server | host: "127.0.0.1", controls: nil}})
-    refute FactoryPresenter.controls_enabled?(%{settings | server: %{settings.server | host: "0.0.0.0", controls: nil}})
-    assert FactoryPresenter.controls_enabled?(%{settings | server: %{settings.server | host: "0.0.0.0", controls: true}})
+    assert FactoryPresenter.controls_enabled?(%{settings | server: %{settings.server | controls: nil}})
+    refute FactoryPresenter.controls_enabled?(%{settings | server: %{settings.server | controls: false}})
   end
 
   test "memory tracker set_stage swaps the stage label and state" do
@@ -231,15 +230,6 @@ defmodule SymphonyElixir.FactoryControlsTest do
       assert [%Issue{state: "In Progress", labels: ["factory/merge"]}] = Application.get_env(:symphony_elixir, :memory_tracker_issues)
       assert [%{issue: "MT-10", node: "merge"}] = UsageLedger.snapshot().flow.issues
       assert IssueStage.stage(issue("MT-10", "In Progress", ["factory/merge"])) == "merge"
-    end
-
-    test "controls are refused when the server is not loopback-only" do
-      write_workflow_file!(Workflow.workflow_file_path(), server_host: "0.0.0.0")
-      {:ok, view, _html} = live(build_conn(), "/")
-
-      render_hook(view, "factory_control", %{"stage" => "merge", "field" => "paused", "value" => true})
-      assert_reply(view, %{ok: false, error: "Controls are disabled" <> _})
-      refute FactoryControls.paused?("merge")
     end
   end
 end

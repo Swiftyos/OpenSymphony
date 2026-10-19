@@ -47,8 +47,8 @@ defmodule SymphonyElixir.Tracker.Memory do
     :ok
   end
 
-  @spec set_stage(String.t(), String.t(), String.t() | nil) :: :ok | {:error, term()}
-  def set_stage(issue_id, state_name, stage) do
+  @spec set_stage(String.t(), String.t(), String.t() | nil, keyword()) :: :ok | {:error, term()}
+  def set_stage(issue_id, state_name, stage, _opts \\ []) do
     prefix = SymphonyElixir.IssueStage.label_prefix() <> "/"
 
     issues =

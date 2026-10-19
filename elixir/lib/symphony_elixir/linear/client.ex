@@ -184,7 +184,9 @@ defmodule SymphonyElixir.Linear.Client do
     payload = build_graphql_payload(query, variables, Keyword.get(opts, :operation_name))
     request_fun = Keyword.get(opts, :request_fun, &post_graphql_request/2)
 
-    with {:ok, headers} <- graphql_headers(),
+    # `api_key:` runs the request as a specific Linear user (dashboard sign-in)
+    # instead of Symphony's own tracker key.
+    with {:ok, headers} <- graphql_headers(Keyword.get(opts, :api_key)),
          {:ok, %{status: 200, body: body}} <- request_fun.(payload, headers) do
       {:ok, body}
     else
@@ -398,8 +400,8 @@ defmodule SymphonyElixir.Linear.Client do
     end
   end
 
-  defp graphql_headers do
-    case Config.settings!().tracker.api_key do
+  defp graphql_headers(api_key) do
+    case api_key || Config.settings!().tracker.api_key do
       nil ->
         {:error, :missing_linear_api_token}
 

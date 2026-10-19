@@ -661,6 +661,8 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `tracker.paused_stages` (extension): list of stage names, default `["blocked", "review"]`;
   issues in these stages are not dispatched even when their state is active
 - `sandbox` (extension): optional per-workspace container isolation (`kind: none | docker`)
+- `server.auth` (extension): dashboard sign-in, `local` or `linear` (Linear personal API key;
+  identity, teams, and admin rights come from Linear); defaults to `local` on loopback hosts
 - `polling.interval_ms`: integer, default `30000`
 - `workspace.root`: path, default `<system-temp>/symphony_workspaces`
 - `worker.ssh_hosts` (extension): list of SSH host strings, optional; when omitted, work runs
