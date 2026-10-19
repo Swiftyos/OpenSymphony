@@ -280,7 +280,9 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
   end
 
   # The rescue covers the port closing between the port_info check and Port.command.
-  defp command_port(port, payload), do: (true = Port.command(port, payload)) && :ok, rescue: (ArgumentError -> {:error, :port_closed})
+  defp command_port(port, payload), do: port |> Port.command(payload) |> command_sent(), rescue: (ArgumentError -> {:error, :port_closed})
+
+  defp command_sent(true), do: :ok
 
   defp await_turn_result(
          session,
