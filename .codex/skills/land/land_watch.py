@@ -458,12 +458,20 @@ def dedupe_reviews(reviews: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def filter_blocking_reviews(
     reviews: list[dict[str, Any]],
     review_requested_at: datetime | None,
+    latest_ack: datetime | None = None,
 ) -> list[dict[str, Any]]:
-    return [
-        review
-        for review in dedupe_reviews(reviews)
-        if is_blocking_review(review, review_requested_at)
-    ]
+    blocking: list[dict[str, Any]] = []
+    for review in dedupe_reviews(reviews):
+        if not is_blocking_review(review, review_requested_at):
+            continue
+        # A review body cannot be replied to inline, so a `[codex]` issue
+        # comment posted after it is the acknowledgement. Without this, an old
+        # COMMENTED/CHANGES_REQUESTED review blocks landing forever.
+        submitted = review_timestamp(review)
+        if latest_ack is not None and submitted is not None and submitted <= latest_ack:
+            continue
+        blocking.append(review)
+    return blocking
 
 
 def is_merge_conflicting(pr: PrInfo) -> bool:
@@ -501,7 +509,11 @@ def raise_on_human_feedback(
             "and note in your root-level update.",
         )
         raise SystemExit(2)
-    blocking_reviews = filter_blocking_reviews(reviews, review_request_at)
+    blocking_reviews = filter_blocking_reviews(
+        reviews,
+        review_request_at,
+        latest_codex_issue_reply_time(issue_comments),
+    )
     if blocking_reviews:
         print("Review states/comments detected. Address before merge.")
         print(
@@ -552,10 +564,14 @@ async def wait_for_checks(head_sha: str, checks_done: asyncio.Event) -> None:
         if not check_runs:
             empty_seconds += POLL_SECONDS
             if empty_seconds >= CHECKS_APPEAR_TIMEOUT_SECONDS:
+                # Repos without CI never report checks; failing here made the
+                # land loop retry forever instead of merging.
                 print(
-                    "No checks detected after 120s; check CI configuration",
+                    "No checks detected after "
+                    f"{CHECKS_APPEAR_TIMEOUT_SECONDS}s; treating as no CI configured",
                 )
-                raise SystemExit(3)
+                checks_done.set()
+                return
             await asyncio.sleep(POLL_SECONDS)
             continue
         empty_seconds = 0

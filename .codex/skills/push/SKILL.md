@@ -26,7 +26,8 @@ description:
 ## Steps
 
 1. Identify current branch and confirm remote state.
-2. Run local validation (`make -C elixir all`) before pushing.
+2. Run the repository's validation gate before pushing (see `AGENTS.md`; in
+   this repo that is `make -C elixir all`).
 3. Push branch to `origin` with upstream tracking if needed, using whatever
    remote URL is already configured.
 4. If push is not clean/rejected:
@@ -52,7 +53,8 @@ description:
      scope (all intended work on the branch), not just the newest commits,
      including newly added work, removed work, or changed approach.
    - Do not reuse stale description text from earlier iterations.
-7. Validate PR body with `mix pr_body.check` and fix all reported issues.
+7. If the repo provides a PR body checker (this repo: `mix pr_body.check`),
+   run it and fix all reported issues.
 8. Reply with the PR URL from `gh pr view`.
 
 ## Commands
@@ -61,8 +63,8 @@ description:
 # Identify branch
 branch=$(git branch --show-current)
 
-# Minimal validation gate
-make -C elixir all
+# Minimal validation gate (repo-specific; see AGENTS.md)
+if [ -f elixir/Makefile ]; then make -C elixir all; fi
 
 # Initial push: respect the current origin remote.
 git push -u origin HEAD
@@ -99,10 +101,12 @@ fi
 # 2) gh pr edit --body-file /tmp/pr_body.md
 # 3) for branch updates, re-check that title/body still match current diff
 
-tmp_pr_body=$(mktemp)
-gh pr view --json body -q .body > "$tmp_pr_body"
-(cd elixir && mix pr_body.check --file "$tmp_pr_body")
-rm -f "$tmp_pr_body"
+if [ -f elixir/mix.exs ]; then
+  tmp_pr_body=$(mktemp)
+  gh pr view --json body -q .body > "$tmp_pr_body"
+  (cd elixir && mix pr_body.check --file "$tmp_pr_body")
+  rm -f "$tmp_pr_body"
+fi
 
 # Show PR URL for the reply
 gh pr view --json url -q .url

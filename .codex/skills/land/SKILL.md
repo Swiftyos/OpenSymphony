@@ -72,21 +72,20 @@ if [ "$mergeable" = "CONFLICTING" ]; then
   # Then run the `push` skill to publish the updated branch.
 fi
 
-# Preferred: use the Async Watch Helper below. The manual loop is a fallback
+# Preferred: use the Async Watch Helper below. The manual steps are a fallback
 # when Python cannot run or the helper script is unavailable.
-# Wait for review feedback: Codex reviews arrive as issue comments that start
-# with "## Codex Review — <persona>". Treat them like reviewer feedback: reply
-# with a `[codex]` issue comment acknowledging the findings and whether you're
-# addressing or deferring them.
-while true; do
-  gh api repos/{owner}/{repo}/issues/"$pr_number"/comments \
-    --jq '.[] | select(.body | startswith("## Codex Review")) | .id' | rg -q '.' \
-    && break
-  sleep 10
-done
+# Review feedback: if this repo runs a Codex review bot, its findings arrive as
+# issue comments starting with "## Codex Review — <persona>". Check once; do
+# NOT block waiting for one, because repos without the bot never post it.
+gh api repos/{owner}/{repo}/issues/"$pr_number"/comments \
+  --jq '.[] | select(.body | startswith("## Codex Review")) | .id'
+# Reply to any such comment with a `[codex]` issue comment before merging.
 
-# Watch checks
-if ! gh pr checks --watch; then
+# Watch checks. "no checks reported" means the repo has no CI: continue.
+checks_status=0
+checks_output=$(gh pr checks --watch 2>&1) || checks_status=$?
+printf '%s\n' "$checks_output"
+if [ "$checks_status" -ne 0 ] && ! printf '%s' "$checks_output" | grep -q "no checks reported"; then
   gh pr checks
   # Identify failing run and inspect logs
   # gh run list --branch "$branch"
@@ -109,9 +108,13 @@ python3 .codex/skills/land/land_watch.py
 
 Exit codes:
 
-- 2: Review comments detected (address feedback)
+- 0: Checks passed (or the repo has no CI) and no unacknowledged feedback
+- 2: Review comments detected (address feedback, then post a `[codex]` ack)
 - 3: CI checks failed
 - 4: PR head updated (autofix commit detected)
+- 5: Merge conflicts with the base branch
+
+Exit 0 means you should merge now. Do not loop on the watcher after it exits 0.
 
 ## Failure Handling
 
@@ -130,7 +133,10 @@ Exit codes:
 - Do not merge while review comments (human or Codex review) are outstanding.
 - Codex review jobs retry on failure and are non-blocking; use the presence of
   `## Codex Review — <persona>` issue comments (not job status) as the signal
-  that review feedback is available.
+  that review feedback is available. Never wait for one to appear: if the repo
+  has no Codex review bot, none will.
+- A Symphony issue in the `merge` stage was approved by a human; do not wait
+  for additional approvals beyond what branch protection requires.
 - Do not enable auto-merge; this repo has no required checks so auto-merge can
   skip tests.
 - If the remote PR branch advanced due to your own prior force-push or merge,
