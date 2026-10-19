@@ -1,6 +1,8 @@
 defmodule SymphonyElixir.CoreTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.Factory.StagePrompt
+
   test "config defaults and validation checks" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: nil,
@@ -994,7 +996,7 @@ defmodule SymphonyElixir.CoreTest do
       ]
     }
 
-    assert PromptBuilder.build_prompt(issue) == "Ticket MT-701"
+    assert PromptBuilder.build_prompt(issue) == "Ticket MT-701\n\n" <> StagePrompt.render(issue) <> "\n"
   end
 
   test "prompt builder uses strict variable rendering" do
@@ -1153,7 +1155,7 @@ defmodule SymphonyElixir.CoreTest do
 
     prompt = PromptBuilder.build_prompt(issue, attempt: 2)
 
-    assert prompt == "Retry #2"
+    assert prompt == "Retry #2\n\n" <> StagePrompt.render(issue) <> "\n"
   end
 
   test "agent runner keeps workspace after successful OpenCode run" do

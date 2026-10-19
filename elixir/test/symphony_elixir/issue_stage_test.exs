@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.IssueStageTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.Factory.StagePrompt
   alias SymphonyElixir.{IssueStage, PromptBuilder, Sandbox}
 
   defp issue(state, labels) do
@@ -91,8 +92,9 @@ defmodule SymphonyElixir.IssueStageTest do
 
   test "prompt templates can read the stage and label prefix" do
     write_workflow_file!(Workflow.workflow_file_path(), prompt: "stage={{ issue.stage }} prefix={{ factory.label_prefix }}")
+    issue = issue("In Progress", ["factory/merge"])
 
-    assert PromptBuilder.build_prompt(issue("In Progress", ["factory/merge"])) == "stage=merge prefix=factory"
+    assert PromptBuilder.build_prompt(issue) == "stage=merge prefix=factory\n\n" <> StagePrompt.render(issue) <> "\n"
   end
 
   test "shipped WORKFLOW.md renders for every stage" do
