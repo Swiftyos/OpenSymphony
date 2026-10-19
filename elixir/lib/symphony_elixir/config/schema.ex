@@ -66,15 +66,10 @@ defmodule SymphonyElixir.Config.Schema do
       |> update_change(:default_branch, &Schema.normalize_optional_string/1)
       |> update_change(:workspace_root, &Schema.normalize_optional_string/1)
       |> validate_change(:backend, fn :backend, value ->
-        cond do
-          is_nil(value) ->
-            []
-
-          value in ["codex", "opencode", "claude"] ->
-            []
-
-          true ->
-            [backend: "must be one of: codex, opencode, claude"]
+        if value in ["codex", "opencode", "claude"] do
+          []
+        else
+          [backend: "must be one of: codex, opencode, claude"]
         end
       end)
       |> validate_required([:slug])
@@ -351,27 +346,17 @@ defmodule SymphonyElixir.Config.Schema do
       |> update_change(:backend, &Schema.normalize_optional_string/1)
       |> update_change(:default_effort, &Schema.normalize_optional_effort/1)
       |> validate_change(:backend, fn :backend, value ->
-        cond do
-          is_nil(value) ->
-            []
-
-          value in ["codex", "opencode", "claude"] ->
-            []
-
-          true ->
-            [backend: "must be one of: codex, opencode, claude"]
+        if value in ["codex", "opencode", "claude"] do
+          []
+        else
+          [backend: "must be one of: codex, opencode, claude"]
         end
       end)
       |> validate_change(:default_effort, fn :default_effort, value ->
-        cond do
-          is_nil(value) ->
-            []
-
-          value in @effort_values ->
-            []
-
-          true ->
-            [default_effort: "must be one of: #{Enum.join(@effort_values, ", ")}"]
+        if value in @effort_values do
+          []
+        else
+          [default_effort: "must be one of: #{Enum.join(@effort_values, ", ")}"]
         end
       end)
       |> validate_number(:max_concurrent_agents, greater_than: 0)
@@ -420,9 +405,6 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
       |> validate_change(:model, fn :model, value ->
         cond do
-          is_nil(value) ->
-            []
-
           is_binary(value) and String.trim(value) == "" ->
             []
 
@@ -529,15 +511,10 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:read_timeout_ms, greater_than: 0)
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
       |> validate_change(:permission_mode, fn :permission_mode, value ->
-        cond do
-          is_nil(value) ->
-            []
-
-          value in @permission_modes ->
-            []
-
-          true ->
-            [permission_mode: "must be one of: #{Enum.join(@permission_modes, ", ")}"]
+        if value in @permission_modes do
+          []
+        else
+          [permission_mode: "must be one of: #{Enum.join(@permission_modes, ", ")}"]
         end
       end)
     end
@@ -1025,8 +1002,6 @@ defmodule SymphonyElixir.Config.Schema do
   defp normalize_optional_map(nil), do: nil
   defp normalize_optional_map(value) when is_map(value), do: normalize_keys(value)
 
-  defp normalize_resource_attributes(nil), do: %{}
-
   defp normalize_resource_attributes(value) when is_map(value) do
     Enum.reduce(value, %{}, fn {key, val}, acc ->
       case normalize_optional_string(to_string(val)) do
@@ -1304,8 +1279,6 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
-  defp validate_unsupported_config(_config, _mode), do: :ok
-
   defp validate_global_only_config(config, :global) when is_map(config) do
     if Map.has_key?(config, "hooks") do
       {:error, {:invalid_workflow_config, "`hooks` must be defined in repo-local WORKFLOW.md files when using symphony.yml"}}
@@ -1378,8 +1351,6 @@ defmodule SymphonyElixir.Config.Schema do
   defp provider_config_present?(config, key) when is_map(config) and is_binary(key) do
     Map.has_key?(config, key)
   end
-
-  defp provider_config_present?(_config, _key), do: false
 
   defp flatten_errors(errors, prefix \\ nil)
 

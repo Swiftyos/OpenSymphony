@@ -242,9 +242,6 @@ defmodule SymphonyElixir.ProjectWorkflow do
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
       |> validate_change(:model, fn :model, value ->
         cond do
-          is_nil(value) ->
-            []
-
           is_binary(value) and String.trim(value) == "" ->
             []
 
@@ -286,15 +283,10 @@ defmodule SymphonyElixir.ProjectWorkflow do
       |> validate_number(:read_timeout_ms, greater_than: 0)
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
       |> validate_change(:permission_mode, fn :permission_mode, value ->
-        cond do
-          is_nil(value) ->
-            []
-
-          value in @claude_permission_modes ->
-            []
-
-          true ->
-            [permission_mode: "must be one of: #{Enum.join(@claude_permission_modes, ", ")}"]
+        if value in @claude_permission_modes do
+          []
+        else
+          [permission_mode: "must be one of: #{Enum.join(@claude_permission_modes, ", ")}"]
         end
       end)
 
@@ -349,18 +341,8 @@ defmodule SymphonyElixir.ProjectWorkflow do
   end
 
   defp flatten_errors(prefix, errors) when is_list(errors) do
-    Enum.flat_map(errors, fn
-      message when is_binary(message) ->
-        ["#{prefix} #{message}"]
-
-      nested ->
-        flatten_errors(prefix, nested)
-    end)
-  end
-
-  defp flatten_errors(prefix, errors) when is_map(errors) do
-    Enum.flat_map(errors, fn {field, nested} ->
-      flatten_errors("#{prefix}.#{field}", nested)
+    Enum.flat_map(errors, fn message when is_binary(message) ->
+      ["#{prefix} #{message}"]
     end)
   end
 end

@@ -515,7 +515,6 @@ defmodule SymphonyElixir.Linear.GraphqlTool do
 
   defp normalize_variables(arguments) do
     case Map.get(arguments, "variables") || Map.get(arguments, :variables) || %{} do
-      nil -> {:ok, %{}}
       variables when is_map(variables) -> {:ok, variables}
       _ -> {:error, :invalid_variables}
     end

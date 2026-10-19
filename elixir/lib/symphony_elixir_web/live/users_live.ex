@@ -239,5 +239,4 @@ defmodule SymphonyElixirWeb.UsersLive do
 
   defp problem_label(:not_in_workspace), do: "Not in Linear workspace"
   defp problem_label(:inactive_user), do: "Deactivated in Linear"
-  defp problem_label(reason), do: to_string(reason)
 end

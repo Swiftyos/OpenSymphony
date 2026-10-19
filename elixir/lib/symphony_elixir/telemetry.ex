@@ -59,6 +59,5 @@ defmodule SymphonyElixir.Telemetry do
 
   defp maybe_put(entries, _key, nil), do: entries
   defp maybe_put(entries, _key, false), do: entries
-  defp maybe_put(entries, _key, ""), do: entries
   defp maybe_put(entries, key, value), do: [{key, to_string(value)} | entries]
 end
