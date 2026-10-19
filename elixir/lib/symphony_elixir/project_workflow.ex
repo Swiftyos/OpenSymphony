@@ -124,16 +124,18 @@ defmodule SymphonyElixir.ProjectWorkflow do
     with :ok <- validate_map_keys(Map.get(config, "agent", %{}), @allowed_agent_keys, "agent"),
          :ok <- validate_map_keys(Map.get(config, "hooks", %{}), @allowed_hook_keys, "hooks"),
          :ok <- validate_map_keys(Map.get(config, "codex", %{}), @allowed_codex_keys, "codex"),
-         :ok <- validate_map_keys(Map.get(config, "opencode", %{}), @allowed_opencode_keys, "opencode"),
-         :ok <- validate_map_keys(Map.get(config, "claude", %{}), @allowed_claude_keys, "claude") do
-      :ok
+         :ok <- validate_map_keys(Map.get(config, "opencode", %{}), @allowed_opencode_keys, "opencode") do
+      validate_map_keys(Map.get(config, "claude", %{}), @allowed_claude_keys, "claude")
     end
   end
 
   defp validate_map_keys(%{} = map, allowed_keys, prefix) do
     case Enum.find(Map.keys(map), &(not MapSet.member?(allowed_keys, &1))) do
-      nil -> :ok
-      key -> {:error, {:invalid_project_workflow_config, "unsupported key #{inspect(prefix <> "." <> key)} in project workflow"}}
+      nil ->
+        :ok
+
+      key ->
+        {:error, {:invalid_project_workflow_config, "unsupported key #{inspect(prefix <> "." <> key)} in project workflow"}}
     end
   end
 
@@ -196,7 +198,15 @@ defmodule SymphonyElixir.ProjectWorkflow do
       }
       |> cast(
         attrs,
-        [:command, :approval_policy, :thread_sandbox, :turn_sandbox_policy, :turn_timeout_ms, :read_timeout_ms, :stall_timeout_ms],
+        [
+          :command,
+          :approval_policy,
+          :thread_sandbox,
+          :turn_sandbox_policy,
+          :turn_timeout_ms,
+          :read_timeout_ms,
+          :stall_timeout_ms
+        ],
         empty_values: []
       )
       |> validate_number(:turn_timeout_ms, greater_than: 0)
@@ -222,7 +232,11 @@ defmodule SymphonyElixir.ProjectWorkflow do
         read_timeout_ms: nil,
         stall_timeout_ms: nil
       }
-      |> cast(attrs, [:command, :agent, :model, :turn_timeout_ms, :read_timeout_ms, :stall_timeout_ms], empty_values: [])
+      |> cast(
+        attrs,
+        [:command, :agent, :model, :turn_timeout_ms, :read_timeout_ms, :stall_timeout_ms],
+        empty_values: []
+      )
       |> validate_number(:turn_timeout_ms, greater_than: 0)
       |> validate_number(:read_timeout_ms, greater_than: 0)
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
@@ -261,7 +275,11 @@ defmodule SymphonyElixir.ProjectWorkflow do
         read_timeout_ms: nil,
         stall_timeout_ms: nil
       }
-      |> cast(attrs, [:command, :model, :permission_mode, :turn_timeout_ms, :read_timeout_ms, :stall_timeout_ms], empty_values: [])
+      |> cast(
+        attrs,
+        [:command, :model, :permission_mode, :turn_timeout_ms, :read_timeout_ms, :stall_timeout_ms],
+        empty_values: []
+      )
       |> update_change(:model, &Schema.normalize_optional_string/1)
       |> update_change(:permission_mode, &Schema.normalize_optional_string/1)
       |> validate_number(:turn_timeout_ms, greater_than: 0)

@@ -42,10 +42,7 @@ defmodule SymphonyElixir.ClaudeCode.RateLimitProbe do
           {:ok, %{status: status, headers: response_headers} = response} ->
             Logger.warning("Anthropic rate-limit probe for #{account_label(account)} returned HTTP #{status}: #{summarize_body(Map.get(response, :body))}")
 
-            case rate_limits_from_response(response_headers, account) do
-              {:ok, rate_limits} -> {:ok, rate_limits}
-              {:error, :empty_rate_limit_headers} -> {:error, {:anthropic_http_status, status}}
-            end
+            non_success_rate_limits(response_headers, account, status)
 
           {:error, reason} ->
             Logger.warning("Anthropic rate-limit probe for #{account_label(account)} failed: #{inspect(reason)}")
@@ -55,6 +52,13 @@ defmodule SymphonyElixir.ClaudeCode.RateLimitProbe do
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  defp non_success_rate_limits(response_headers, account, status) do
+    case rate_limits_from_response(response_headers, account) do
+      {:ok, rate_limits} -> {:ok, rate_limits}
+      {:error, :empty_rate_limit_headers} -> {:error, {:anthropic_http_status, status}}
     end
   end
 
@@ -72,15 +76,13 @@ defmodule SymphonyElixir.ClaudeCode.RateLimitProbe do
     session = bucket_from_headers(normalized, "5h")
     weekly = bucket_from_headers(normalized, "7d")
 
-    cond do
-      is_nil(session) and is_nil(weekly) ->
-        {:error, :empty_rate_limit_headers}
-
-      true ->
-        {:ok,
-         %{"limit_id" => @limit_id}
-         |> maybe_put("session", session)
-         |> maybe_put("weekly", weekly)}
+    if is_nil(session) and is_nil(weekly) do
+      {:error, :empty_rate_limit_headers}
+    else
+      {:ok,
+       %{"limit_id" => @limit_id}
+       |> maybe_put("session", session)
+       |> maybe_put("weekly", weekly)}
     end
   end
 
@@ -92,19 +94,17 @@ defmodule SymphonyElixir.ClaudeCode.RateLimitProbe do
     utilization = parse_float(utilization_raw)
     reset_at = parse_unix_timestamp(reset_raw)
 
-    cond do
-      is_nil(utilization) and is_nil(reset_at) and is_nil(status) ->
-        nil
-
-      true ->
-        %{}
-        |> put_if("period", period_for_window(window))
-        |> put_if("status", status)
-        |> put_if("usage_percent", utilization_to_percent(utilization))
-        |> put_if("utilization", utilization)
-        |> put_if("reset_at", reset_at)
-        |> put_if("limit", if(utilization, do: 100, else: nil))
-        |> put_if("remaining", utilization_to_remaining(utilization, status))
+    if is_nil(utilization) and is_nil(reset_at) and is_nil(status) do
+      nil
+    else
+      %{}
+      |> put_if("period", period_for_window(window))
+      |> put_if("status", status)
+      |> put_if("usage_percent", utilization_to_percent(utilization))
+      |> put_if("utilization", utilization)
+      |> put_if("reset_at", reset_at)
+      |> put_if("limit", if(utilization, do: 100, else: nil))
+      |> put_if("remaining", utilization_to_remaining(utilization, status))
     end
   end
 

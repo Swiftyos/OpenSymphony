@@ -294,14 +294,8 @@ defmodule SymphonyElixir.Config.Schema do
 
     defp normalize_boolean_value(value) when is_binary(value) do
       case String.downcase(String.trim(value)) do
-        "true" -> true
-        "yes" -> true
-        "on" -> true
-        "1" -> true
-        "false" -> false
-        "no" -> false
-        "off" -> false
-        "0" -> false
+        truthy when truthy in ["true", "yes", "on", "1"] -> true
+        falsy when falsy in ["false", "no", "off", "0"] -> false
         _ -> value
       end
     end
@@ -332,7 +326,14 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:backend, :default_effort, :max_concurrent_agents, :max_turns, :max_retry_backoff_ms, :max_concurrent_agents_by_state],
+        [
+          :backend,
+          :default_effort,
+          :max_concurrent_agents,
+          :max_turns,
+          :max_retry_backoff_ms,
+          :max_concurrent_agents_by_state
+        ],
         empty_values: []
       )
       |> update_change(:backend, &Schema.normalize_optional_string/1)

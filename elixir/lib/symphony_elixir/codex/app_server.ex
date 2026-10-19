@@ -374,8 +374,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp remote_environment_exports(issue, account) do
     env_pairs(issue, account)
-    |> Enum.map(fn {key, value} -> "export #{key}=#{shell_escape(to_string(value))}" end)
-    |> Enum.join(" && ")
+    |> Enum.map_join(" && ", fn {key, value} -> "export #{key}=#{shell_escape(to_string(value))}" end)
   end
 
   defp port_environment(issue, account) do

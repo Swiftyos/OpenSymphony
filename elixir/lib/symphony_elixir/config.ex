@@ -215,13 +215,17 @@ defmodule SymphonyElixir.Config do
     if global_mode?() do
       @default_prompt_template
     else
-      case Workflow.current() do
-        {:ok, %{prompt_template: prompt}} ->
-          if String.trim(prompt) == "", do: @default_prompt_template, else: prompt
+      current_workflow_prompt()
+    end
+  end
 
-        _ ->
-          @default_prompt_template
-      end
+  defp current_workflow_prompt do
+    case Workflow.current() do
+      {:ok, %{prompt_template: prompt}} ->
+        if String.trim(prompt) == "", do: @default_prompt_template, else: prompt
+
+      _ ->
+        @default_prompt_template
     end
   end
 
@@ -357,9 +361,9 @@ defmodule SymphonyElixir.Config do
     if map_size(attrs) == 0 do
       nil
     else
-      attrs
-      |> Enum.map(fn {key, value} -> "#{percent_encode_resource_key(key)}=#{percent_encode_resource_value(value)}" end)
-      |> Enum.join(",")
+      Enum.map_join(attrs, ",", fn {key, value} ->
+        "#{percent_encode_resource_key(key)}=#{percent_encode_resource_value(value)}"
+      end)
     end
   end
 
@@ -420,9 +424,8 @@ defmodule SymphonyElixir.Config do
   @spec validate!() :: :ok | {:error, term()}
   def validate! do
     with {:ok, settings} <- settings(),
-         :ok <- validate_semantics(settings),
-         :ok <- validate_project_route_semantics(settings) do
-      :ok
+         :ok <- validate_semantics(settings) do
+      validate_project_route_semantics(settings)
     end
   end
 
@@ -716,15 +719,19 @@ defmodule SymphonyElixir.Config do
 
   defp validate_project_route_semantics(%Schema{} = settings) do
     if global_mode?() do
-      Enum.reduce_while(linear_project_routes(settings), :ok, fn route, :ok ->
-        case validate_global_project_route(route) do
-          :ok -> {:cont, :ok}
-          {:error, reason} -> {:halt, {:error, reason}}
-        end
-      end)
+      validate_global_project_routes(linear_project_routes(settings))
     else
       :ok
     end
+  end
+
+  defp validate_global_project_routes(routes) do
+    Enum.reduce_while(routes, :ok, fn route, :ok ->
+      case validate_global_project_route(route) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
   end
 
   defp validate_global_project_route(%{slug: slug, workflow: workflow_path} = route) do
@@ -746,44 +753,52 @@ defmodule SymphonyElixir.Config do
     end
   end
 
-  defp format_config_error(reason) do
-    case reason do
-      :missing_linear_api_token ->
-        "Linear API token missing in #{config_source_name()}. Export `LINEAR_API_KEY` in the shell where Symphony starts or set `tracker.api_key` explicitly."
+  defp format_config_error(:missing_linear_api_token) do
+    "Linear API token missing in #{config_source_name()}. Export `LINEAR_API_KEY` in the shell where Symphony starts or set `tracker.api_key` explicitly."
+  end
 
-      :missing_linear_project_slug ->
-        "Linear project slug missing in #{config_source_name()}"
+  defp format_config_error(:missing_linear_project_slug) do
+    "Linear project slug missing in #{config_source_name()}"
+  end
 
-      :missing_tracker_kind ->
-        "Tracker kind missing in #{config_source_name()}"
+  defp format_config_error(:missing_tracker_kind) do
+    "Tracker kind missing in #{config_source_name()}"
+  end
 
-      {:unsupported_tracker_kind, kind} ->
-        "Unsupported tracker kind in #{config_source_name()}: #{inspect(kind)}"
+  defp format_config_error({:unsupported_tracker_kind, kind}) do
+    "Unsupported tracker kind in #{config_source_name()}: #{inspect(kind)}"
+  end
 
-      {:invalid_workflow_config, message} ->
-        "Invalid #{config_source_name()} config: #{message}"
+  defp format_config_error({:invalid_workflow_config, message}) do
+    "Invalid #{config_source_name()} config: #{message}"
+  end
 
-      {:missing_workflow_file, path, raw_reason} ->
-        "Missing WORKFLOW.md at #{path}: #{inspect(raw_reason)}"
+  defp format_config_error({:missing_workflow_file, path, raw_reason}) do
+    "Missing WORKFLOW.md at #{path}: #{inspect(raw_reason)}"
+  end
 
-      {:missing_symphony_config_file, path, raw_reason} ->
-        "Missing symphony.yml at #{path}: #{inspect(raw_reason)}"
+  defp format_config_error({:missing_symphony_config_file, path, raw_reason}) do
+    "Missing symphony.yml at #{path}: #{inspect(raw_reason)}"
+  end
 
-      {:workflow_parse_error, raw_reason} ->
-        "Failed to parse WORKFLOW.md: #{inspect(raw_reason)}"
+  defp format_config_error({:workflow_parse_error, raw_reason}) do
+    "Failed to parse WORKFLOW.md: #{inspect(raw_reason)}"
+  end
 
-      :workflow_front_matter_not_a_map ->
-        "Failed to parse WORKFLOW.md: workflow front matter must decode to a map"
+  defp format_config_error(:workflow_front_matter_not_a_map) do
+    "Failed to parse WORKFLOW.md: workflow front matter must decode to a map"
+  end
 
-      {:symphony_config_parse_error, raw_reason} ->
-        "Failed to parse symphony.yml: #{inspect(raw_reason)}"
+  defp format_config_error({:symphony_config_parse_error, raw_reason}) do
+    "Failed to parse symphony.yml: #{inspect(raw_reason)}"
+  end
 
-      :symphony_config_not_a_map ->
-        "Failed to parse symphony.yml: config must decode to a map"
+  defp format_config_error(:symphony_config_not_a_map) do
+    "Failed to parse symphony.yml: config must decode to a map"
+  end
 
-      other ->
-        "Invalid #{config_source_name()} config: #{inspect(other)}"
-    end
+  defp format_config_error(other) do
+    "Invalid #{config_source_name()} config: #{inspect(other)}"
   end
 
   defp issue_project_slug(%{project_slug: project_slug}) when is_binary(project_slug), do: project_slug

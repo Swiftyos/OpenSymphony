@@ -6,8 +6,8 @@ defmodule SymphonyElixir.IssueConfig do
   alias SymphonyElixir.Config
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.ProjectWorkflow
-  alias SymphonyElixir.Workspace
   alias SymphonyElixir.Workflow
+  alias SymphonyElixir.Workspace
 
   defstruct [
     :mode,

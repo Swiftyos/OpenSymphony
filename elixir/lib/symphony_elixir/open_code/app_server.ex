@@ -716,33 +716,12 @@ defmodule SymphonyElixir.OpenCode.AppServer do
   defp parse_sse_block(block) when is_binary(block) do
     lines = String.split(block, "\n", trim: true)
 
-    {event_name, data_lines} =
-      Enum.reduce(lines, {nil, []}, fn line, {event_name_acc, data_acc} ->
-        cond do
-          String.starts_with?(line, "event:") ->
-            {String.trim(String.replace_prefix(line, "event:", "")), data_acc}
-
-          String.starts_with?(line, "data:") ->
-            {event_name_acc, data_acc ++ [String.trim_leading(String.replace_prefix(line, "data:", ""))]}
-
-          true ->
-            {event_name_acc, data_acc}
-        end
-      end)
+    {event_name, data_lines} = Enum.reduce(lines, {nil, []}, &accumulate_sse_line/2)
 
     payload =
       data_lines
       |> Enum.join("\n")
-      |> case do
-        "" ->
-          nil
-
-        json ->
-          case Jason.decode(json) do
-            {:ok, decoded} -> decoded
-            {:error, _reason} -> nil
-          end
-      end
+      |> decode_sse_data()
 
     case payload do
       %{} = decoded ->
@@ -753,6 +732,28 @@ defmodule SymphonyElixir.OpenCode.AppServer do
 
       _ ->
         nil
+    end
+  end
+
+  defp accumulate_sse_line(line, {event_name_acc, data_acc}) do
+    cond do
+      String.starts_with?(line, "event:") ->
+        {String.trim(String.replace_prefix(line, "event:", "")), data_acc}
+
+      String.starts_with?(line, "data:") ->
+        {event_name_acc, data_acc ++ [String.trim_leading(String.replace_prefix(line, "data:", ""))]}
+
+      true ->
+        {event_name_acc, data_acc}
+    end
+  end
+
+  defp decode_sse_data(""), do: nil
+
+  defp decode_sse_data(json) do
+    case Jason.decode(json) do
+      {:ok, decoded} -> decoded
+      {:error, _reason} -> nil
     end
   end
 

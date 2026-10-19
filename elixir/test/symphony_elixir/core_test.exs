@@ -1496,6 +1496,8 @@ defmodule SymphonyElixir.CoreTest do
   defmodule FakeOpenCodePlug do
     import Plug.Conn
 
+    alias SymphonyElixir.CoreTest.FakeOpenCodeState
+
     def init(opts), do: opts
 
     def call(conn, opts) do
@@ -1510,12 +1512,12 @@ defmodule SymphonyElixir.CoreTest do
 
         {"POST", ["session"]} ->
           body = read_json_body!(conn)
-          SymphonyElixir.CoreTest.FakeOpenCodeState.record_session_create(state, body)
+          FakeOpenCodeState.record_session_create(state, body)
           json(conn, 200, %{"id" => "session-core"})
 
         {"POST", ["session", session_id, "message"]} ->
           body = read_json_body!(conn)
-          entry = SymphonyElixir.CoreTest.FakeOpenCodeState.record_message_post(state, session_id, body)
+          entry = FakeOpenCodeState.record_message_post(state, session_id, body)
 
           json(conn, 200, %{
             "info" => %{
@@ -1540,7 +1542,7 @@ defmodule SymphonyElixir.CoreTest do
         |> put_resp_header("cache-control", "no-cache")
         |> send_chunked(200)
 
-      SymphonyElixir.CoreTest.FakeOpenCodeState.subscribe(state, self())
+      FakeOpenCodeState.subscribe(state, self())
       wait_for_disconnect(conn)
     end
 

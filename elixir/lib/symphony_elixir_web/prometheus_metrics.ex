@@ -187,21 +187,7 @@ defmodule SymphonyElixirWeb.PrometheusMetrics do
           {"output", integer_value(Map.get(row, "output_tokens"))},
           {"total", integer_value(Map.get(row, "total_tokens"))}
         ]
-        |> Enum.flat_map(fn {token_type, value} ->
-          case value do
-            nil ->
-              []
-
-            numeric ->
-              [
-                %{
-                  name: "symphony_account_usage_period_tokens",
-                  labels: labels ++ [token_type: token_type],
-                  value: numeric
-                }
-              ]
-          end
-        end)
+        |> Enum.flat_map(&usage_period_token_sample(&1, labels))
 
       (token_samples ++
          [])
@@ -210,6 +196,18 @@ defmodule SymphonyElixirWeb.PrometheusMetrics do
       |> maybe_add_sample("symphony_account_usage_period_used", labels, used)
       |> maybe_add_sample("symphony_account_usage_period_usage_percent", labels, usage_percent)
     end)
+  end
+
+  defp usage_period_token_sample({_token_type, nil}, _labels), do: []
+
+  defp usage_period_token_sample({token_type, numeric}, labels) do
+    [
+      %{
+        name: "symphony_account_usage_period_tokens",
+        labels: labels ++ [token_type: token_type],
+        value: numeric
+      }
+    ]
   end
 
   defp active_usage_period_rows(account) do
@@ -365,8 +363,8 @@ defmodule SymphonyElixirWeb.PrometheusMetrics do
       "limit_id" => map_value(period, :limit_id) || current_limit_id,
       "bucket" => map_value(period, :bucket) || bucket_name,
       "period" => map_value(period, :period) || bucket_name,
-      "period_started_at" => datetime_string(map_value(period, :started_at)) || bucket_period_started_at(current_bucket),
-      "reset_at" => datetime_string(map_value(period, :reset_at)) || bucket_reset_at_string(current_bucket),
+      "period_started_at" => active_period_started_at(period, current_bucket),
+      "reset_at" => active_period_reset_at(period, current_bucket),
       "period_status" => "active",
       "limit" => limit,
       "remaining" => remaining,
@@ -379,6 +377,14 @@ defmodule SymphonyElixirWeb.PrometheusMetrics do
   end
 
   defp normalize_active_usage_period_row(_period, _bucket_name, _current_bucket_data), do: nil
+
+  defp active_period_started_at(period, current_bucket) do
+    datetime_string(map_value(period, :started_at)) || bucket_period_started_at(current_bucket)
+  end
+
+  defp active_period_reset_at(period, current_bucket) do
+    datetime_string(map_value(period, :reset_at)) || bucket_reset_at_string(current_bucket)
+  end
 
   defp fallback_active_usage_period_row(bucket_name, %{limit_id: limit_id, bucket: bucket})
        when is_map(bucket) do
@@ -468,28 +474,30 @@ defmodule SymphonyElixirWeb.PrometheusMetrics do
   end
 
   defp reset_time(bucket) when is_map(bucket) do
-    absolute =
-      Map.get(bucket, "reset_at") ||
-        Map.get(bucket, :reset_at) ||
-        Map.get(bucket, "resetAt") ||
-        Map.get(bucket, :resetAt) ||
-        Map.get(bucket, "resets_at") ||
-        Map.get(bucket, :resets_at) ||
-        Map.get(bucket, "resetsAt") ||
-        Map.get(bucket, :resetsAt)
-
-    relative =
-      Map.get(bucket, "reset_in_seconds") ||
-        Map.get(bucket, :reset_in_seconds) ||
-        Map.get(bucket, "resets_in_seconds") ||
-        Map.get(bucket, :resets_in_seconds) ||
-        Map.get(bucket, "reset_after_seconds") ||
-        Map.get(bucket, :reset_after_seconds)
-
-    normalize_datetime(absolute) || relative_reset(relative)
+    normalize_datetime(absolute_reset_value(bucket)) || relative_reset(relative_reset_value(bucket))
   end
 
   defp reset_time(_bucket), do: nil
+
+  defp absolute_reset_value(bucket) do
+    Map.get(bucket, "reset_at") ||
+      Map.get(bucket, :reset_at) ||
+      Map.get(bucket, "resetAt") ||
+      Map.get(bucket, :resetAt) ||
+      Map.get(bucket, "resets_at") ||
+      Map.get(bucket, :resets_at) ||
+      Map.get(bucket, "resetsAt") ||
+      Map.get(bucket, :resetsAt)
+  end
+
+  defp relative_reset_value(bucket) do
+    Map.get(bucket, "reset_in_seconds") ||
+      Map.get(bucket, :reset_in_seconds) ||
+      Map.get(bucket, "resets_in_seconds") ||
+      Map.get(bucket, :resets_in_seconds) ||
+      Map.get(bucket, "reset_after_seconds") ||
+      Map.get(bucket, :reset_after_seconds)
+  end
 
   defp bucket_usage_percent(bucket, used, limit) when is_map(bucket) do
     float_value(
@@ -547,9 +555,7 @@ defmodule SymphonyElixirWeb.PrometheusMetrics do
 
   defp render_labels(labels) do
     rendered =
-      labels
-      |> Enum.map(fn {key, value} -> "#{key}=\"#{escape_label_value(value)}\"" end)
-      |> Enum.join(",")
+      Enum.map_join(labels, ",", fn {key, value} -> "#{key}=\"#{escape_label_value(value)}\"" end)
 
     "{#{rendered}}"
   end

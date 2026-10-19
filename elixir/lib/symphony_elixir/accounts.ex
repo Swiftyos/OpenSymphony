@@ -259,21 +259,25 @@ defmodule SymphonyElixir.Accounts do
 
     if accounts_settings.enabled do
       with {:ok, accounts} <- list(backend, settings) do
-        accounts = Enum.filter(accounts, &account_matches_host?(&1, worker_host))
-
-        cond do
-          accounts == [] and accounts_settings.allow_host_auth_fallback ->
-            {:ok, nil}
-
-          accounts == [] ->
-            {:error, unavailable_error(backend, [], "no configured #{backend} accounts")}
-
-          true ->
-            select_usable_account(backend, accounts, running, accounts_settings, settings)
-        end
+        accounts
+        |> Enum.filter(&account_matches_host?(&1, worker_host))
+        |> select_from_host_accounts(backend, running, accounts_settings, settings)
       end
     else
       {:ok, nil}
+    end
+  end
+
+  defp select_from_host_accounts(accounts, backend, running, accounts_settings, settings) do
+    cond do
+      accounts == [] and accounts_settings.allow_host_auth_fallback ->
+        {:ok, nil}
+
+      accounts == [] ->
+        {:error, unavailable_error(backend, [], "no configured #{backend} accounts")}
+
+      true ->
+        select_usable_account(backend, accounts, running, accounts_settings, settings)
     end
   end
 
@@ -768,16 +772,14 @@ defmodule SymphonyElixir.Accounts do
   end
 
   defp ensure_account_dirs(dir, "codex") do
-    with :ok <- mkdir_private(dir),
-         :ok <- mkdir_private(Path.join(dir, "codex_home")) do
-      :ok
+    with :ok <- mkdir_private(dir) do
+      mkdir_private(Path.join(dir, "codex_home"))
     end
   end
 
   defp ensure_account_dirs(dir, "claude") do
-    with :ok <- mkdir_private(dir),
-         :ok <- mkdir_private(Path.join(dir, "claude_config")) do
-      :ok
+    with :ok <- mkdir_private(dir) do
+      mkdir_private(Path.join(dir, "claude_config"))
     end
   end
 
@@ -805,24 +807,10 @@ defmodule SymphonyElixir.Accounts do
     command = Keyword.get(opts, :command) || "claude"
 
     token_result =
-      cond do
-        is_binary(token) and String.trim(token) != "" ->
-          {:ok, token}
-
-        true ->
-          command
-          |> run_provider(
-            ["setup-token"],
-            claude_login_env(),
-            opts
-            |> Keyword.put(:stream, true)
-            |> Keyword.put_new(:tty_capture, true)
-            |> Keyword.put(:transcript_path, Path.join(account.account_dir, "claude_setup_token.transcript"))
-          )
-          |> case do
-            {:ok, output} -> extract_claude_oauth_token(output)
-            {:error, reason} -> {:error, reason}
-          end
+      if is_binary(token) and String.trim(token) != "" do
+        {:ok, token}
+      else
+        setup_claude_token(account, command, opts)
       end
 
     case token_result do
@@ -838,6 +826,22 @@ defmodule SymphonyElixir.Accounts do
     end
   end
 
+  defp setup_claude_token(account, command, opts) do
+    command
+    |> run_provider(
+      ["setup-token"],
+      claude_login_env(),
+      opts
+      |> Keyword.put(:stream, true)
+      |> Keyword.put_new(:tty_capture, true)
+      |> Keyword.put(:transcript_path, Path.join(account.account_dir, "claude_setup_token.transcript"))
+    )
+    |> case do
+      {:ok, output} -> extract_claude_oauth_token(output)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   defp import_claude_account(id, opts, settings) do
     with {:ok, account} <-
            create_or_update(
@@ -846,9 +850,8 @@ defmodule SymphonyElixir.Accounts do
              Keyword.merge(opts, credential_kind: "claude_config"),
              settings
            ),
-         :ok <- import_claude_config_files(account, opts),
-         {:ok, account} <- get("claude", id, settings) do
-      {:ok, account}
+         :ok <- import_claude_config_files(account, opts) do
+      get("claude", id, settings)
     end
   end
 
@@ -952,18 +955,22 @@ defmodule SymphonyElixir.Accounts do
             run_provider_stream(executable, command_args ++ args, env, opts)
 
           true ->
-            case System.cmd(executable, command_args ++ args,
-                   env: env,
-                   stderr_to_stdout: true,
-                   into: Keyword.get(opts, :into, "")
-                 ) do
-              {output, 0} -> {:ok, IO.iodata_to_binary(output)}
-              {output, status} -> {:error, %{exit_status: status, output: IO.iodata_to_binary(output)}}
-            end
+            run_provider_cmd(executable, command_args ++ args, env, opts)
         end
     end
   rescue
     error -> {:error, error}
+  end
+
+  defp run_provider_cmd(executable, args, env, opts) do
+    case System.cmd(executable, args,
+           env: env,
+           stderr_to_stdout: true,
+           into: Keyword.get(opts, :into, "")
+         ) do
+      {output, 0} -> {:ok, IO.iodata_to_binary(output)}
+      {output, status} -> {:error, %{exit_status: status, output: IO.iodata_to_binary(output)}}
+    end
   end
 
   defp run_provider_tty_capture(executable, args, env, opts) do
@@ -1065,7 +1072,7 @@ defmodule SymphonyElixir.Accounts do
     end
   end
 
-  defp shell_join(parts), do: parts |> Enum.map(&shell_quote/1) |> Enum.join(" ")
+  defp shell_join(parts), do: Enum.map_join(parts, " ", &shell_quote/1)
 
   defp shell_quote(value) do
     "'" <> String.replace(to_string(value), "'", "'\"'\"'") <> "'"
@@ -1234,37 +1241,33 @@ defmodule SymphonyElixir.Accounts do
         if is_nil(reset_at) do
           {periods, rows}
         else
-          existing = Map.get(periods, bucket_name)
-
-          cond do
-            is_nil(existing) ->
-              {Map.put(periods, bucket_name, new_rate_limit_period(bucket_name, period_name, limit_id, bucket, reset_at, now)), rows}
-
-            Map.get(existing, "reset_at") != reset_at ->
-              row = usage_period_row(account, existing, bucket, reset_at, now)
-              {Map.put(periods, bucket_name, new_rate_limit_period(bucket_name, period_name, limit_id, bucket, reset_at, now)), [row | rows]}
-
-            true ->
-              {Map.put(periods, bucket_name, refresh_rate_limit_period(existing, limit_id, bucket, now)), rows}
-          end
+          entry = {bucket_name, period_name, bucket}
+          rotate_rate_limit_period({periods, rows}, entry, reset_at, limit_id, account, now)
         end
       end)
 
     {Map.put(state, "rate_limit_periods", next_periods), Enum.reverse(rows)}
   end
 
-  defp rate_limit_bucket_entries(rate_limits) when is_map(rate_limits) do
-    session_bucket =
-      Map.get(rate_limits, "session") ||
-        Map.get(rate_limits, :session) ||
-        Map.get(rate_limits, "primary") ||
-        Map.get(rate_limits, :primary)
+  defp rotate_rate_limit_period({periods, rows}, {bucket_name, period_name, bucket}, reset_at, limit_id, account, now) do
+    existing = Map.get(periods, bucket_name)
 
-    weekly_bucket =
-      Map.get(rate_limits, "weekly") ||
-        Map.get(rate_limits, :weekly) ||
-        Map.get(rate_limits, "secondary") ||
-        Map.get(rate_limits, :secondary)
+    cond do
+      is_nil(existing) ->
+        {Map.put(periods, bucket_name, new_rate_limit_period(bucket_name, period_name, limit_id, bucket, reset_at, now)), rows}
+
+      Map.get(existing, "reset_at") != reset_at ->
+        row = usage_period_row(account, existing, bucket, reset_at, now)
+        {Map.put(periods, bucket_name, new_rate_limit_period(bucket_name, period_name, limit_id, bucket, reset_at, now)), [row | rows]}
+
+      true ->
+        {Map.put(periods, bucket_name, refresh_rate_limit_period(existing, limit_id, bucket, now)), rows}
+    end
+  end
+
+  defp rate_limit_bucket_entries(rate_limits) when is_map(rate_limits) do
+    session_bucket = session_rate_limit_bucket(rate_limits)
+    weekly_bucket = weekly_rate_limit_bucket(rate_limits)
 
     [
       {"session", "session", session_bucket},
@@ -1277,6 +1280,20 @@ defmodule SymphonyElixir.Accounts do
   end
 
   defp rate_limit_bucket_entries(_rate_limits), do: []
+
+  defp session_rate_limit_bucket(rate_limits) do
+    Map.get(rate_limits, "session") ||
+      Map.get(rate_limits, :session) ||
+      Map.get(rate_limits, "primary") ||
+      Map.get(rate_limits, :primary)
+  end
+
+  defp weekly_rate_limit_bucket(rate_limits) do
+    Map.get(rate_limits, "weekly") ||
+      Map.get(rate_limits, :weekly) ||
+      Map.get(rate_limits, "secondary") ||
+      Map.get(rate_limits, :secondary)
+  end
 
   defp new_rate_limit_period(bucket_name, period_name, limit_id, bucket, reset_at, now) do
     %{
@@ -1339,10 +1356,7 @@ defmodule SymphonyElixir.Accounts do
     path = usage_periods_csv_path(account)
     write_header? = not File.regular?(path)
 
-    csv =
-      rows
-      |> Enum.map(&usage_period_csv_line/1)
-      |> Enum.join()
+    csv = Enum.map_join(rows, &usage_period_csv_line/1)
 
     contents =
       if write_header? do
@@ -1363,8 +1377,7 @@ defmodule SymphonyElixir.Accounts do
 
   defp usage_period_csv_line(row) do
     @usage_period_csv_header
-    |> Enum.map(fn field -> csv_escape(Map.get(row, field)) end)
-    |> Enum.join(",")
+    |> Enum.map_join(",", fn field -> csv_escape(Map.get(row, field)) end)
     |> Kernel.<>("\n")
   end
 
@@ -1463,17 +1476,8 @@ defmodule SymphonyElixir.Accounts do
   end
 
   defp exhausted_rate_limits?(rate_limits) when is_map(rate_limits) do
-    primary =
-      Map.get(rate_limits, "session") ||
-        Map.get(rate_limits, :session) ||
-        Map.get(rate_limits, "primary") ||
-        Map.get(rate_limits, :primary)
-
-    secondary =
-      Map.get(rate_limits, "weekly") ||
-        Map.get(rate_limits, :weekly) ||
-        Map.get(rate_limits, "secondary") ||
-        Map.get(rate_limits, :secondary)
+    primary = session_rate_limit_bucket(rate_limits)
+    secondary = weekly_rate_limit_bucket(rate_limits)
 
     credits = Map.get(rate_limits, "credits") || Map.get(rate_limits, :credits)
 
@@ -1494,17 +1498,8 @@ defmodule SymphonyElixir.Accounts do
   end
 
   defp limited_rate_limits?(rate_limits) when is_map(rate_limits) do
-    primary =
-      Map.get(rate_limits, "session") ||
-        Map.get(rate_limits, :session) ||
-        Map.get(rate_limits, "primary") ||
-        Map.get(rate_limits, :primary)
-
-    secondary =
-      Map.get(rate_limits, "weekly") ||
-        Map.get(rate_limits, :weekly) ||
-        Map.get(rate_limits, "secondary") ||
-        Map.get(rate_limits, :secondary)
+    primary = session_rate_limit_bucket(rate_limits)
+    secondary = weekly_rate_limit_bucket(rate_limits)
 
     low_remaining?(primary) or low_remaining?(secondary)
   end
@@ -1569,26 +1564,31 @@ defmodule SymphonyElixir.Accounts do
   defp bucket_reset_candidates(nil), do: []
 
   defp bucket_reset_candidates(bucket) when is_map(bucket) do
-    absolute =
-      Map.get(bucket, "reset_at") ||
-        Map.get(bucket, :reset_at) ||
-        Map.get(bucket, "resetAt") ||
-        Map.get(bucket, :resetAt) ||
-        Map.get(bucket, "resets_at") ||
-        Map.get(bucket, :resets_at) ||
-        Map.get(bucket, "resetsAt") ||
-        Map.get(bucket, :resetsAt)
-
-    relative =
-      Map.get(bucket, "reset_in_seconds") ||
-        Map.get(bucket, :reset_in_seconds) ||
-        Map.get(bucket, "resets_in_seconds") ||
-        Map.get(bucket, :resets_in_seconds) ||
-        Map.get(bucket, "reset_after_seconds") ||
-        Map.get(bucket, :reset_after_seconds)
-
-    [normalize_datetime_string(absolute), relative_reset(relative)]
+    [
+      normalize_datetime_string(bucket_absolute_reset_value(bucket)),
+      relative_reset(bucket_relative_reset_value(bucket))
+    ]
     |> Enum.reject(&is_nil/1)
+  end
+
+  defp bucket_absolute_reset_value(bucket) do
+    Map.get(bucket, "reset_at") ||
+      Map.get(bucket, :reset_at) ||
+      Map.get(bucket, "resetAt") ||
+      Map.get(bucket, :resetAt) ||
+      Map.get(bucket, "resets_at") ||
+      Map.get(bucket, :resets_at) ||
+      Map.get(bucket, "resetsAt") ||
+      Map.get(bucket, :resetsAt)
+  end
+
+  defp bucket_relative_reset_value(bucket) do
+    Map.get(bucket, "reset_in_seconds") ||
+      Map.get(bucket, :reset_in_seconds) ||
+      Map.get(bucket, "resets_in_seconds") ||
+      Map.get(bucket, :resets_in_seconds) ||
+      Map.get(bucket, "reset_after_seconds") ||
+      Map.get(bucket, :reset_after_seconds)
   end
 
   defp relative_reset(value) do
@@ -1617,10 +1617,14 @@ defmodule SymphonyElixir.Accounts do
         DateTime.to_iso8601(timestamp)
 
       _ ->
-        case Integer.parse(value) do
-          {unix_seconds, ""} -> normalize_datetime_string(unix_seconds)
-          _ -> if(value == "", do: nil, else: value)
-        end
+        normalize_unix_datetime_string(value)
+    end
+  end
+
+  defp normalize_unix_datetime_string(value) do
+    case Integer.parse(value) do
+      {unix_seconds, ""} -> normalize_datetime_string(unix_seconds)
+      _ -> if(value == "", do: nil, else: value)
     end
   end
 

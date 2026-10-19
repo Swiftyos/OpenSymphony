@@ -57,16 +57,20 @@ defmodule SymphonyElixir.OpenCode.Tooling do
             {:error, reason} -> raise File.Error, reason: reason, action: "read", path: exclude_path
           end
 
-        if String.contains?(existing, @git_exclude_entry) do
-          :ok
-        else
-          prefix = if existing == "" or String.ends_with?(existing, "\n"), do: existing, else: existing <> "\n"
-          File.write(exclude_path, prefix <> @git_exclude_entry <> "\n")
-        end
+        maybe_append_git_exclude_entry(exclude_path, existing)
     end
   rescue
     error in [File.Error] ->
       {:error, error}
+  end
+
+  defp maybe_append_git_exclude_entry(exclude_path, existing) do
+    if String.contains?(existing, @git_exclude_entry) do
+      :ok
+    else
+      prefix = if existing == "" or String.ends_with?(existing, "\n"), do: existing, else: existing <> "\n"
+      File.write(exclude_path, prefix <> @git_exclude_entry <> "\n")
+    end
   end
 
   defp git_exclude_path(workspace) do

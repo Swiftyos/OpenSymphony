@@ -44,16 +44,20 @@ defmodule SymphonyElixir.ClaudeCode.Tooling do
     script = remote_bootstrap_script(workspace, linear_enabled?)
 
     case SSH.run(worker_host, script, stderr_to_stdout: true, timeout: timeout) do
-      {:ok, {_output, 0}} -> :ok
-      {:ok, {output, status}} -> {:error, {:claude_tooling_failed, {:remote_bootstrap_failed, worker_host, status, output}}}
-      {:error, reason} -> {:error, {:claude_tooling_failed, reason}}
+      {:ok, {_output, 0}} ->
+        :ok
+
+      {:ok, {output, status}} ->
+        {:error, {:claude_tooling_failed, {:remote_bootstrap_failed, worker_host, status, output}}}
+
+      {:error, reason} ->
+        {:error, {:claude_tooling_failed, reason}}
     end
   end
 
   defp maybe_write_server(server_path, true) do
-    with :ok <- File.write(server_path, GraphqlTool.claude_mcp_server_source()),
-         :ok <- File.chmod(server_path, 0o755) do
-      :ok
+    with :ok <- File.write(server_path, GraphqlTool.claude_mcp_server_source()) do
+      File.chmod(server_path, 0o755)
     end
   end
 
@@ -72,24 +76,30 @@ defmodule SymphonyElixir.ClaudeCode.Tooling do
 
       exclude_path ->
         :ok = File.mkdir_p(Path.dirname(exclude_path))
+        existing = read_git_exclude!(exclude_path)
 
-        existing =
-          case File.read(exclude_path) do
-            {:ok, contents} -> contents
-            {:error, :enoent} -> ""
-            {:error, reason} -> raise File.Error, reason: reason, action: "read", path: exclude_path
-          end
-
-        if String.contains?(existing, @git_exclude_entry) do
-          :ok
-        else
-          prefix = if existing == "" or String.ends_with?(existing, "\n"), do: existing, else: existing <> "\n"
-          File.write(exclude_path, prefix <> @git_exclude_entry <> "\n")
-        end
+        maybe_append_git_exclude_entry(exclude_path, existing)
     end
   rescue
     error in [File.Error] ->
       {:error, error}
+  end
+
+  defp maybe_append_git_exclude_entry(exclude_path, existing) do
+    if String.contains?(existing, @git_exclude_entry) do
+      :ok
+    else
+      prefix = if existing == "" or String.ends_with?(existing, "\n"), do: existing, else: existing <> "\n"
+      File.write(exclude_path, prefix <> @git_exclude_entry <> "\n")
+    end
+  end
+
+  defp read_git_exclude!(exclude_path) do
+    case File.read(exclude_path) do
+      {:ok, contents} -> contents
+      {:error, :enoent} -> ""
+      {:error, reason} -> raise File.Error, reason: reason, action: "read", path: exclude_path
+    end
   end
 
   defp git_exclude_path(workspace) do

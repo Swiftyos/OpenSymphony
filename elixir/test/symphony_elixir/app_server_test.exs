@@ -185,10 +185,7 @@ defmodule SymphonyElixir.AppServerTest do
 
           :ok =
             FakeOpenCodeState.wait_until(state, fn current ->
-              Enum.any?(current.permission_replies, fn
-                {^session_id, "perm-1", %{"response" => "once"}} -> true
-                _ -> false
-              end)
+              Enum.any?(current.permission_replies, &permission_reply?(&1, session_id, "perm-1", "once"))
             end)
 
           json(conn, 200, %{
@@ -209,10 +206,7 @@ defmodule SymphonyElixir.AppServerTest do
 
           :ok =
             FakeOpenCodeState.wait_until(state, fn current ->
-              Enum.any?(current.permission_replies, fn
-                {^session_id, "perm-2", %{"response" => "reject"}} -> true
-                _ -> false
-              end)
+              Enum.any?(current.permission_replies, &permission_reply?(&1, session_id, "perm-2", "reject"))
             end)
 
           json(conn, 200, %{
@@ -232,10 +226,7 @@ defmodule SymphonyElixir.AppServerTest do
 
           :ok =
             FakeOpenCodeState.wait_until(state, fn current ->
-              Enum.any?(current.question_rejections, fn
-                {"question-1", %{}} -> true
-                _ -> false
-              end)
+              Enum.any?(current.question_rejections, &question_one_rejection?/1)
             end)
 
           Process.sleep(1_000)
@@ -312,6 +303,14 @@ defmodule SymphonyElixir.AppServerTest do
       "event: message\n" <>
         "data: " <> Jason.encode!(%{"payload" => %{"type" => type, "properties" => properties}}) <> "\n\n"
     end
+
+    defp permission_reply?({session_id, permission_id, %{"response" => response}}, session_id, permission_id, response),
+      do: true
+
+    defp permission_reply?(_reply, _session_id, _permission_id, _response), do: false
+
+    defp question_one_rejection?({"question-1", %{}}), do: true
+    defp question_one_rejection?(_rejection), do: false
 
     defp state_test_pid(state), do: Agent.get(state, & &1.test_pid)
   end
@@ -427,9 +426,18 @@ defmodule SymphonyElixir.AppServerTest do
       assert_receive {:agent_message, %{event: :turn_started, session_id: "session-test"}}, 1_000
       assert_receive {:agent_message, %{event: "session.status", payload: %{"payload" => %{"type" => "session.status"}}}}, 1_000
       assert_receive {:agent_message, %{event: "message.part.delta"}}, 1_000
-      assert_receive {:agent_message, %{event: "message.part.updated", usage: %{input: 7, output: 2, reasoning: 1, total: 10}}}, 1_000
-      assert_receive {:agent_message, %{event: "message.updated", usage: %{input: 12, output: 4, reasoning: 3, total: 19}}}, 1_000
-      assert_receive {:agent_message, %{event: :turn_completed, usage: %{input: 12, output: 4, reasoning: 3, total: 19}}}, 1_000
+
+      assert_receive {:agent_message, %{event: "message.part.updated", usage: %{input: 7, output: 2, reasoning: 1, total: 10}}},
+                     1_000
+
+      assert_receive {:agent_message, %{event: "message.updated", usage: %{input: 12, output: 4, reasoning: 3, total: 19}}},
+                     1_000
+
+      assert_receive {
+                       :agent_message,
+                       %{event: :turn_completed, usage: %{input: 12, output: 4, reasoning: 3, total: 19}}
+                     },
+                     1_000
     after
       File.rm_rf(test_root)
     end
@@ -661,7 +669,10 @@ defmodule SymphonyElixir.AppServerTest do
       assert_receive {:agent_message, %{event: :turn_started, session_id: "session-test"}}, 1_000
       assert_receive {:agent_message, %{event: "message.part.delta"}}, 1_000
 
-      assert_receive {:agent_message, %{event: :turn_ended_with_error, reason: %{kind: :message_post_timeout, message: ^message}}},
+      assert_receive {
+                       :agent_message,
+                       %{event: :turn_ended_with_error, reason: %{kind: :message_post_timeout, message: ^message}}
+                     },
                      1_000
     after
       File.rm_rf(test_root)

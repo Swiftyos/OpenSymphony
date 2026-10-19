@@ -90,16 +90,20 @@ defmodule SymphonyElixir.CLI do
 
       with :ok <- maybe_set_logs_root(opts, deps),
            :ok <- validate_config(expanded_path, deps) do
-        case deps.ensure_all_started.() do
-          {:ok, _started_apps} ->
-            :ok
-
-          {:error, reason} ->
-            {:error, "Failed to start Symphony with config #{expanded_path}: #{inspect(reason)}"}
-        end
+        ensure_started(expanded_path, deps)
       end
     else
       {:error, "Config file not found: #{expanded_path}"}
+    end
+  end
+
+  defp ensure_started(expanded_path, deps) do
+    case deps.ensure_all_started.() do
+      {:ok, _started_apps} ->
+        :ok
+
+      {:error, reason} ->
+        {:error, "Failed to start Symphony with config #{expanded_path}: #{inspect(reason)}"}
     end
   end
 
@@ -348,25 +352,33 @@ defmodule SymphonyElixir.CLI do
         {:ok, opts |> Keyword.delete(:token_stdin) |> Keyword.put(:token, stdin_token())}
 
       token_file = Keyword.get(opts, :token_file) ->
-        case File.read(Path.expand(token_file)) do
-          {:ok, token} ->
-            {:ok, opts |> Keyword.delete(:token_file) |> Keyword.put(:token, String.trim(token))}
-
-          {:error, reason} ->
-            {:error, "Unable to read token file #{Path.expand(token_file)}: #{:file.format_error(reason)}"}
-        end
+        token_opts_from_file(opts, token_file)
 
       token_env = Keyword.get(opts, :token_env) ->
-        case System.get_env(token_env) do
-          token when is_binary(token) and token != "" ->
-            {:ok, opts |> Keyword.delete(:token_env) |> Keyword.put(:token, String.trim(token))}
-
-          _ ->
-            {:error, "Environment variable #{token_env} is not set or is empty"}
-        end
+        token_opts_from_env(opts, token_env)
 
       true ->
         {:ok, opts}
+    end
+  end
+
+  defp token_opts_from_file(opts, token_file) do
+    case File.read(Path.expand(token_file)) do
+      {:ok, token} ->
+        {:ok, opts |> Keyword.delete(:token_file) |> Keyword.put(:token, String.trim(token))}
+
+      {:error, reason} ->
+        {:error, "Unable to read token file #{Path.expand(token_file)}: #{:file.format_error(reason)}"}
+    end
+  end
+
+  defp token_opts_from_env(opts, token_env) do
+    case System.get_env(token_env) do
+      token when is_binary(token) and token != "" ->
+        {:ok, opts |> Keyword.delete(:token_env) |> Keyword.put(:token, String.trim(token))}
+
+      _ ->
+        {:error, "Environment variable #{token_env} is not set or is empty"}
     end
   end
 

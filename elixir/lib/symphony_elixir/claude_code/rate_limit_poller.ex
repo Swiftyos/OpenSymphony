@@ -10,8 +10,8 @@ defmodule SymphonyElixir.ClaudeCode.RateLimitPoller do
 
   require Logger
 
-  alias SymphonyElixir.ClaudeCode.RateLimitProbe
   alias SymphonyElixir.{Accounts, Config}
+  alias SymphonyElixir.ClaudeCode.RateLimitProbe
 
   @startup_delay_ms 5_000
   @idle_reschedule_ms 300_000
@@ -73,18 +73,16 @@ defmodule SymphonyElixir.ClaudeCode.RateLimitPoller do
   end
 
   defp probe_account(account, state, accounts_settings) do
-    try do
-      case state.probe_fun.(account) do
-        {:ok, rate_limits} ->
-          Accounts.record_rate_limits(account, rate_limits, settings_struct(accounts_settings))
+    case state.probe_fun.(account) do
+      {:ok, rate_limits} ->
+        Accounts.record_rate_limits(account, rate_limits, settings_struct(accounts_settings))
 
-        {:error, _reason} ->
-          :ok
-      end
-    rescue
-      error ->
-        Logger.warning("RateLimitPoller probe crashed for #{account_label(account)}: #{Exception.message(error)}")
+      {:error, _reason} ->
+        :ok
     end
+  rescue
+    error ->
+      Logger.warning("RateLimitPoller probe crashed for #{account_label(account)}: #{Exception.message(error)}")
   end
 
   defp probeable?(%{enabled: false}), do: false

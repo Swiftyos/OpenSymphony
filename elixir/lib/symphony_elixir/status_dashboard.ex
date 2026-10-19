@@ -405,8 +405,7 @@ defmodule SymphonyElixir.StatusDashboard do
         routes ->
           {"Projects",
            routes
-           |> Enum.map(&linear_project_url(&1.slug))
-           |> Enum.join(", ")
+           |> Enum.map_join(", ", &linear_project_url(&1.slug))
            |> colorize(@ansi_cyan)}
       end
 

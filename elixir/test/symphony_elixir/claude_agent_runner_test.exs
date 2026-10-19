@@ -56,16 +56,32 @@ defmodule SymphonyElixir.ClaudeAgentRunnerTest do
       assert_receive {:issue_state_fetch, 1}, 1_000
       assert_receive {:issue_state_fetch, 2}, 1_000
 
-      assert_receive {:agent_worker_update, "issue-claude-runner", %{event: :turn_started, timestamp: %DateTime{}, session_id: session_id}},
+      assert_receive {
+                       :agent_worker_update,
+                       "issue-claude-runner",
+                       %{event: :turn_started, timestamp: %DateTime{}, session_id: session_id}
+                     },
                      1_000
 
-      assert_receive {:agent_worker_update, "issue-claude-runner", %{event: :turn_completed, timestamp: %DateTime{}, session_id: ^session_id}},
+      assert_receive {
+                       :agent_worker_update,
+                       "issue-claude-runner",
+                       %{event: :turn_completed, timestamp: %DateTime{}, session_id: ^session_id}
+                     },
                      1_000
 
-      assert_receive {:agent_worker_update, "issue-claude-runner", %{event: :turn_started, timestamp: %DateTime{}, session_id: ^session_id}},
+      assert_receive {
+                       :agent_worker_update,
+                       "issue-claude-runner",
+                       %{event: :turn_started, timestamp: %DateTime{}, session_id: ^session_id}
+                     },
                      1_000
 
-      assert_receive {:agent_worker_update, "issue-claude-runner", %{event: :turn_completed, timestamp: %DateTime{}, session_id: ^session_id}},
+      assert_receive {
+                       :agent_worker_update,
+                       "issue-claude-runner",
+                       %{event: :turn_completed, timestamp: %DateTime{}, session_id: ^session_id}
+                     },
                      1_000
 
       trace = File.read!(trace_file)

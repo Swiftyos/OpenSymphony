@@ -4,8 +4,8 @@ defmodule SymphonyElixir.Workspace do
   """
 
   require Logger
-  alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.{Config, IssueConfig, PathSafety, ProjectWorkflow, Sandbox, SSH}
+  alias SymphonyElixir.Config.Schema
 
   @remote_workspace_marker "__SYMPHONY_WORKSPACE__"
   @repo_cache_dir ".symphony-cache"
@@ -167,32 +167,49 @@ defmodule SymphonyElixir.Workspace do
     |> Enum.reduce_while(:ok, fn route, :ok ->
       case Map.get(route, :repo) do
         repo when is_binary(repo) and repo != "" ->
-          repo_source = Config.repo_source(repo)
-          workspace_root = Config.workspace_root_for_route(route, settings)
-          target_branch = Map.get(route, :default_branch)
-          issue_context = route_issue_context(route)
-
-          Enum.reduce_while(worker_hosts, :ok, fn worker_host, :ok ->
-            case ensure_repo_cache(workspace_root, repo_source, target_branch, issue_context, worker_host, settings, force: true) do
-              :ok ->
-                case validate_project_route_workflow(route, workspace_root, repo_source, issue_context, worker_host, settings) do
-                  :ok -> {:cont, :ok}
-                  {:error, reason} -> {:halt, {:error, reason}}
-                end
-
-              {:error, reason} ->
-                {:halt, {:error, reason}}
-            end
-          end)
-          |> case do
-            :ok -> {:cont, :ok}
-            {:error, reason} -> {:halt, {:error, reason}}
-          end
+          route
+          |> preflight_route_repo_setup(repo, worker_hosts, settings)
+          |> reduce_while_result()
 
         _ ->
           {:cont, :ok}
       end
     end)
+  end
+
+  defp reduce_while_result(:ok), do: {:cont, :ok}
+  defp reduce_while_result({:error, reason}), do: {:halt, {:error, reason}}
+
+  defp preflight_route_repo_setup(route, repo, worker_hosts, settings) do
+    repo_source = Config.repo_source(repo)
+    workspace_root = Config.workspace_root_for_route(route, settings)
+    target_branch = Map.get(route, :default_branch)
+    issue_context = route_issue_context(route)
+
+    Enum.reduce_while(worker_hosts, :ok, fn worker_host, :ok ->
+      route_context = {route, workspace_root, repo_source, target_branch, issue_context}
+
+      route_context
+      |> preflight_route_worker_host(worker_host, settings)
+      |> reduce_while_result()
+    end)
+  end
+
+  defp preflight_route_worker_host(route_context, worker_host, settings) do
+    {route, workspace_root, repo_source, target_branch, issue_context} = route_context
+
+    with :ok <-
+           ensure_repo_cache(
+             workspace_root,
+             repo_source,
+             target_branch,
+             issue_context,
+             worker_host,
+             settings,
+             force: true
+           ) do
+      validate_project_route_workflow(route, workspace_root, repo_source, issue_context, worker_host, settings)
+    end
   end
 
   @spec preflight_repo_setup!(Schema.t()) :: :ok
@@ -666,7 +683,16 @@ defmodule SymphonyElixir.Workspace do
     with :ok <- ensure_repo_cache(workspace_root, repo_source, target_branch, issue_context, worker_host, settings) do
       # Clone under the cache lock so a concurrent cache sync cannot move refs mid-clone.
       with_repo_cache_lock(lock_key, fn ->
-        add_workspace_worktree(workspace, cache_repo, branch_name, target_branch, repo_source, issue_context, worker_host, timeout_ms)
+        add_workspace_worktree(
+          workspace,
+          cache_repo,
+          branch_name,
+          target_branch,
+          repo_source,
+          issue_context,
+          worker_host,
+          timeout_ms
+        )
       end)
     end
   end
@@ -683,7 +709,15 @@ defmodule SymphonyElixir.Workspace do
       if not force? and repo_cache_sync_fresh?(lock_key) do
         :ok
       else
-        sync_local_repo_cache(workspace_root, repo_source, target_branch, issue_context, cache_repo, timeout_ms, lock_key)
+        sync_local_repo_cache(
+          workspace_root,
+          repo_source,
+          target_branch,
+          issue_context,
+          cache_repo,
+          timeout_ms,
+          lock_key
+        )
       end
     end)
   end
@@ -699,7 +733,16 @@ defmodule SymphonyElixir.Workspace do
       if not force? and repo_cache_sync_fresh?(lock_key) do
         :ok
       else
-        sync_remote_repo_cache(workspace_root, repo_source, target_branch, issue_context, worker_host, cache_repo, timeout_ms, lock_key)
+        sync_remote_repo_cache(
+          workspace_root,
+          repo_source,
+          target_branch,
+          issue_context,
+          worker_host,
+          cache_repo,
+          timeout_ms,
+          lock_key
+        )
       end
     end)
   end
@@ -740,7 +783,9 @@ defmodule SymphonyElixir.Workspace do
        ) do
     Logger.info("Preparing workspace repo cache #{issue_log_context(issue_context)} workspace_root=#{workspace_root} repo=#{repo_source.display} cache_repo=#{cache_repo} worker_host=#{worker_host}")
 
-    case run_remote_command(worker_host, build_remote_repo_cache_sync_script(cache_repo, repo_source, target_branch), timeout_ms) do
+    sync_script = build_remote_repo_cache_sync_script(cache_repo, repo_source, target_branch)
+
+    case run_remote_command(worker_host, sync_script, timeout_ms) do
       {:ok, {_output, 0}} ->
         mark_repo_cache_synced(lock_key)
         :ok
@@ -859,7 +904,9 @@ defmodule SymphonyElixir.Workspace do
 
   defp add_workspace_worktree(workspace, cache_repo, branch_name, target_branch, repo_source, issue_context, worker_host, timeout_ms)
        when is_binary(worker_host) do
-    case run_remote_command(worker_host, build_remote_worktree_add_script(cache_repo, workspace, branch_name, target_branch), timeout_ms) do
+    add_script = build_remote_worktree_add_script(cache_repo, workspace, branch_name, target_branch)
+
+    case run_remote_command(worker_host, add_script, timeout_ms) do
       {:ok, {_output, 0}} ->
         :ok
 
@@ -912,11 +959,20 @@ defmodule SymphonyElixir.Workspace do
   defp maybe_remove_workspace_via_git_worktree(workspace, worker_host, timeout_ms)
        when is_binary(worker_host) do
     case run_remote_command(worker_host, build_remote_worktree_remove_script(workspace), timeout_ms) do
-      {:ok, {_output, 0}} -> :ok
-      {:ok, {_output, 10}} -> :fallback
-      {:ok, {output, status}} -> {:error, {:workspace_remove_failed, worker_host, status, output}}
-      {:error, {:workspace_hook_timeout, "remote_command", _timeout_ms}} -> {:error, {:workspace_remove_timeout, worker_host, timeout_ms}}
-      {:error, reason} -> {:error, reason}
+      {:ok, {_output, 0}} ->
+        :ok
+
+      {:ok, {_output, 10}} ->
+        :fallback
+
+      {:ok, {output, status}} ->
+        {:error, {:workspace_remove_failed, worker_host, status, output}}
+
+      {:error, {:workspace_hook_timeout, "remote_command", _timeout_ms}} ->
+        {:error, {:workspace_remove_timeout, worker_host, timeout_ms}}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -1298,13 +1354,17 @@ defmodule SymphonyElixir.Workspace do
 
       _ ->
         if Config.global_mode?() and is_map(issue_or_identifier) do
-          case IssueConfig.resolve(issue_or_identifier) do
-            {:ok, %IssueConfig{settings: settings}} -> {:ok, settings}
-            {:error, reason} -> {:error, reason}
-          end
+          resolve_issue_settings(issue_or_identifier)
         else
           {:ok, Config.settings!()}
         end
+    end
+  end
+
+  defp resolve_issue_settings(issue_or_identifier) do
+    case IssueConfig.resolve(issue_or_identifier) do
+      {:ok, %IssueConfig{settings: settings}} -> {:ok, settings}
+      {:error, reason} -> {:error, reason}
     end
   end
 

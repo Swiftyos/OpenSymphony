@@ -23,7 +23,10 @@ config :symphony_elixir,
   workflow_file_path: bootstrap_workflow
 
 # Keep the usage ledger in memory during tests; never touch ~/.symphony.
-config :symphony_elixir, usage_ledger_path: nil, factory_controls_path: nil, secret_key_base_path: nil,
+config :symphony_elixir,
+  usage_ledger_path: nil,
+  factory_controls_path: nil,
+  secret_key_base_path: nil,
   users_path: nil,
   factories_dir: nil,
   # ConnTest requests use host "www.example.com"; the guard is tested explicitly.
