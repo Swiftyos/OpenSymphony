@@ -83,9 +83,7 @@ defmodule SymphonyElixir.ClaudeCode.RateLimitPoller do
       end
     rescue
       error ->
-        Logger.warning(
-          "RateLimitPoller probe crashed for #{account_label(account)}: #{Exception.message(error)}"
-        )
+        Logger.warning("RateLimitPoller probe crashed for #{account_label(account)}: #{Exception.message(error)}")
     end
   end
 

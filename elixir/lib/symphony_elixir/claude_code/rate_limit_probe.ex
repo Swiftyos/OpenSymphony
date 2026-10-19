@@ -40,9 +40,7 @@ defmodule SymphonyElixir.ClaudeCode.RateLimitProbe do
             rate_limits_from_response(response_headers, account)
 
           {:ok, %{status: status, headers: response_headers} = response} ->
-            Logger.warning(
-              "Anthropic rate-limit probe for #{account_label(account)} returned HTTP #{status}: #{summarize_body(Map.get(response, :body))}"
-            )
+            Logger.warning("Anthropic rate-limit probe for #{account_label(account)} returned HTTP #{status}: #{summarize_body(Map.get(response, :body))}")
 
             case rate_limits_from_response(response_headers, account) do
               {:ok, rate_limits} -> {:ok, rate_limits}
@@ -50,9 +48,7 @@ defmodule SymphonyElixir.ClaudeCode.RateLimitProbe do
             end
 
           {:error, reason} ->
-            Logger.warning(
-              "Anthropic rate-limit probe for #{account_label(account)} failed: #{inspect(reason)}"
-            )
+            Logger.warning("Anthropic rate-limit probe for #{account_label(account)} failed: #{inspect(reason)}")
 
             {:error, reason}
         end

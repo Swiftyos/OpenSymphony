@@ -8,10 +8,10 @@ defmodule SymphonyElixir.ClaudeCode.RateLimitPollerTest do
     store_root = temp_accounts_root!("poller-record")
     enable_probe_in_workflow!(store_root)
 
-    {:ok, _account_a} = Accounts.create_or_update("claude", "alpha", [email: "alpha@example.com"])
-    {:ok, _account_b} = Accounts.create_or_update("claude", "beta", [email: "beta@example.com"])
+    {:ok, _account_a} = Accounts.create_or_update("claude", "alpha", email: "alpha@example.com")
+    {:ok, _account_b} = Accounts.create_or_update("claude", "beta", email: "beta@example.com")
     {:ok, paused} = Accounts.create_or_update("claude", "paused", [])
-    {:ok, _} = Accounts.pause("claude", paused.id, [reason: "hold"])
+    {:ok, _} = Accounts.pause("claude", paused.id, reason: "hold")
 
     parent = self()
 
@@ -33,9 +33,7 @@ defmodule SymphonyElixir.ClaudeCode.RateLimitPollerTest do
     end
 
     pid =
-      start_supervised!({RateLimitPoller,
-       name: :"rate_limit_poller_#{System.unique_integer([:positive])}",
-       probe_fun: probe_fun})
+      start_supervised!({RateLimitPoller, name: :"rate_limit_poller_#{System.unique_integer([:positive])}", probe_fun: probe_fun})
 
     RateLimitPoller.poll_now(pid)
     ensure_poll_completed(pid)
@@ -55,9 +53,7 @@ defmodule SymphonyElixir.ClaudeCode.RateLimitPollerTest do
     probe_fun = fn _account -> flunk("probe should not run when accounts disabled") end
 
     pid =
-      start_supervised!({RateLimitPoller,
-       name: :"rate_limit_poller_#{System.unique_integer([:positive])}",
-       probe_fun: probe_fun})
+      start_supervised!({RateLimitPoller, name: :"rate_limit_poller_#{System.unique_integer([:positive])}", probe_fun: probe_fun})
 
     RateLimitPoller.poll_now(pid)
     ensure_poll_completed(pid)

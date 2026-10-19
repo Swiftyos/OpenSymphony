@@ -43,6 +43,7 @@ defmodule SymphonyElixir.GrafanaDashboardTest do
       refute String.contains?(target["expr"], "user.account_id"),
              "claude token query should not reference user.account_id — it's Anthropic's OAuth id, not Symphony's account_id"
     end
+
     assert weekly_panel["targets"] |> Enum.any?(&String.contains?(&1["expr"], "symphony_account_usage_period_usage_percent"))
   end
 end
