@@ -656,6 +656,11 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `tracker.project_slug`: string, required when `tracker.kind=linear`
 - `tracker.active_states`: list of strings, default `["Todo", "In Progress"]`
 - `tracker.terminal_states`: list of strings, default `["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]`
+- `tracker.stage_label_prefix` (extension): string, default `factory`; labels named
+  `<prefix>/<stage>` (or children of a `<prefix>` label group) set the issue's factory stage
+- `tracker.paused_stages` (extension): list of stage names, default `["blocked", "review"]`;
+  issues in these stages are not dispatched even when their state is active
+- `sandbox` (extension): optional per-workspace container isolation (`kind: none | docker`)
 - `polling.interval_ms`: integer, default `30000`
 - `workspace.root`: path, default `<system-temp>/symphony_workspaces`
 - `worker.ssh_hosts` (extension): list of SSH host strings, optional; when omitted, work runs
@@ -806,6 +811,7 @@ An issue is dispatch-eligible only if all are true:
 
 - It has `id`, `identifier`, `title`, and `state`.
 - Its state is in `active_states` and not in `terminal_states`.
+- Its stage label (extension) is not in `paused_stages`.
 - It is not already in `running`.
 - It is not already in `claimed`.
 - Global concurrency slots are available.

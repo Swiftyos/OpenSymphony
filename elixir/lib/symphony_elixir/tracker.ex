@@ -10,6 +10,7 @@ defmodule SymphonyElixir.Tracker do
   @callback fetch_issue_states_by_ids([String.t()]) :: {:ok, [term()]} | {:error, term()}
   @callback create_comment(String.t(), String.t()) :: :ok | {:error, term()}
   @callback update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
+  @callback set_stage(String.t(), String.t(), String.t() | nil) :: :ok | {:error, term()}
 
   @spec fetch_candidate_issues() :: {:ok, [term()]} | {:error, term()}
   def fetch_candidate_issues do
@@ -34,6 +35,15 @@ defmodule SymphonyElixir.Tracker do
   @spec update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
   def update_issue_state(issue_id, state_name) do
     adapter().update_issue_state(issue_id, state_name)
+  end
+
+  @doc """
+  Moves an issue to `state_name` and makes `stage` its only factory stage label
+  (`nil` removes stage labels).
+  """
+  @spec set_stage(String.t(), String.t(), String.t() | nil) :: :ok | {:error, term()}
+  def set_stage(issue_id, state_name, stage) do
+    adapter().set_stage(issue_id, state_name, stage)
   end
 
   @spec adapter() :: module()

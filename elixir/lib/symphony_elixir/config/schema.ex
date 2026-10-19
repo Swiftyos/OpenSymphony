@@ -99,6 +99,8 @@ defmodule SymphonyElixir.Config.Schema do
       field(:assignee, :string)
       field(:active_states, {:array, :string}, default: ["Todo", "In Progress"])
       field(:terminal_states, {:array, :string}, default: ["Backlog", "Closed", "Cancelled", "Canceled", "Duplicate", "Done"])
+      field(:stage_label_prefix, :string, default: "factory")
+      field(:paused_stages, {:array, :string}, default: ["blocked", "review"])
       embeds_many(:projects, TrackerProject, on_replace: :delete)
     end
 
@@ -107,10 +109,12 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:kind, :endpoint, :api_key, :project_slug, :assignee, :active_states, :terminal_states],
+        [:kind, :endpoint, :api_key, :project_slug, :assignee, :active_states, :terminal_states, :stage_label_prefix, :paused_stages],
         empty_values: []
       )
       |> update_change(:kind, &Schema.normalize_optional_string/1)
+      |> update_change(:stage_label_prefix, &Schema.normalize_optional_string/1)
+      |> validate_required([:stage_label_prefix])
       |> update_change(:project_slug, &Schema.normalize_optional_string/1)
       |> update_change(:assignee, &Schema.normalize_optional_string/1)
       |> cast_embed(:projects, with: &TrackerProject.changeset/2)
@@ -169,6 +173,35 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(attrs, [:ssh_hosts, :max_concurrent_agents_per_host], empty_values: [])
       |> validate_number(:max_concurrent_agents_per_host, greater_than: 0)
+    end
+  end
+
+  defmodule Sandbox do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:kind, :string, default: "none")
+      field(:command, :string, default: "docker")
+      field(:image, :string)
+      field(:network, :string)
+      field(:mounts, {:array, :string}, default: [])
+      field(:env, {:array, :string}, default: [])
+      field(:run_args, {:array, :string}, default: [])
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:kind, :command, :image, :network, :mounts, :env, :run_args], empty_values: [])
+      |> update_change(:image, &SymphonyElixir.Config.Schema.normalize_optional_string/1)
+      |> update_change(:network, &SymphonyElixir.Config.Schema.normalize_optional_string/1)
+      |> validate_inclusion(:kind, ["none", "docker"])
+      |> then(fn changeset ->
+        if get_field(changeset, :kind) == "docker", do: validate_required(changeset, [:image]), else: changeset
+      end)
     end
   end
 
@@ -602,12 +635,15 @@ defmodule SymphonyElixir.Config.Schema do
     embedded_schema do
       field(:port, :integer)
       field(:host, :string, default: "127.0.0.1")
+      # Dashboard controls that change the factory (stage settings, issue moves).
+      # nil = enabled only when bound to a loopback host, since the dashboard has no auth.
+      field(:controls, :boolean)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:port, :host], empty_values: [])
+      |> cast(attrs, [:port, :host, :controls], empty_values: [])
       |> validate_number(:port, greater_than_or_equal_to: 0)
     end
   end
@@ -659,11 +695,15 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   embedded_schema do
+    # USD per million tokens, keyed by "<backend>/<model>" or "<backend>":
+    # %{"claude" => %{"input_per_mtok" => 3.0, "output_per_mtok" => 15.0}}
+    field(:pricing, :map, default: %{})
     embeds_one(:tracker, Tracker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:polling, Polling, on_replace: :update, defaults_to_struct: true)
     embeds_one(:workspace, Workspace, on_replace: :update, defaults_to_struct: true)
     embeds_one(:worker, Worker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:providers, Providers, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:sandbox, Sandbox, on_replace: :update, defaults_to_struct: true)
     embeds_one(:accounts, Accounts, on_replace: :update, defaults_to_struct: true)
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
@@ -785,12 +825,14 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp changeset(attrs) do
     %__MODULE__{}
-    |> cast(attrs, [])
+    |> cast(attrs, [:pricing])
+    |> validate_change(:pricing, &validate_pricing/2)
     |> cast_embed(:tracker, with: &Tracker.changeset/2)
     |> cast_embed(:polling, with: &Polling.changeset/2)
     |> cast_embed(:workspace, with: &Workspace.changeset/2)
     |> cast_embed(:worker, with: &Worker.changeset/2)
     |> cast_embed(:providers, with: &Providers.changeset/2)
+    |> cast_embed(:sandbox, with: &Sandbox.changeset/2)
     |> cast_embed(:accounts, with: &Accounts.changeset/2)
     |> cast_embed(:agent, with: &Agent.changeset/2)
     |> cast_embed(:codex, with: &Codex.changeset/2)
@@ -802,6 +844,20 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:server, with: &Server.changeset/2)
     |> cast_embed(:instance, with: &Instance.changeset/2)
     |> cast_embed(:log, with: &Log.changeset/2)
+  end
+
+  defp validate_pricing(:pricing, pricing) do
+    Enum.flat_map(pricing, fn
+      {key, %{} = rates} ->
+        if Enum.all?(rates, fn {rate_key, value} -> rate_key in ["input_per_mtok", "output_per_mtok"] and is_number(value) and value >= 0 end) do
+          []
+        else
+          [pricing: "#{key} must only set non-negative input_per_mtok / output_per_mtok numbers"]
+        end
+
+      {key, _rates} ->
+        [pricing: "#{key} must be a map of input_per_mtok / output_per_mtok"]
+    end)
   end
 
   defp finalize_settings(settings, raw_config, opts) do

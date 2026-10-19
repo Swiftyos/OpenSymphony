@@ -5,7 +5,7 @@ defmodule SymphonyElixir.Workspace do
 
   require Logger
   alias SymphonyElixir.Config.Schema
-  alias SymphonyElixir.{Config, IssueConfig, PathSafety, ProjectWorkflow, SSH}
+  alias SymphonyElixir.{Config, IssueConfig, PathSafety, ProjectWorkflow, Sandbox, SSH}
 
   @remote_workspace_marker "__SYMPHONY_WORKSPACE__"
   @repo_cache_dir ".symphony-cache"
@@ -26,8 +26,8 @@ defmodule SymphonyElixir.Workspace do
            {:ok, workspace} <- workspace_path_for_issue(issue_context, safe_id, worker_host, settings),
            :ok <- validate_workspace_path(workspace, worker_host, settings),
            {:ok, workspace, created?} <- ensure_workspace(workspace, worker_host, settings),
-           :ok <- maybe_bootstrap_workspace_repo(workspace, issue_context, created?, worker_host, settings),
-           :ok <- maybe_run_after_create_hook(workspace, issue_context, created?, worker_host, settings) do
+           {:ok, created?} <- maybe_recreate_incomplete_workspace(workspace, issue_context, created?, worker_host, settings),
+           :ok <- initialize_new_workspace(workspace, issue_context, created?, worker_host, settings) do
         {:ok, workspace}
       end
     rescue
@@ -271,6 +271,63 @@ defmodule SymphonyElixir.Workspace do
     String.replace(identifier || "issue", ~r/[^a-zA-Z0-9._-]/, "_")
   end
 
+  # A new workspace that fails to bootstrap must not survive: the next attempt
+  # would see an existing directory, skip bootstrap and after_create, and run the
+  # agent in an empty or half-installed checkout.
+  defp initialize_new_workspace(workspace, issue_context, created?, worker_host, settings) do
+    with :ok <- maybe_bootstrap_workspace_repo(workspace, issue_context, created?, worker_host, settings),
+         :ok <- maybe_run_after_create_hook(workspace, issue_context, created?, worker_host, settings) do
+      :ok
+    else
+      {:error, reason} ->
+        if created? do
+          Logger.warning("Discarding incomplete workspace #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=#{worker_host_for_log(worker_host)}")
+          discard_workspace(workspace, worker_host, settings)
+        end
+
+        {:error, reason}
+    end
+  end
+
+  defp maybe_recreate_incomplete_workspace(_workspace, _issue_context, true, _worker_host, _settings), do: {:ok, true}
+
+  defp maybe_recreate_incomplete_workspace(workspace, issue_context, false, worker_host, settings) do
+    repo_configured? = match?(%{display: _}, Config.project_repo_source_for_issue(issue_context, settings))
+
+    if repo_configured? and not workspace_git_repo?(workspace, worker_host, settings) do
+      Logger.warning("Recreating workspace without a git checkout #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=#{worker_host_for_log(worker_host)}")
+      discard_workspace(workspace, worker_host, settings)
+
+      with {:ok, _workspace, created?} <- ensure_workspace(workspace, worker_host, settings) do
+        {:ok, created?}
+      end
+    else
+      {:ok, false}
+    end
+  end
+
+  # Check for the workspace's own `.git`; `git rev-parse` would also succeed when a
+  # parent directory happens to be a repository.
+  defp workspace_git_repo?(workspace, nil, _settings) do
+    File.exists?(Path.join(workspace, ".git"))
+  end
+
+  defp workspace_git_repo?(workspace, worker_host, settings) when is_binary(worker_host) do
+    script = remote_shell_assign("workspace", workspace) <> "\n[ -e \"$workspace/.git\" ]"
+    match?({:ok, {_output, 0}}, run_remote_command(worker_host, script, hooks_timeout_ms(settings)))
+  end
+
+  defp discard_workspace(workspace, nil, settings) do
+    Sandbox.remove_container(workspace, settings)
+    File.rm_rf(workspace)
+    :ok
+  end
+
+  defp discard_workspace(workspace, worker_host, settings) when is_binary(worker_host) do
+    remove_remote_workspace_path(workspace, worker_host, settings)
+    :ok
+  end
+
   defp maybe_bootstrap_workspace_repo(_workspace, _issue_context, false, _worker_host, _settings), do: :ok
 
   defp maybe_bootstrap_workspace_repo(workspace, issue_context, true, worker_host, settings) do
@@ -375,7 +432,16 @@ defmodule SymphonyElixir.Workspace do
 
     task =
       Task.async(fn ->
-        System.cmd("sh", ["-lc", command], cd: workspace, stderr_to_stdout: true)
+        # Hooks run inside the workspace container when sandboxing is enabled so
+        # dependency installs and builds stay isolated per issue.
+        case Sandbox.command_spec(workspace, command, [], settings: settings, shell: "sh") do
+          {:ok, %{executable: executable, args: args, cd: cd}} ->
+            cmd_opts = if is_binary(cd), do: [cd: cd, stderr_to_stdout: true], else: [stderr_to_stdout: true]
+            System.cmd(executable, args, cmd_opts)
+
+          {:error, reason} ->
+            {"sandbox unavailable: #{inspect(reason)}", 125}
+        end
       end)
 
     case Task.yield(task, timeout_ms) do
@@ -595,9 +661,13 @@ defmodule SymphonyElixir.Workspace do
       "Bootstrapping workspace repo #{issue_log_context(issue_context)} workspace=#{workspace} repo=#{repo_source.display} cache_repo=#{cache_repo} branch=#{branch_name} base_branch=#{target_branch || "origin-default"} worker_host=#{worker_host_for_log(worker_host)}"
     )
 
-    with :ok <- ensure_repo_cache(workspace_root, repo_source, target_branch, issue_context, worker_host, settings),
-         :ok <- add_workspace_worktree(workspace, cache_repo, branch_name, target_branch, repo_source, issue_context, worker_host, timeout_ms) do
-      :ok
+    lock_key = repo_cache_lock_key(workspace_root, repo_source, target_branch, worker_host)
+
+    with :ok <- ensure_repo_cache(workspace_root, repo_source, target_branch, issue_context, worker_host, settings) do
+      # Clone under the cache lock so a concurrent cache sync cannot move refs mid-clone.
+      with_repo_cache_lock(lock_key, fn ->
+        add_workspace_worktree(workspace, cache_repo, branch_name, target_branch, repo_source, issue_context, worker_host, timeout_ms)
+      end)
     end
   end
 
@@ -813,6 +883,8 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp remove_workspace_path(workspace, nil, settings) do
+    Sandbox.remove_container(workspace, settings)
+
     case maybe_remove_workspace_via_git_worktree(workspace, nil, hooks_timeout_ms(settings)) do
       :ok -> {:ok, []}
       :fallback -> File.rm_rf(workspace)
@@ -933,8 +1005,9 @@ defmodule SymphonyElixir.Workspace do
     (script_lines ++
        resolve_target_branch_shell_lines("cache_repo", "target_branch") ++
        [
-         "git -C \"$cache_repo\" checkout -f -B \"$target_branch\" \"origin/$target_branch\"",
-         "git -C \"$cache_repo\" reset --hard \"origin/$target_branch\"",
+         # Keep the cache detached: a checked-out branch here would block
+         # `git checkout <default>` in any linked worktree created before clones.
+         "git -C \"$cache_repo\" checkout -f --detach \"origin/$target_branch\"",
          "git -C \"$cache_repo\" worktree prune"
        ])
     |> Enum.join("\n")
@@ -1005,8 +1078,9 @@ defmodule SymphonyElixir.Workspace do
     (script_lines ++
        resolve_target_branch_shell_lines("cache_repo", "target_branch") ++
        [
-         "git -C \"$cache_repo\" checkout -f -B \"$target_branch\" \"origin/$target_branch\"",
-         "git -C \"$cache_repo\" reset --hard \"origin/$target_branch\"",
+         # Keep the cache detached: a checked-out branch here would block
+         # `git checkout <default>` in any linked worktree created before clones.
+         "git -C \"$cache_repo\" checkout -f --detach \"origin/$target_branch\"",
          "git -C \"$cache_repo\" worktree prune"
        ])
     |> Enum.join("\n")
@@ -1033,11 +1107,7 @@ defmodule SymphonyElixir.Workspace do
        "target_branch=#{shell_escape(target_branch || "")}"
      ] ++
        resolve_target_branch_shell_lines("cache_repo", "target_branch") ++
-       [
-         "git -C \"$cache_repo\" worktree prune",
-         "git -C \"$cache_repo\" worktree add --force -B \"$branch_name\" \"$workspace\" \"origin/$target_branch\"",
-         "git -C \"$workspace\" branch --set-upstream-to=\"origin/$target_branch\" \"$branch_name\" >/dev/null 2>&1 || true"
-       ])
+       workspace_clone_shell_lines())
     |> Enum.join("\n")
   end
 
@@ -1050,12 +1120,31 @@ defmodule SymphonyElixir.Workspace do
        remote_shell_assign("target_branch", target_branch || "")
      ] ++
        resolve_target_branch_shell_lines("cache_repo", "target_branch") ++
-       [
-         "git -C \"$cache_repo\" worktree prune",
-         "git -C \"$cache_repo\" worktree add --force -B \"$branch_name\" \"$workspace\" \"origin/$target_branch\"",
-         "git -C \"$workspace\" branch --set-upstream-to=\"origin/$target_branch\" \"$branch_name\" >/dev/null 2>&1 || true"
-       ])
+       workspace_clone_shell_lines())
     |> Enum.join("\n")
+  end
+
+  # Each workspace is a standalone clone of the cache (objects are hardlinked, so
+  # it is cheap). Unlike `git worktree`, clones share no refs, index locks, or
+  # checked-out-branch bookkeeping, so concurrent agents cannot block each other
+  # on fetch/checkout/merge, and the workspace is self-contained for containers.
+  defp workspace_clone_shell_lines do
+    [
+      "export GIT_TERMINAL_PROMPT=0",
+      "remote_url=\"$(git -C \"$cache_repo\" remote get-url origin)\"",
+      "git clone --quiet --no-checkout \"$cache_repo\" \"$workspace\"",
+      "git -C \"$workspace\" fetch --quiet --no-tags \"$cache_repo\" '+refs/remotes/origin/*:refs/remotes/origin/*'",
+      "git -C \"$workspace\" remote set-url origin \"$remote_url\"",
+      "git -C \"$workspace\" config push.default current",
+      # Recreating a workspace for an issue whose PR branch already exists must
+      # resume that branch; resetting it to the base branch would orphan the PR.
+      "if git -C \"$workspace\" show-ref --verify --quiet \"refs/remotes/origin/$branch_name\"; then",
+      "  git -C \"$workspace\" checkout --quiet -B \"$branch_name\" \"origin/$branch_name\"",
+      "  git -C \"$workspace\" branch --quiet --set-upstream-to=\"origin/$branch_name\" \"$branch_name\"",
+      "else",
+      "  git -C \"$workspace\" checkout --quiet --no-track -B \"$branch_name\" \"origin/$target_branch\"",
+      "fi"
+    ]
   end
 
   defp build_worktree_remove_script(workspace) do

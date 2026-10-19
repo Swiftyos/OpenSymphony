@@ -3,7 +3,7 @@ defmodule SymphonyElixir.AgentRoute do
   Resolves the effective backend and effort for a Linear issue from labels.
   """
 
-  alias SymphonyElixir.Config
+  alias SymphonyElixir.{Config, FactoryControls, IssueStage}
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Linear.Issue
 
@@ -62,8 +62,10 @@ defmodule SymphonyElixir.AgentRoute do
       |> Enum.reject(&is_nil/1)
       |> Enum.uniq()
 
-    default_backend = settings.agent.backend
-    default_effort = Schema.normalize_optional_effort(settings.agent.default_effort)
+    # Precedence: issue labels > dashboard stage controls > project/global config.
+    stage_controls = FactoryControls.get(IssueStage.control_stage(issue))
+    default_backend = stage_controls.backend || settings.agent.backend
+    default_effort = stage_controls.effort || Schema.normalize_optional_effort(settings.agent.default_effort)
 
     {backend, backend_warnings} =
       case backend_matches do

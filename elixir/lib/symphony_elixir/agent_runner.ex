@@ -9,11 +9,12 @@ defmodule SymphonyElixir.AgentRunner do
   alias SymphonyElixir.AppServer
   alias SymphonyElixir.ClaudeCode.Tooling, as: ClaudeCodeTooling
   alias SymphonyElixir.Codex.AppServer, as: CodexAppServer
-  alias SymphonyElixir.Config
   alias SymphonyElixir.IssueConfig
+  alias SymphonyElixir.IssueStage
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.OpenCode.Tooling
   alias SymphonyElixir.PromptBuilder
+  alias SymphonyElixir.Sandbox
   alias SymphonyElixir.Tracker
   alias SymphonyElixir.Workspace
 
@@ -56,21 +57,22 @@ defmodule SymphonyElixir.AgentRunner do
       "Starting worker attempt for #{issue_context(issue)} backend=#{route.backend} effort=#{route.effort || "default"} worker_host=#{worker_host_for_log(worker_host)} account=#{account_label(account)}"
     )
 
-    case Workspace.create_for_issue(issue, worker_host, settings: issue_config.settings) do
-      {:ok, workspace} ->
-        send_worker_runtime_info(agent_update_recipient, issue, worker_host, workspace)
+    with :ok <- Sandbox.validate_run(route.backend, worker_host, issue_config.settings),
+         {:ok, workspace} <- Workspace.create_for_issue(issue, worker_host, settings: issue_config.settings) do
+      run_in_workspace(workspace, issue, agent_update_recipient, opts, worker_host, route, issue_config)
+    end
+  end
 
-        try do
-          with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host, settings: issue_config.settings),
-               :ok <- prepare_workspace_for_backend(workspace, worker_host, route.backend, issue_config) do
-            run_backend_turns(workspace, issue, agent_update_recipient, opts, worker_host, route)
-          end
-        after
-          Workspace.run_after_run_hook(workspace, issue, worker_host, settings: issue_config.settings)
-        end
+  defp run_in_workspace(workspace, issue, agent_update_recipient, opts, worker_host, route, issue_config) do
+    send_worker_runtime_info(agent_update_recipient, issue, worker_host, workspace)
 
-      {:error, reason} ->
-        {:error, reason}
+    try do
+      with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host, settings: issue_config.settings),
+           :ok <- prepare_workspace_for_backend(workspace, worker_host, route.backend, issue_config) do
+        run_backend_turns(workspace, issue, agent_update_recipient, opts, worker_host, route)
+      end
+    after
+      Workspace.run_after_run_hook(workspace, issue, worker_host, settings: issue_config.settings)
     end
   end
 
@@ -263,12 +265,13 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp build_codex_turn_prompt(issue, opts, 1, _max_turns), do: PromptBuilder.build_prompt(issue, opts)
 
-  defp build_codex_turn_prompt(_issue, _opts, turn_number, max_turns) do
+  defp build_codex_turn_prompt(issue, _opts, turn_number, max_turns) do
     """
     Continuation guidance:
 
     - The previous agent turn completed normally, but the Linear issue is still in an active state.
     - This is continuation turn ##{turn_number} of #{max_turns} for the current agent run.
+    - Current Linear state: #{issue.state}; factory stage: #{IssueStage.stage(issue) || "none"}.
     - Resume from the current workspace and workpad state instead of restarting from scratch.
     - The original task instructions and prior turn context are already present in this thread, so do not restate them before acting.
     - Focus on the remaining ticket work and do not end the turn while the issue stays active unless you are truly blocked.
@@ -277,12 +280,13 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp build_agent_turn_prompt(issue, opts, 1, _max_turns), do: PromptBuilder.build_prompt(issue, opts)
 
-  defp build_agent_turn_prompt(_issue, _opts, turn_number, max_turns) do
+  defp build_agent_turn_prompt(issue, _opts, turn_number, max_turns) do
     """
     Continuation guidance:
 
     - The previous agent turn completed normally, but the Linear issue is still in an active state.
     - This is continuation turn ##{turn_number} of #{max_turns} for the current agent run.
+    - Current Linear state: #{issue.state}; factory stage: #{IssueStage.stage(issue) || "none"}.
     - Resume from the current workspace and workpad state instead of restarting from scratch.
     - The original task instructions and prior turn context are already present in this thread, so do not restate them before acting.
     - Focus on the remaining ticket work and do not end the turn while the issue stays active unless you are truly blocked.
@@ -310,10 +314,19 @@ defmodule SymphonyElixir.AgentRunner do
   defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher) when is_binary(issue_id) do
     case issue_state_fetcher.([issue_id]) do
       {:ok, [%Issue{} = refreshed_issue | _]} ->
-        if active_issue_state?(refreshed_issue.state) do
-          {:continue, refreshed_issue}
-        else
-          {:done, refreshed_issue}
+        cond do
+          not IssueStage.active?(refreshed_issue) ->
+            {:done, refreshed_issue}
+
+          stage_changed?(IssueStage.stage(issue), IssueStage.stage(refreshed_issue)) ->
+            # A new stage (for example implement -> merge) needs its own first-turn
+            # prompt, so hand back to the orchestrator for a fresh dispatch.
+            Logger.info("Stage changed for #{issue_context(refreshed_issue)} from=#{IssueStage.stage(issue) || "none"} to=#{IssueStage.stage(refreshed_issue)}; returning control to orchestrator")
+
+            {:done, refreshed_issue}
+
+          true ->
+            {:continue, refreshed_issue}
         end
 
       {:ok, []} ->
@@ -326,14 +339,9 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp continue_with_issue?(issue, _issue_state_fetcher), do: {:done, issue}
 
-  defp active_issue_state?(state_name) when is_binary(state_name) do
-    normalized_state = normalize_issue_state(state_name)
-
-    Config.settings!().tracker.active_states
-    |> Enum.any?(fn active_state -> normalize_issue_state(active_state) == normalized_state end)
-  end
-
-  defp active_issue_state?(_state_name), do: false
+  # Picking up a Todo issue moves it to In Progress, which is the same work.
+  defp stage_changed?(nil, "implement"), do: false
+  defp stage_changed?(previous_stage, current_stage), do: previous_stage != current_stage
 
   defp selected_worker_host(nil, []), do: nil
 
@@ -361,12 +369,6 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp account_label(account), do: inspect(account, limit: 4)
-
-  defp normalize_issue_state(state_name) when is_binary(state_name) do
-    state_name
-    |> String.trim()
-    |> String.downcase()
-  end
 
   defp issue_context(%Issue{id: issue_id, identifier: identifier}) do
     "issue_id=#{issue_id} issue_identifier=#{identifier}"

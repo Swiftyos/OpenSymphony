@@ -47,6 +47,25 @@ defmodule SymphonyElixir.Tracker.Memory do
     :ok
   end
 
+  @spec set_stage(String.t(), String.t(), String.t() | nil) :: :ok | {:error, term()}
+  def set_stage(issue_id, state_name, stage) do
+    prefix = SymphonyElixir.IssueStage.label_prefix() <> "/"
+
+    issues =
+      Enum.map(configured_issues(), fn
+        %Issue{id: ^issue_id, labels: labels} = issue ->
+          labels = Enum.reject(labels || [], &String.starts_with?(String.downcase(&1), prefix))
+          %{issue | state: state_name, labels: if(stage, do: labels ++ [prefix <> stage], else: labels)}
+
+        other ->
+          other
+      end)
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, issues)
+    send_event({:memory_tracker_stage_update, issue_id, state_name, stage})
+    :ok
+  end
+
   defp configured_issues do
     Application.get_env(:symphony_elixir, :memory_tracker_issues, [])
   end

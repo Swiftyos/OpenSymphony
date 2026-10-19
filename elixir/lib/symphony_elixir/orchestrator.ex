@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{Accounts, AgentRoute, AgentRunner, Config, IssueConfig, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{Accounts, AgentRoute, AgentRunner, Config, FactoryControls, IssueConfig, IssueStage, StatusDashboard, Tracker, UsageLedger, Workspace}
   alias SymphonyElixir.Linear.Issue
 
   @continuation_retry_delay_ms 1_000
@@ -213,6 +213,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       running_entry ->
         {updated_running_entry, token_delta} = integrate_codex_update(running_entry, update)
+        UsageLedger.record_tokens(updated_running_entry, token_delta)
 
         updated_running_entry =
           updated_running_entry
@@ -241,6 +242,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       running_entry ->
         {updated_running_entry, token_delta} = integrate_agent_update(running_entry, update)
+        UsageLedger.record_tokens(updated_running_entry, token_delta)
 
         updated_running_entry =
           updated_running_entry
@@ -281,6 +283,7 @@ defmodule SymphonyElixir.Orchestrator do
     state = reconcile_running_issues(state)
 
     with {:ok, issues} <- Tracker.fetch_candidate_issues(),
+         :ok <- Enum.each(issues, &UsageLedger.observe_issue/1),
          true <- available_slots(state) > 0 do
       choose_issues(issues, state)
     else
@@ -367,6 +370,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_issue_state(%Issue{} = issue, state, active_states, terminal_states) do
+    UsageLedger.observe_issue(issue)
+
     cond do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
@@ -375,6 +380,11 @@ defmodule SymphonyElixir.Orchestrator do
 
       !issue_routable_to_worker?(issue) ->
         Logger.info("Issue no longer routed to this worker: #{issue_context(issue)} assignee=#{inspect(issue.assignee_id)}; stopping active agent")
+
+        terminate_running_issue(state, issue.id, false)
+
+      active_issue_state?(issue.state, active_states) and IssueStage.paused?(issue) ->
+        Logger.info("Issue moved to paused stage: #{issue_context(issue)} state=#{issue.state} stage=#{IssueStage.stage(issue)}; stopping active agent")
 
         terminate_running_issue(state, issue.id, false)
 
@@ -624,13 +634,32 @@ defmodule SymphonyElixir.Orchestrator do
       state_slots_available?(issue, running)
   end
 
-  defp state_slots_available?(%Issue{state: issue_state}, running) when is_map(running) do
+  defp state_slots_available?(%Issue{state: issue_state} = issue, running) when is_map(running) do
     limit = Config.max_concurrent_agents_for_state(issue_state)
     used = running_issue_count_for_state(running, issue_state)
-    limit > used
+    limit > used and stage_slots_available?(issue, running)
   end
 
   defp state_slots_available?(_issue, _running), do: false
+
+  # Per-stage cap set from the dashboard (FactoryControls).
+  defp stage_slots_available?(issue, running) do
+    stage = IssueStage.control_stage(issue)
+
+    case FactoryControls.get(stage).max_agents do
+      limit when is_integer(limit) ->
+        used =
+          Enum.count(running, fn
+            {_id, %{issue: %Issue{} = running_issue}} -> IssueStage.control_stage(running_issue) == stage
+            _ -> false
+          end)
+
+        used < limit
+
+      _ ->
+        true
+    end
+  end
 
   defp running_issue_count_for_state(running, issue_state) when is_map(running) do
     normalized_state = normalize_issue_state(issue_state)
@@ -657,7 +686,9 @@ defmodule SymphonyElixir.Orchestrator do
        when is_binary(id) and is_binary(identifier) and is_binary(title) and is_binary(state_name) do
     issue_routable_to_worker?(issue) and
       active_issue_state?(state_name, active_states) and
-      !terminal_issue_state?(state_name, terminal_states)
+      !terminal_issue_state?(state_name, terminal_states) and
+      !IssueStage.paused?(issue) and
+      !IssueStage.dispatch_paused?(issue)
   end
 
   defp candidate_issue?(_issue, _active_states, _terminal_states), do: false
@@ -1009,6 +1040,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp handle_retry_issue_lookup(%Issue{} = issue, state, issue_id, attempt, metadata) do
     terminal_states = terminal_state_set()
+    UsageLedger.observe_issue(issue)
 
     cond do
       terminal_issue_state?(issue.state, terminal_states) ->

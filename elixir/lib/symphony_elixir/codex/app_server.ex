@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   """
 
   require Logger
-  alias SymphonyElixir.{Accounts, Codex.DynamicTool, Codex.TraceLog, Config, SSH, Telemetry}
+  alias SymphonyElixir.{Accounts, Codex.DynamicTool, Codex.TraceLog, Config, Sandbox, SSH, Telemetry}
 
   @initialize_id 1
   @thread_start_id 2
@@ -332,23 +332,22 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp start_port(workspace, nil, command, issue, account) do
-    executable = System.find_executable("bash")
+    environment = port_environment(issue, account)
+    env_names = Enum.map(environment, fn {key, _value} -> to_string(key) end)
 
-    if is_nil(executable) do
-      {:error, :bash_not_found}
-    else
+    with {:ok, spec} <- Sandbox.command_spec(workspace, command, env_names) do
       port =
         Port.open(
-          {:spawn_executable, String.to_charlist(executable)},
+          {:spawn_executable, String.to_charlist(spec.executable)},
           [
             :binary,
             :exit_status,
             :stderr_to_stdout,
-            args: [~c"-lc", String.to_charlist(command)],
-            env: port_environment(issue, account),
-            cd: String.to_charlist(workspace),
+            args: Enum.map(spec.args, &String.to_charlist/1),
+            env: environment,
             line: @port_line_bytes
           ]
+          |> maybe_put_cd(spec.cd)
         )
 
       {:ok, port}
@@ -359,6 +358,9 @@ defmodule SymphonyElixir.Codex.AppServer do
     remote_command = remote_launch_command(workspace, command, issue, account)
     SSH.start_port(worker_host, remote_command, line: @port_line_bytes)
   end
+
+  defp maybe_put_cd(port_opts, nil), do: port_opts
+  defp maybe_put_cd(port_opts, cd), do: Keyword.put(port_opts, :cd, String.to_charlist(cd))
 
   defp remote_launch_command(workspace, command, issue, account) when is_binary(workspace) do
     [

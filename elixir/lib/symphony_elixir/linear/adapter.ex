@@ -37,6 +37,46 @@ defmodule SymphonyElixir.Linear.Adapter do
   }
   """
 
+  @stage_lookup_query """
+  query SymphonyStageLookup($issueId: String!, $stateName: String!, $stage: String!, $flat: String!, $prefix: String!) {
+    issue(id: $issueId) {
+      team {
+        id
+        states(filter: {name: {eq: $stateName}}, first: 1) {
+          nodes {
+            id
+          }
+        }
+      }
+      labels {
+        nodes {
+          id
+          name
+          parent {
+            name
+          }
+        }
+      }
+    }
+    issueLabels(first: 50, filter: {or: [{name: {eqIgnoreCase: $flat}}, {name: {eqIgnoreCase: $stage}, parent: {name: {eqIgnoreCase: $prefix}}}]}) {
+      nodes {
+        id
+        team {
+          id
+        }
+      }
+    }
+  }
+  """
+
+  @set_stage_mutation """
+  mutation SymphonySetStage($issueId: String!, $stateId: String!, $labelIds: [String!]!) {
+    issueUpdate(id: $issueId, input: {stateId: $stateId, labelIds: $labelIds}) {
+      success
+    }
+  }
+  """
+
   @spec fetch_candidate_issues() :: {:ok, [term()]} | {:error, term()}
   def fetch_candidate_issues, do: client_module().fetch_candidate_issues()
 
@@ -71,6 +111,73 @@ defmodule SymphonyElixir.Linear.Adapter do
       {:error, reason} -> {:error, reason}
       _ -> {:error, :issue_update_failed}
     end
+  end
+
+  @spec set_stage(String.t(), String.t(), String.t() | nil) :: :ok | {:error, term()}
+  def set_stage(issue_id, state_name, stage) when is_binary(issue_id) and is_binary(state_name) do
+    prefix = SymphonyElixir.IssueStage.label_prefix()
+
+    variables = %{
+      issueId: issue_id,
+      stateName: state_name,
+      stage: stage || "",
+      flat: "#{prefix}/#{stage || ""}",
+      prefix: prefix
+    }
+
+    with {:ok, response} <- client_module().graphql(@stage_lookup_query, variables),
+         {:ok, state_id} <- stage_state_id(response),
+         {:ok, label_ids} <- stage_label_ids(response, prefix, stage),
+         {:ok, update} <-
+           client_module().graphql(@set_stage_mutation, %{issueId: issue_id, stateId: state_id, labelIds: label_ids}),
+         true <- get_in(update, ["data", "issueUpdate", "success"]) == true do
+      :ok
+    else
+      false -> {:error, :issue_update_failed}
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :issue_update_failed}
+    end
+  end
+
+  defp stage_state_id(response) do
+    case get_in(response, ["data", "issue", "team", "states", "nodes", Access.at(0), "id"]) do
+      state_id when is_binary(state_id) -> {:ok, state_id}
+      _ -> {:error, :state_not_found}
+    end
+  end
+
+  # Keep every non-stage label, drop old stage labels, add the new one.
+  defp stage_label_ids(response, prefix, stage) do
+    current = get_in(response, ["data", "issue", "labels", "nodes"]) || []
+
+    kept =
+      current
+      |> Enum.reject(&stage_label?(&1, prefix))
+      |> Enum.map(& &1["id"])
+
+    case stage do
+      nil ->
+        {:ok, kept}
+
+      _stage ->
+        team_id = get_in(response, ["data", "issue", "team", "id"])
+        candidates = get_in(response, ["data", "issueLabels", "nodes"]) || []
+
+        label =
+          Enum.find(candidates, &(get_in(&1, ["team", "id"]) == team_id)) ||
+            Enum.find(candidates, &is_nil(get_in(&1, ["team", "id"])))
+
+        case label do
+          %{"id" => id} -> {:ok, Enum.uniq(kept ++ [id])}
+          _ -> {:error, {:stage_label_not_found, "#{prefix}/#{stage}"}}
+        end
+    end
+  end
+
+  defp stage_label?(label, prefix) do
+    name = String.downcase(label["name"] || "")
+    parent = String.downcase(get_in(label, ["parent", "name"]) || "")
+    parent == prefix or String.starts_with?(name, prefix <> "/")
   end
 
   defp client_module do

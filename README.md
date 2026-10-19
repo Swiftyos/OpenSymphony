@@ -10,6 +10,19 @@ _In this [demo video](.github/media/symphony-demo.mp4), Symphony monitors a Line
 > [!WARNING]
 > Symphony is a low-key engineering preview for testing in trusted environments.
 
+## Dashboard
+
+![Symphony dashboard](.github/media/dashboard-overview.png)
+
+The dashboard shows the factory as a live flow diagram you can steer. Click a stage to pause it,
+cap its agents, or choose its harness and thinking level, and approve or send back issues
+in review without leaving the page. It also shows what needs a human, what each agent is doing,
+and what it all costs by project, team, task, and harness.
+
+![Stage controls](.github/media/dashboard-stage-controls.png)
+
+See [elixir/README.md](elixir/README.md#web-dashboard) for details.
+
 ## Current capabilities
 
 The experimental Elixir implementation currently supports:
@@ -20,6 +33,10 @@ The experimental Elixir implementation currently supports:
 - Linear label-based backend switching with labels like `codex`, `claude`, and `opencode`.
 - Linear label-based thinking/effort switching with labels like `thinking/high` and
   `thinking/max`.
+- Works with Linear's default states: sub-stages (implement, rework, merge, blocked) are
+  `factory/*` labels, so no custom workflow states are needed.
+- Isolated per-issue git clones, with optional per-issue Docker sandboxes (`sandbox.kind: docker`).
+- A live dashboard that shows and steers the factory, with cost tracking by project, team, task, and harness.
 
 If you want to try those features, start with [elixir/README.md](elixir/README.md), which now
 documents backend support, multi-project setup, and label-routing behavior in detail.

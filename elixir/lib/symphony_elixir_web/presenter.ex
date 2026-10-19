@@ -4,6 +4,7 @@ defmodule SymphonyElixirWeb.Presenter do
   """
 
   alias SymphonyElixir.{Accounts, Config, Orchestrator, StatusDashboard}
+  alias SymphonyElixirWeb.FactoryPresenter
 
   @spec state_payload(GenServer.name(), timeout()) :: map()
   def state_payload(orchestrator, snapshot_timeout_ms) do
@@ -29,7 +30,8 @@ defmodule SymphonyElixirWeb.Presenter do
           accounts: account_usage_payload(running, settings),
           projects: project_usage_payload(running, retrying, settings),
           telemetry: telemetry_payload(settings),
-          capacity: capacity_payload(settings)
+          capacity: capacity_payload(settings),
+          factory: FactoryPresenter.payload(running, settings)
         }
 
       :timeout ->

@@ -4,11 +4,16 @@ tracker:
   kind: linear
   endpoint: https://api.linear.app/graphql
   api_key: $LINEAR_API_KEY
+  # Linear's default states. Sub-stages live in the `factory` label group:
+  # factory/implement, factory/rework, factory/merge, factory/blocked.
   active_states:
     - Todo
     - In Progress
-    - Merging
-    - Rework
+  stage_label_prefix: factory
+  # Stages that pause dispatch even while the issue is in an active state.
+  paused_stages:
+    - blocked
+    - review
   terminal_states:
     - Closed
     - Cancelled
@@ -50,6 +55,23 @@ claude:
 opencode:
   command: opencode serve --hostname 127.0.0.1 --port 0
   agent: build
+
+# Optional per-issue container isolation. Each workspace gets one long-lived
+# container (bind-mounted at the same path); hooks and the agent CLI run inside
+# it via `docker exec`. The image must provide bash, git, gh, and the agent CLIs
+# you route to (codex and/or claude; node for Claude's Linear MCP shim).
+# OpenCode and SSH worker hosts are not supported with the sandbox yet.
+sandbox:
+  kind: none # docker
+  image: symphony-agent:latest
+  # network: bridge
+  env:
+    - GH_TOKEN
+    - ANTHROPIC_API_KEY
+    - OPENAI_API_KEY
+  mounts:
+    - ~/.gitconfig:/root/.gitconfig:ro
+  # run_args: ["--cpus", "4", "--memory", "8g"]
 
 telemetry:
   enabled: false

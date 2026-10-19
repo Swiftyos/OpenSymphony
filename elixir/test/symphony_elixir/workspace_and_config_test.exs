@@ -102,7 +102,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
-  test "workspace bootstraps issue worktrees from a cached repo checkout" do
+  test "workspace bootstraps issue clones from a cached repo checkout" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -130,24 +130,134 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
       assert File.read!(Path.join(workspace, "README.md")) == "cached bootstrap\n"
-      assert File.regular?(Path.join(workspace, ".git"))
+      # A standalone clone: no refs, locks, or checked-out branches shared with other workspaces.
+      assert File.dir?(Path.join(workspace, ".git"))
 
       {branch_name, 0} = System.cmd("git", ["-C", workspace, "branch", "--show-current"])
       assert String.trim(branch_name) == "symphony/PI-1"
+
+      {origin_url, 0} = System.cmd("git", ["-C", workspace, "remote", "get-url", "origin"])
+      assert String.trim(origin_url) == source_repo
 
       repo_source = Config.project_repo_source_for_issue(issue)
       cache_repo = Path.join(Config.workspace_root_for_issue(issue), ".symphony-cache/#{repo_source.cache_key}")
 
       assert File.dir?(cache_repo)
 
-      {worktree_list, 0} = System.cmd("git", ["-C", cache_repo, "worktree", "list", "--porcelain"])
-      assert worktree_list =~ workspace
+      # The cache keeps a detached HEAD so no branch is ever "checked out" there.
+      assert {_head, 1} = System.cmd("git", ["-C", cache_repo, "symbolic-ref", "-q", "HEAD"])
+
+      # Workspaces can switch to the base branch, which a cache worktree used to block.
+      assert {_output, 0} = System.cmd("git", ["-C", workspace, "checkout", "-q", "main"], stderr_to_stdout: true)
 
       assert :ok = Workspace.remove_issue_workspaces(issue)
       refute File.exists?(workspace)
+    after
+      File.rm_rf(test_root)
+    end
+  end
 
-      {worktree_list_after_remove, 0} = System.cmd("git", ["-C", cache_repo, "worktree", "list", "--porcelain"])
-      refute worktree_list_after_remove =~ workspace
+  test "workspace recreated for an issue resumes its existing remote branch" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-resume-branch-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      source_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+
+      init_repo!(source_repo, "base\n")
+      System.cmd("git", ["-C", source_repo, "checkout", "-q", "-b", "symphony/PI-7"])
+      File.write!(Path.join(source_repo, "feature.txt"), "pr work\n")
+      System.cmd("git", ["-C", source_repo, "add", "feature.txt"])
+      System.cmd("git", ["-C", source_repo, "commit", "-q", "-m", "pr work"])
+      System.cmd("git", ["-C", source_repo, "checkout", "-q", "main"])
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_project_slug: nil,
+        tracker_projects: [%{slug: "project-a", repo: source_repo}],
+        workspace_root: workspace_root
+      )
+
+      issue = %Issue{identifier: "PI-7", project_slug: "project-a"}
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert File.read!(Path.join(workspace, "feature.txt")) == "pr work\n"
+
+      {upstream, 0} = System.cmd("git", ["-C", workspace, "rev-parse", "--abbrev-ref", "@{upstream}"])
+      assert String.trim(upstream) == "origin/symphony/PI-7"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "workspace whose after_create hook fails is discarded and rebuilt on retry" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-incomplete-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      source_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+      marker = Path.join(test_root, "hook-should-fail")
+      File.mkdir_p!(test_root)
+      File.write!(marker, "")
+
+      init_repo!(source_repo, "retry\n")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_project_slug: nil,
+        tracker_projects: [%{slug: "project-a", repo: source_repo}],
+        workspace_root: workspace_root,
+        hook_after_create: "if [ -f #{marker} ]; then exit 7; fi; echo ok > .after-create"
+      )
+
+      issue = %Issue{identifier: "PI-8", project_slug: "project-a"}
+
+      assert {:error, {:workspace_hook_failed, "after_create", 7, _output}} = Workspace.create_for_issue(issue)
+      refute File.exists?(Path.join(workspace_root, "PI-8"))
+
+      File.rm!(marker)
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert File.read!(Path.join(workspace, ".after-create")) == "ok\n"
+      assert File.read!(Path.join(workspace, "README.md")) == "retry\n"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "existing workspace without a git checkout is rebuilt" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-not-git-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      source_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+
+      init_repo!(source_repo, "rebuilt\n")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_project_slug: nil,
+        tracker_projects: [%{slug: "project-a", repo: source_repo}],
+        workspace_root: workspace_root
+      )
+
+      File.mkdir_p!(Path.join(workspace_root, "PI-9"))
+      File.write!(Path.join([workspace_root, "PI-9", "stray.txt"]), "leftover")
+
+      issue = %Issue{identifier: "PI-9", project_slug: "project-a"}
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert File.read!(Path.join(workspace, "README.md")) == "rebuilt\n"
+      refute File.exists?(Path.join(workspace, "stray.txt"))
     after
       File.rm_rf(test_root)
     end

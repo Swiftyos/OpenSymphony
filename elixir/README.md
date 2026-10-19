@@ -347,30 +347,79 @@ even though the endpoint works from your local browser.
 
 ## Linear setup
 
-Configure these exact Linear workflow states for the team:
+Symphony works with Linear's default workflow states; no custom states are
+required:
 
-- `Backlog`
-- `Todo`
-- `In Progress`
-- `Human Review`
-- `Merging`
-- `Rework`
-- `Done`
+- `Backlog`, `Todo`, `In Progress`, `In Review`, `Done`, `Canceled`, `Duplicate`
 
-For the sample `symphony.yml`, `tracker.active_states` should contain:
+Sub-stages within a state are carried by labels. Create a label group named
+`factory` (team or workspace level) with these children:
 
-- `Todo`
-- `In Progress`
-- `Merging`
-- `Rework`
+| Label               | Used with     | Meaning                                       | Set by |
+| ------------------- | ------------- | --------------------------------------------- | ------ |
+| `factory/implement` | `In Progress` | Build, validate, open PR (also the default)   | agent  |
+| `factory/rework`    | `In Progress` | Reviewer requested a full reset               | human  |
+| `factory/merge`     | `In Progress` | Approved; agent lands the PR then marks Done  | human  |
+| `factory/blocked`   | `In Progress` | Parked; Symphony will not dispatch it         | either |
+
+The lifecycle is `Todo` -> `In Progress` (implement) -> `In Review` (human) ->
+`In Progress` + `factory/merge` -> `Done`, with `factory/rework` as the loop back.
+A Linear label group only allows one child per issue, so an issue is never in two
+stages at once. Flat labels named `factory/<stage>` also work.
+
+Relevant `tracker` settings (defaults shown):
+
+```yaml
+tracker:
+  active_states: [Todo, In Progress]
+  stage_label_prefix: factory # label group name
+  paused_stages: [blocked, review] # stages that are never dispatched
+```
+
+When an issue's stage changes between turns (for example `rework` -> `implement`),
+the running agent finishes its turn and Symphony re-dispatches it with a fresh
+first-turn prompt. Workflow prompts can read `{{ issue.stage }}` and
+`{{ factory.label_prefix }}`.
 
 Default terminal states recognized by Symphony are:
 
+- `Backlog`
 - `Closed`
 - `Cancelled`
 - `Canceled`
 - `Duplicate`
 - `Done`
+
+## Workspace isolation
+
+Each issue gets its own standalone git clone, made from a shared per-repo cache
+(objects are hardlinked, so clones are cheap). Clones share no refs, index locks,
+or checked-out-branch state, so concurrent agents cannot block each other's
+`git fetch`, `git checkout main`, or merges. If an issue's workspace is recreated
+and its `symphony/<ISSUE>` branch already exists on the remote, the new clone
+resumes that branch instead of resetting it. A workspace whose bootstrap or
+`after_create` hook fails is deleted so the next attempt starts clean.
+
+### Docker sandbox
+
+Set `sandbox.kind: docker` to run each issue's hooks and agent process inside its
+own container:
+
+```yaml
+sandbox:
+  kind: docker
+  image: symphony-agent:latest # must provide bash, git, gh, and codex/claude (+ node for Claude)
+  env: [GH_TOKEN, ANTHROPIC_API_KEY, OPENAI_API_KEY] # passed through by name
+  mounts: ["~/.gitconfig:/root/.gitconfig:ro"]
+  # network: bridge
+  # run_args: ["--cpus", "4", "--memory", "8g"]
+```
+
+The container is created on first use, bind-mounts the workspace and the managed
+accounts store at their host paths, persists across runs for the same issue (so
+installed dependencies and services survive), and is removed with the workspace.
+Git bootstrap still runs on the host. OpenCode and SSH worker hosts are not yet
+supported with the sandbox; Symphony refuses those runs with an explicit error.
 
 ## Label routing
 
@@ -416,12 +465,75 @@ Example:
 
 ## Web dashboard
 
-The observability UI now runs on a minimal Phoenix stack:
+Open `http://127.0.0.1:<server.port>/`. The page is laid out in the order an operator needs it.
 
-- LiveView for the dashboard at `/`
-- JSON API for operational debugging under `/api/v1/*`
-- Bandit as the HTTP server
-- Phoenix dependency static assets for the LiveView client bootstrap
+![Dashboard overview](../.github/media/dashboard-overview.png)
+
+- **Top bar**: live or offline, agents in use vs capacity, next poll.
+- **Headline numbers**: spend, tokens in/out, live agents, shipped issues, and how often
+  review sent work back.
+- **Flow**: the factory as a live diagram. Each node is a Linear state plus `factory/*`
+  stage, edge weights are observed transitions, and dashed edges are loops back for rework.
+  Colored dots on a node are the agents running there, by harness.
+- **Needs you**: the only things waiting on a human. That means issues in review (oldest first),
+  blocked issues, retries with their error, and accounts that are limited or exhausted.
+- **Live sessions**: what each agent is doing now, with its stage, harness, thinking level,
+  runtime, latest update, and tokens.
+- **Spend**: cost or tokens grouped by project, team (the Linear key, for example `PAY`), or
+  task, split by harness. Hover a bar for input and output tokens, or switch to the table view.
+
+### Steering the factory from the diagram
+
+Click a stage to manage it. Its controls replace the Needs-you column so the whole diagram
+stays visible. `#stage=<name>` in the URL deep-links to a stage.
+
+![Stage controls](../.github/media/dashboard-stage-controls.png)
+
+For agent stages (Todo, Implement, Rework, Merge) you can:
+
+- **Pause dispatch**: no new agents start in that stage, and running ones finish their turn.
+- **Cap concurrency**: the most agents allowed in that stage at once.
+- **Pick the harness and thinking level**: the default for that stage. An issue's own `codex`,
+  `claude`, `thinking/*` labels still win.
+
+Each stage also lists its issues with one-click moves that write back to Linear (state plus
+stage label). In review, that means **Approve & merge** or **Send to rework**:
+
+![Review actions](../.github/media/dashboard-review-actions.png)
+
+Stage settings persist in `~/.symphony/factory_controls.json`. Changes apply instantly in the
+UI and roll back with a message if the server rejects them.
+
+The dashboard has no login, so controls are enabled by default only when the server binds to
+a loopback address. Set `server.controls: true` to allow them on other interfaces (put the
+dashboard behind your own auth first), or `false` to make the page read-only.
+
+### Cost
+
+Token usage is recorded per project, team, task, harness, and model in
+`~/.symphony/usage.json`, so totals survive restarts. Add rates (USD per million tokens) to
+price it, keyed by harness or `harness/model`:
+
+```yaml
+pricing:
+  claude:
+    input_per_mtok: 3
+    output_per_mtok: 15
+  codex/gpt-5.4:
+    input_per_mtok: 1.25
+    output_per_mtok: 10
+```
+
+Without `pricing`, the dashboard still shows tokens and marks cost as unpriced.
+
+### Under the hood
+
+- LiveView at `/`; the JSON API under `/api/v1/*` (its state payload includes a `factory`
+  section with flow, usage, and controls).
+- The diagram and spend explorer render client-side from a single payload, so grouping,
+  filtering, hover, and opening stages run in the browser. With a 2,000-row usage history,
+  these take 0.5 to 0.9 ms (median).
+- Bandit HTTP server; dependency-free embedded JS and CSS.
 
 ## Project Layout
 

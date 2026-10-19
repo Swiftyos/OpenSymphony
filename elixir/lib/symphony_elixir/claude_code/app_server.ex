@@ -6,7 +6,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
   require Logger
 
   alias SymphonyElixir.ClaudeCode.Tooling
-  alias SymphonyElixir.{Accounts, Config, SSH, Telemetry}
+  alias SymphonyElixir.{Accounts, Config, Sandbox, SSH, Telemetry}
 
   @poll_interval_ms 250
   @port_line_bytes 1_048_576
@@ -162,23 +162,22 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
   end
 
   defp start_port(workspace, nil, session_id, settings, issue, account) do
-    executable = System.find_executable("bash")
+    environment = port_environment(issue, account)
+    env_names = Enum.map(environment, fn {key, _value} -> to_string(key) end)
 
-    if is_nil(executable) do
-      {:error, :bash_not_found}
-    else
+    with {:ok, spec} <- Sandbox.command_spec(workspace, launch_command(session_id, settings), env_names) do
       {:ok,
        Port.open(
-         {:spawn_executable, String.to_charlist(executable)},
+         {:spawn_executable, String.to_charlist(spec.executable)},
          [
            :binary,
            :exit_status,
            :stderr_to_stdout,
-           args: [~c"-lc", String.to_charlist(launch_command(session_id, settings))],
-           env: port_environment(issue, account),
-           cd: String.to_charlist(workspace),
+           args: Enum.map(spec.args, &String.to_charlist/1),
+           env: environment,
            line: @port_line_bytes
          ]
+         |> maybe_put_cd(spec.cd)
        )}
     end
   end
@@ -186,6 +185,9 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
   defp start_port(workspace, worker_host, session_id, settings, issue, account) when is_binary(worker_host) do
     SSH.start_port(worker_host, remote_launch_command(workspace, session_id, settings, issue, account), line: @port_line_bytes)
   end
+
+  defp maybe_put_cd(port_opts, nil), do: port_opts
+  defp maybe_put_cd(port_opts, cd), do: Keyword.put(port_opts, :cd, String.to_charlist(cd))
 
   defp launch_command(session_id, settings) do
     [
