@@ -132,7 +132,8 @@ defmodule SymphonyElixir.IssueStageTest do
       assert spec.cd == nil
 
       assert spec.args ==
-               ["exec", "--interactive", "--workdir", workspace, "--env", "CODEX_HOME", Sandbox.container_name(workspace), "bash", "-lc", "codex app-server"]
+               ["exec", "--interactive", "--workdir", workspace, "--env", "SYMPHONY_SANDBOX_EXEC=1", "--env", "CODEX_HOME"] ++
+                 [Sandbox.container_name(workspace), "bash", "-lc", "codex app-server"]
 
       assert {:error, {:sandbox_unsupported, :backend, "opencode"}} = Sandbox.validate_run("opencode", nil, settings)
       assert {:error, {:sandbox_unsupported, :ssh_worker_host, "host-a"}} = Sandbox.validate_run("codex", "host-a", settings)

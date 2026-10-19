@@ -4,3 +4,6 @@
 symphony-*.yml
 /local/*
 
+
+# Local agent worktrees
+.claude/worktrees/

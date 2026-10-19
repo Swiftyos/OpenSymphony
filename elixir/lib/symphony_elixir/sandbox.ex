@@ -19,6 +19,8 @@ defmodule SymphonyElixir.Sandbox do
   alias SymphonyElixir.Config.Schema
 
   @sleep_command ["sleep", "infinity"]
+  # Tags every process started through the sandbox so `reap/2` can find leftovers.
+  @exec_marker "SYMPHONY_SANDBOX_EXEC=1"
 
   @spec enabled?(Schema.t() | nil) :: boolean()
   def enabled?(settings \\ nil) do
@@ -98,7 +100,7 @@ defmodule SymphonyElixir.Sandbox do
     if enabled?(settings) do
       with :ok <- ensure_container(workspace, settings),
            {:ok, executable} <- docker_executable(settings) do
-        env_args = Enum.flat_map(Enum.uniq(env_names ++ passthrough_env_names(settings)), &["--env", &1])
+        env_args = ["--env", @exec_marker | Enum.flat_map(Enum.uniq(env_names ++ passthrough_env_names(settings)), &["--env", &1])]
 
         {:ok,
          %{
@@ -113,6 +115,28 @@ defmodule SymphonyElixir.Sandbox do
         executable -> {:ok, %{executable: executable, args: ["-lc", command], cd: workspace}}
       end
     end
+  end
+
+  @doc """
+  Kills processes that `command_spec/4` started in the workspace container and
+  that outlived their `docker exec` client. Podman ends them with the client,
+  but Docker can leave them running inside the long-lived container.
+  """
+  @spec reap(Path.t(), Schema.t() | nil) :: :ok
+  def reap(workspace, settings \\ nil) when is_binary(workspace) do
+    settings = settings || Config.settings!()
+
+    if enabled?(settings) do
+      # Busybox-friendly: only /proc, tr, and grep. The reaper itself is not tagged.
+      script =
+        "for p in /proc/[0-9]*; do " <>
+          "tr '\\0' '\\n' < \"$p/environ\" 2>/dev/null | grep -qx '#{@exec_marker}' && kill -TERM \"${p#/proc/}\" 2>/dev/null; " <>
+          "done; true"
+
+      docker(settings, ["exec", container_name(workspace), "sh", "-c", script])
+    end
+
+    :ok
   end
 
   defp run_args(workspace, name, settings) do

@@ -72,6 +72,7 @@ defmodule SymphonyElixir.AgentRunner do
         run_backend_turns(workspace, issue, agent_update_recipient, opts, worker_host, route)
       end
     after
+      Sandbox.reap(workspace, issue_config.settings)
       Workspace.run_after_run_hook(workspace, issue, worker_host, settings: issue_config.settings)
     end
   end
