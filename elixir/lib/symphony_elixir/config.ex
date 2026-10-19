@@ -908,7 +908,6 @@ defmodule SymphonyElixir.Config do
   end
 
   defp github_repo_slug?(value) when is_binary(value), do: String.match?(value, @github_repo_pattern)
-  defp github_repo_slug?(_value), do: false
 
   defp repo_relative_workflow_path?(value) when is_binary(value) do
     trimmed_value = String.trim(value)

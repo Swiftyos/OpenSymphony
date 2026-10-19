@@ -848,8 +848,6 @@ defmodule SymphonyElixir.StatusDashboard do
     end
   end
 
-  defp running_account_prefix(_running_entry), do: nil
-
   defp account_status(label, state, reset_at) do
     state_part =
       case state do
@@ -1461,8 +1459,6 @@ defmodule SymphonyElixir.StatusDashboard do
       true -> map_value(message, ["payload", :payload]) || message
     end
   end
-
-  defp unwrap_codex_message_payload(message), do: message
 
   defp humanize_codex_payload(%{} = payload) do
     case map_value(payload, ["method", :method]) do

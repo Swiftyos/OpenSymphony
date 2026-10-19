@@ -552,8 +552,6 @@ defmodule SymphonyElixir.Orchestrator do
     if running_entry_backend(running_entry) == "codex", do: "codex", else: "agent"
   end
 
-  defp stall_activity_label(_running_entry), do: "agent"
-
   defp terminate_task(pid) when is_pid(pid) do
     case Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, pid) do
       :ok ->
@@ -1225,7 +1223,7 @@ defmodule SymphonyElixir.Orchestrator do
     |> Map.merge(retry_issue_metadata(issue))
   end
 
-  defp format_account_selection_error(%{backend: backend, reason: reason} = selection_error) do
+  defp format_account_selection_error(%{reason: reason} = selection_error) do
     next_reset =
       case Map.get(selection_error, :next_available_at) do
         reset when is_binary(reset) and reset != "" -> "; next reset at #{reset}"
@@ -1238,10 +1236,8 @@ defmodule SymphonyElixir.Orchestrator do
       |> Enum.map_join("; ", &format_skipped_account/1)
 
     skipped_suffix = if skipped == "", do: "", else: "; skipped #{skipped}"
-    "#{reason || "no usable #{backend} accounts"}#{next_reset}#{skipped_suffix}"
+    "#{reason}#{next_reset}#{skipped_suffix}"
   end
-
-  defp format_account_selection_error(reason), do: inspect(reason)
 
   defp format_skipped_account(skipped) do
     account_id = Map.get(skipped, :account_id) || Map.get(skipped, "account_id") || "unknown"
@@ -1517,8 +1513,6 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp account_reset_at(_metadata), do: nil
-
   defp account_failure_reason(metadata) when is_map(metadata) do
     case Map.get(metadata, :account_summary) do
       %{failure_reason: reason} when is_binary(reason) -> reason
@@ -1526,8 +1520,6 @@ defmodule SymphonyElixir.Orchestrator do
       _ -> nil
     end
   end
-
-  defp account_failure_reason(_metadata), do: nil
 
   defp snapshot_agent_totals(%State{} = state) do
     state.agent_totals
@@ -1543,43 +1535,29 @@ defmodule SymphonyElixir.Orchestrator do
     Map.get(metadata, :agent_server_pid) || Map.get(metadata, :codex_app_server_pid)
   end
 
-  defp running_entry_agent_server_pid(_metadata), do: nil
-
   defp running_entry_input_tokens(metadata) when is_map(metadata) do
     Map.get(metadata, :agent_input_tokens) || Map.get(metadata, :codex_input_tokens, 0)
   end
-
-  defp running_entry_input_tokens(_metadata), do: 0
 
   defp running_entry_output_tokens(metadata) when is_map(metadata) do
     Map.get(metadata, :agent_output_tokens) || Map.get(metadata, :codex_output_tokens, 0)
   end
 
-  defp running_entry_output_tokens(_metadata), do: 0
-
   defp running_entry_total_tokens(metadata) when is_map(metadata) do
     Map.get(metadata, :agent_total_tokens) || Map.get(metadata, :codex_total_tokens, 0)
   end
-
-  defp running_entry_total_tokens(_metadata), do: 0
 
   defp running_entry_last_timestamp(metadata) when is_map(metadata) do
     Map.get(metadata, :last_agent_timestamp) || Map.get(metadata, :last_codex_timestamp)
   end
 
-  defp running_entry_last_timestamp(_metadata), do: nil
-
   defp running_entry_last_message(metadata) when is_map(metadata) do
     Map.get(metadata, :last_agent_message) || Map.get(metadata, :last_codex_message)
   end
 
-  defp running_entry_last_message(_metadata), do: nil
-
   defp running_entry_last_event(metadata) when is_map(metadata) do
     Map.get(metadata, :last_agent_event) || Map.get(metadata, :last_codex_event)
   end
-
-  defp running_entry_last_event(_metadata), do: nil
 
   defp codex_running_entry?(running_entry) when is_map(running_entry) do
     Map.get(running_entry, :backend) == "codex" or
@@ -1587,8 +1565,6 @@ defmodule SymphonyElixir.Orchestrator do
       Map.has_key?(running_entry, :last_codex_timestamp) or
       Map.has_key?(running_entry, :codex_app_server_pid)
   end
-
-  defp codex_running_entry?(_running_entry), do: false
 
   defp integrate_codex_update(running_entry, %{event: event, timestamp: timestamp} = update) do
     token_delta = extract_codex_token_delta(running_entry, update)
@@ -1889,8 +1865,6 @@ defmodule SymphonyElixir.Orchestrator do
     running_entry
   end
 
-  defp record_account_update(running_entry, _update, _token_delta), do: running_entry
-
   defp record_account_completion(running_entry, :normal) when is_map(running_entry) do
     Accounts.mark_success(Map.get(running_entry, :account), Config.settings!())
   end
@@ -1936,8 +1910,6 @@ defmodule SymphonyElixir.Orchestrator do
       "turn_ended_with_error"
     ]
   end
-
-  defp account_failure_update?(_update), do: false
 
   defp account_value(nil, _key), do: nil
 

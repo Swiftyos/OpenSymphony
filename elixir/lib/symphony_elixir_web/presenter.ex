@@ -256,9 +256,6 @@ defmodule SymphonyElixirWeb.Presenter do
           |> Accounts.account_summary()
           |> Map.put(:daily_token_budget, Map.get(account, :daily_token_budget))
         end)
-
-      _ ->
-        []
     end
   rescue
     _ -> []

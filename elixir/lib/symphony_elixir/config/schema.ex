@@ -308,6 +308,8 @@ defmodule SymphonyElixir.Config.Schema do
     use Ecto.Schema
     import Ecto.Changeset
 
+    @type t :: %__MODULE__{}
+
     alias SymphonyElixir.Config.Schema
     @effort_values ["low", "medium", "high", "xhigh", "max"]
 
@@ -375,6 +377,8 @@ defmodule SymphonyElixir.Config.Schema do
     use Ecto.Schema
     import Ecto.Changeset
 
+    @type t :: %__MODULE__{}
+
     @primary_key false
     embedded_schema do
       field(:command, :string, default: "opencode serve --hostname 127.0.0.1 --port 0")
@@ -427,6 +431,8 @@ defmodule SymphonyElixir.Config.Schema do
     use Ecto.Schema
     import Ecto.Changeset
 
+    @type t :: %__MODULE__{}
+
     @primary_key false
     embedded_schema do
       field(:command, :string, default: "codex app-server")
@@ -475,6 +481,8 @@ defmodule SymphonyElixir.Config.Schema do
     @moduledoc false
     use Ecto.Schema
     import Ecto.Changeset
+
+    @type t :: %__MODULE__{}
     alias SymphonyElixir.Config.Schema
 
     @permission_modes [
@@ -529,6 +537,8 @@ defmodule SymphonyElixir.Config.Schema do
     @moduledoc false
     use Ecto.Schema
     import Ecto.Changeset
+
+    @type t :: %__MODULE__{}
 
     @primary_key false
     embedded_schema do
@@ -753,9 +763,6 @@ defmodule SymphonyElixir.Config.Schema do
 
       {:error, {:invalid_workflow_config, _message} = reason} ->
         {:error, reason}
-
-      {:error, reason} ->
-        {:error, {:invalid_workflow_config, inspect(reason)}}
     end
   end
 
@@ -1106,7 +1113,6 @@ defmodule SymphonyElixir.Config.Schema do
     case resolve_path_value(value, default, base_dir) do
       nil -> nil
       resolved when is_binary(resolved) -> normalize_optional_string(resolved)
-      _ -> nil
     end
   end
 
@@ -1118,7 +1124,6 @@ defmodule SymphonyElixir.Config.Schema do
     |> case do
       nil -> nil
       resolved when is_binary(resolved) -> normalize_optional_string(resolved)
-      _ -> nil
     end
   end
 
@@ -1135,9 +1140,6 @@ defmodule SymphonyElixir.Config.Schema do
         resolved
         |> normalize_optional_string()
         |> maybe_expand_local_repo_path(base_dir)
-
-      _ ->
-        nil
     end
   end
 

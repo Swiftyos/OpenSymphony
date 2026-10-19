@@ -1279,8 +1279,6 @@ defmodule SymphonyElixir.Accounts do
     end)
   end
 
-  defp rate_limit_bucket_entries(_rate_limits), do: []
-
   defp session_rate_limit_bucket(rate_limits) do
     Map.get(rate_limits, "session") ||
       Map.get(rate_limits, :session) ||
@@ -1381,7 +1379,6 @@ defmodule SymphonyElixir.Accounts do
     |> Kernel.<>("\n")
   end
 
-  defp usage_periods_csv_path(nil), do: nil
   defp usage_periods_csv_path(%{account_dir: account_dir}) when is_binary(account_dir), do: Path.join(account_dir, @usage_periods_file)
   defp usage_periods_csv_path(_account), do: nil
 

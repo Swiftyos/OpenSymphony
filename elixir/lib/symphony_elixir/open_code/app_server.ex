@@ -479,6 +479,9 @@ defmodule SymphonyElixir.OpenCode.AppServer do
          turn_timeout_ms,
          stall_timeout_ms
        ) do
+    message_ref = message_task.ref
+    listener_ref = listener_task.ref
+
     receive do
       {^turn_ref, :activity, activity_ms} ->
         await_turn_result(
@@ -500,13 +503,13 @@ defmodule SymphonyElixir.OpenCode.AppServer do
         abort_session(session)
         {:error, reason}
 
-      {ref, result} when ref == message_task.ref ->
+      {^message_ref, result} ->
         Process.demonitor(message_task.ref, [:flush])
         Process.sleep(@post_message_listener_drain_ms)
         stop_async_task(listener_task)
         result
 
-      {ref, _result} when ref == listener_task.ref ->
+      {^listener_ref, _result} ->
         Process.demonitor(listener_task.ref, [:flush])
 
         await_turn_result(
@@ -520,7 +523,7 @@ defmodule SymphonyElixir.OpenCode.AppServer do
           stall_timeout_ms
         )
 
-      {:DOWN, ref, :process, _pid, reason} when ref == message_task.ref ->
+      {:DOWN, ^message_ref, :process, _pid, reason} ->
         stop_async_task(listener_task)
 
         {:error,
@@ -534,7 +537,7 @@ defmodule SymphonyElixir.OpenCode.AppServer do
            })
          )}
 
-      {:DOWN, ref, :process, _pid, _reason} when ref == listener_task.ref ->
+      {:DOWN, ^listener_ref, :process, _pid, _reason} ->
         await_turn_result(
           session,
           turn_ref,
@@ -620,8 +623,6 @@ defmodule SymphonyElixir.OpenCode.AppServer do
     _error ->
       :ok
   end
-
-  defp stop_async_task(_task), do: :ok
 
   defp abort_session(session) do
     case Req.post(session.request, url: "/session/#{session.session_id}/abort", json: %{}) do
@@ -1099,20 +1100,6 @@ defmodule SymphonyElixir.OpenCode.AppServer do
     )
   end
 
-  defp healthcheck_response_error(context, response) do
-    opencode_error(
-      :healthcheck_timeout,
-      :healthcheck,
-      "OpenCode never reported healthy before read_timeout_ms elapsed",
-      Map.merge(context, %{
-        method: "GET",
-        path: "/global/health",
-        response_body: preview_value(response),
-        hint: "Verify the OpenCode server can answer GET /global/health successfully before starting a turn."
-      })
-    )
-  end
-
   defp healthcheck_transport_error(context, reason) do
     transport_reason = req_transport_reason(reason)
 
@@ -1176,15 +1163,12 @@ defmodule SymphonyElixir.OpenCode.AppServer do
 
   defp request_timeout_kind(:create_session), do: :session_create_timeout
   defp request_timeout_kind(:post_turn_message), do: :message_post_timeout
-  defp request_timeout_kind(other), do: :"#{other}_timeout"
 
   defp request_http_error_kind(:create_session), do: :session_create_http_error
   defp request_http_error_kind(:post_turn_message), do: :message_post_http_error
-  defp request_http_error_kind(other), do: :"#{other}_http_error"
 
   defp request_transport_error_kind(:create_session), do: :session_create_transport_error
   defp request_transport_error_kind(:post_turn_message), do: :message_post_transport_error
-  defp request_transport_error_kind(other), do: :"#{other}_transport_error"
 
   defp req_transport_reason(%Req.TransportError{reason: reason}), do: reason
   defp req_transport_reason(_reason), do: nil

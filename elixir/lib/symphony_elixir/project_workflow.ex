@@ -130,7 +130,7 @@ defmodule SymphonyElixir.ProjectWorkflow do
   end
 
   defp validate_map_keys(%{} = map, allowed_keys, prefix) do
-    case Enum.find(Map.keys(map), &(not MapSet.member?(allowed_keys, &1))) do
+    case Enum.find(Map.keys(map), &(not Enum.member?(allowed_keys, &1))) do
       nil ->
         :ok
 

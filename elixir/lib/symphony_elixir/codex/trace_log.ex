@@ -461,8 +461,6 @@ defmodule SymphonyElixir.Codex.TraceLog do
     |> truncate_inline()
   end
 
-  defp inline_text(text), do: text |> inspect(limit: 10, printable_limit: 300) |> truncate_inline()
-
   defp truncate_inline(text) when is_binary(text) do
     if String.length(text) > 160 do
       String.slice(text, 0, 160) <> "..."

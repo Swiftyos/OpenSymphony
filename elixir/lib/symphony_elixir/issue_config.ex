@@ -146,8 +146,6 @@ defmodule SymphonyElixir.IssueConfig do
     end
   end
 
-  defp prompt_template(_prompt), do: Config.default_prompt_template()
-
   defp project_slug(%{project_slug: project_slug}) when is_binary(project_slug), do: project_slug
   defp project_slug(%{"project_slug" => project_slug}) when is_binary(project_slug), do: project_slug
   defp project_slug(_issue), do: nil

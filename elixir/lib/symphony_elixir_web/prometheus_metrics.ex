@@ -100,7 +100,6 @@ defmodule SymphonyElixirWeb.PrometheusMetrics do
   defp accounts(%{accounts: %{enabled: true}} = settings) do
     case Accounts.list(nil, settings) do
       {:ok, accounts} -> accounts
-      _ -> []
     end
   rescue
     _ -> []
@@ -443,8 +442,6 @@ defmodule SymphonyElixirWeb.PrometheusMetrics do
         Map.get(bucket, :window_minutes)
     )
   end
-
-  defp bucket_window_minutes(_bucket), do: nil
 
   defp bucket_reset_at_string(bucket) do
     case reset_time(bucket) do
