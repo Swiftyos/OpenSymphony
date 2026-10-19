@@ -47,10 +47,21 @@ defmodule SymphonyElixirWeb.Router do
   end
 
   scope "/", SymphonyElixirWeb do
+    pipe_through(:browser)
+
+    get("/reset/:token", AuthController, :reset)
+    post("/reset/:token", AuthController, :do_reset)
+  end
+
+  scope "/", SymphonyElixirWeb do
     pipe_through([:browser, :signed_in])
+
+    get("/account", AuthController, :account)
+    post("/account/password", AuthController, :update_password)
 
     live_session :signed_in, on_mount: {SymphonyElixirWeb.UserAuth, :require_user} do
       live("/", DashboardLive, :index)
+      live("/admin/users", UsersLive, :index)
     end
   end
 

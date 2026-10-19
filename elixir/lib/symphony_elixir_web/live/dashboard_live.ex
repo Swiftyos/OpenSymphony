@@ -9,6 +9,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   """
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
+  import SymphonyElixirWeb.Topbar
   require Logger
 
   alias SymphonyElixir.{Auth, Config, FactoryControls, IssueStage, Orchestrator, Tracker, UsageLedger, Users}
@@ -163,52 +164,22 @@ defmodule SymphonyElixirWeb.DashboardLive do
   def render(assigns) do
     ~H"""
     <section class="dashboard-shell">
-      <header class="topbar">
-        <div class="brand">
-          <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
-            <path d="M6 22 L13 10 L19 18 L26 8" />
-            <circle cx="6" cy="22" r="2.6" />
-            <circle cx="13" cy="10" r="2.6" />
-            <circle cx="19" cy="18" r="2.6" />
-            <circle cx="26" cy="8" r="2.6" />
-          </svg>
-          <div>
-            <h1 class="ops-title">
-              <%= if @instance_name do %>
-                <%= @instance_name %> Operations Dashboard
-              <% else %>
-                Operations Dashboard
-              <% end %>
-            </h1>
-            <p class="ops-subtitle">Symphony agent factory</p>
-          </div>
-        </div>
-
-        <div class="topbar-meta">
-          <span class="status-badge status-badge-live">
-            <span class="status-badge-dot"></span>
-            Live
-          </span>
-          <span class="status-badge status-badge-offline">
-            <span class="status-badge-dot"></span>
-            Offline
-          </span>
-          <span :if={!@payload[:error]} class="meta-item numeric">
-            <%= @payload.counts.running %>/<%= @payload.capacity.max_concurrent_agents %> agents
-          </span>
-          <span class="meta-item numeric"><%= polling_label(@payload[:polling]) %></span>
-          <a class="meta-link" href="/api/v1/state">API</a>
-          <a class="meta-link" href="/metrics">Metrics</a>
-          <div :if={!@current_user.local} class="user-chip">
-            <img :if={@current_user.avatar_url} class="user-avatar" src={@current_user.avatar_url} alt="" />
-            <span :if={!@current_user.avatar_url} class="user-avatar user-avatar-initial">
-              <%= String.first(@current_user.name || "?") %>
-            </span>
-            <span class="user-name" title={user_title(@current_user)}><%= @current_user.name %></span>
-            <a class="user-signout" href="/logout">Sign out</a>
-          </div>
-        </div>
-      </header>
+      <.topbar instance_name={@instance_name} current_user={@current_user}>
+        <span class="status-badge status-badge-live">
+          <span class="status-badge-dot"></span>
+          Live
+        </span>
+        <span class="status-badge status-badge-offline">
+          <span class="status-badge-dot"></span>
+          Offline
+        </span>
+        <span :if={!@payload[:error]} class="meta-item numeric">
+          <%= @payload.counts.running %>/<%= @payload.capacity.max_concurrent_agents %> agents
+        </span>
+        <span class="meta-item numeric"><%= polling_label(@payload[:polling]) %></span>
+        <a class="meta-link" href="/api/v1/state">API</a>
+        <a class="meta-link" href="/metrics">Metrics</a>
+      </.topbar>
 
       <%= if @payload[:error] do %>
         <section class="panel error-panel">
@@ -436,19 +407,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
       <% end %>
     </section>
     """
-  end
-
-  defp user_title(user) do
-    teams = Enum.map_join(user.teams, ", ", & &1.key)
-
-    role =
-      cond do
-        user.admin -> "Linear admin"
-        user.guest -> "Guest (read-only)"
-        true -> "Member"
-      end
-
-    "#{user.email || user.name} · #{role}" <> if(teams != "", do: " · teams #{teams}", else: "")
   end
 
   defp load_payload do

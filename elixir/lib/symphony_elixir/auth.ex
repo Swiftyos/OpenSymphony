@@ -126,9 +126,11 @@ defmodule SymphonyElixir.Auth do
   @doc """
   Resolves the session's account id to a user with current Linear permissions.
   """
-  @spec user_for_id(String.t() | nil) :: {:ok, User.t()} | {:error, atom()}
-  def user_for_id(account_id) do
+  @spec user_for_id(String.t() | nil, pos_integer() | nil) :: {:ok, User.t()} | {:error, atom()}
+  def user_for_id(account_id, session_version \\ nil) do
     case Users.get(account_id) do
+      # A password change or disable bumps the version and ends older sessions.
+      %{session_version: version} when is_integer(session_version) and version != session_version -> {:error, :signed_out}
       %{status: "active"} = account -> user_for_account(account)
       %{status: "pending"} -> {:error, :pending}
       _ -> {:error, :signed_out}
@@ -227,6 +229,7 @@ defmodule SymphonyElixir.Auth do
   @impl true
   def init(_opts) do
     :ets.new(@table, [:named_table, :public, :set, read_concurrency: true])
+    SymphonyElixirWeb.RateLimit.create_table()
     {:ok, %{}}
   end
 

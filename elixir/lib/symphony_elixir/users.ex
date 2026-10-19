@@ -27,6 +27,7 @@ defmodule SymphonyElixir.Users do
   @min_password_length 12
   @max_failures 5
   @lockout_ms 15 * 60_000
+  @reset_ttl_ms 24 * 3_600_000
 
   @type user :: %{
           id: String.t(),
@@ -36,7 +37,8 @@ defmodule SymphonyElixir.Users do
           bootstrap_admin: boolean(),
           created_at: String.t(),
           approved_by: String.t() | nil,
-          last_sign_in_at: String.t() | nil
+          last_sign_in_at: String.t() | nil,
+          session_version: pos_integer()
         }
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -116,6 +118,61 @@ defmodule SymphonyElixir.Users do
   @spec reject(String.t()) :: :ok | {:error, atom()}
   def reject(id), do: GenServer.call(__MODULE__, {:reject, id})
 
+  @spec enable(String.t(), String.t()) :: {:ok, user()} | {:error, atom()}
+  def enable(id, by), do: GenServer.call(__MODULE__, {:set_status, id, "active", by})
+
+  @doc """
+  Changes a password after checking the current one. Signs the account out of
+  every other session.
+  """
+  @spec change_password(String.t(), String.t(), String.t(), String.t()) :: {:ok, user()} | {:error, atom()}
+  def change_password(id, current, new_password, confirmation) do
+    with %{} = record <- lookup(id) || {:error, :not_found},
+         true <- verify_password(current, record.password_hash) || {:error, :invalid_credentials},
+         :ok <- validate_password(new_password, confirmation) do
+      GenServer.call(__MODULE__, {:set_password, id, hash_password(new_password)})
+    end
+  end
+
+  @doc """
+  Creates a one-time password reset link token (valid #{div(24 * 3_600_000, 3_600_000)} hours) for an
+  admin to hand to the person. Only a hash of the token is stored.
+  """
+  @spec create_reset_token(String.t()) :: {:ok, String.t()} | {:error, atom()}
+  def create_reset_token(id) do
+    token = Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
+
+    case GenServer.call(__MODULE__, {:set_reset, id, token_hash(token)}) do
+      :ok -> {:ok, token}
+      error -> error
+    end
+  end
+
+  @spec reset_account_for_token(String.t()) :: user() | nil
+  def reset_account_for_token(token) when is_binary(token) do
+    hash = token_hash(token)
+    now_ms = System.system_time(:millisecond)
+
+    if ready?() do
+      Enum.find_value(all_records(), fn record ->
+        reset = record[:reset]
+
+        if is_map(reset) and :crypto.hash_equals(Base.decode64!(reset.hash), hash) and reset.expires_ms > now_ms,
+          do: public(record)
+      end)
+    end
+  end
+
+  def reset_account_for_token(_token), do: nil
+
+  @spec reset_password(String.t(), String.t(), String.t()) :: {:ok, user()} | {:error, atom()}
+  def reset_password(token, new_password, confirmation) do
+    with %{id: id} <- reset_account_for_token(token) || {:error, :invalid_reset_token},
+         :ok <- validate_password(new_password, confirmation) do
+      GenServer.call(__MODULE__, {:set_password, id, hash_password(new_password)})
+    end
+  end
+
   @spec any?() :: boolean()
   def any?, do: ready?() and :ets.info(@table, :size) > 0
 
@@ -159,7 +216,9 @@ defmodule SymphonyElixir.Users do
           bootstrap_admin: first?,
           created_at: now(),
           approved_by: if(first?, do: "bootstrap", else: nil),
-          last_sign_in_at: nil
+          last_sign_in_at: nil,
+          session_version: 1,
+          reset: nil
         }
 
         :ets.insert(@table, {record.id, record})
@@ -206,8 +265,19 @@ defmodule SymphonyElixir.Users do
       nil ->
         {:reply, {:error, :not_found}, state}
 
+      %{bootstrap_admin: true} when status == "disabled" ->
+        # The bootstrap account is the one admin Symphony itself guarantees.
+        {:reply, {:error, :cannot_disable_bootstrap}, state}
+
       record ->
-        record = %{record | status: status, approved_by: if(status == "active", do: by, else: record.approved_by)}
+        record = %{
+          record
+          | status: status,
+            approved_by: if(status == "active", do: record.approved_by || by, else: record.approved_by),
+            # Disabling signs the account out everywhere.
+            session_version: if(status == "disabled", do: record.session_version + 1, else: record.session_version)
+        }
+
         :ets.insert(@table, {id, record})
         persist(state.path)
         {:reply, {:ok, public(record)}, state}
@@ -226,6 +296,32 @@ defmodule SymphonyElixir.Users do
 
       _active ->
         {:reply, {:error, :not_pending}, state}
+    end
+  end
+
+  def handle_call({:set_password, id, password_hash}, _from, state) do
+    case lookup(id) do
+      nil ->
+        {:reply, {:error, :not_found}, state}
+
+      record ->
+        record = %{record | password_hash: password_hash, session_version: record.session_version + 1, reset: nil}
+        :ets.insert(@table, {id, record})
+        persist(state.path)
+        {:reply, {:ok, public(record)}, %{state | failures: Map.delete(state.failures, id)}}
+    end
+  end
+
+  def handle_call({:set_reset, id, hash}, _from, state) do
+    case lookup(id) do
+      nil ->
+        {:reply, {:error, :not_found}, state}
+
+      record ->
+        reset = %{hash: Base.encode64(hash), expires_ms: System.system_time(:millisecond) + @reset_ttl_ms}
+        :ets.insert(@table, {id, %{record | reset: reset}})
+        persist(state.path)
+        {:reply, :ok, state}
     end
   end
 
@@ -300,7 +396,9 @@ defmodule SymphonyElixir.Users do
     if ready?(), do: Enum.find(all_records(), &(&1.username == login or &1.email == login))
   end
 
-  defp public(record), do: Map.delete(record, :password_hash)
+  defp public(record), do: Map.drop(record, [:password_hash, :reset])
+
+  defp token_hash(token), do: :crypto.hash(:sha256, token)
 
   defp now, do: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
 
@@ -349,11 +447,18 @@ defmodule SymphonyElixir.Users do
       bootstrap_admin: raw["bootstrap_admin"] == true,
       created_at: raw["created_at"],
       approved_by: raw["approved_by"],
-      last_sign_in_at: raw["last_sign_in_at"]
+      last_sign_in_at: raw["last_sign_in_at"],
+      session_version: raw["session_version"] || 1,
+      reset: load_reset(raw["reset"])
     }
 
     :ets.insert(@table, {id, record})
   end
 
   defp load_record(_raw), do: :ok
+
+  defp load_reset(%{"hash" => hash, "expires_ms" => expires_ms}) when is_binary(hash) and is_integer(expires_ms),
+    do: %{hash: hash, expires_ms: expires_ms}
+
+  defp load_reset(_reset), do: nil
 end

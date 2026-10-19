@@ -11,7 +11,12 @@ defmodule SymphonyElixirWeb.AuthController do
   alias Phoenix.HTML.Safe
   alias Plug.CSRFProtection
   alias SymphonyElixir.{Auth, Config, Users}
-  alias SymphonyElixirWeb.{ObservabilityPubSub, UserAuth}
+  alias SymphonyElixirWeb.{ObservabilityPubSub, RateLimit, UserAuth}
+
+  # Every action that runs a password check is throttled per client IP.
+  plug(RateLimit, :login when action in [:create, :update_password])
+  plug(RateLimit, :signup when action in [:register])
+  plug(RateLimit, :reset when action in [:do_reset])
 
   @errors %{
     invalid_credentials: "That username or password isn't right.",
@@ -26,7 +31,8 @@ defmodule SymphonyElixirWeb.AuthController do
     password_too_short: "Use at least 12 characters for your password.",
     password_mismatch: "The passwords don't match.",
     username_taken: "That username is taken.",
-    email_taken: "An account with that email already exists."
+    email_taken: "An account with that email already exists.",
+    invalid_reset_token: "This reset link is invalid or has expired. Ask an admin for a new one."
   }
 
   @spec new(Plug.Conn.t(), map()) :: Plug.Conn.t()
@@ -98,6 +104,55 @@ defmodule SymphonyElixirWeb.AuthController do
     |> redirect(to: if(Auth.mode() == :local, do: "/", else: "/login"))
   end
 
+  @spec account(Plug.Conn.t(), map()) :: Plug.Conn.t()
+  def account(conn, _params) do
+    case conn.assigns[:current_user] do
+      %Auth.User{local: false} = user -> render_page(conn, :account, %{user: user})
+      _ -> redirect(conn, to: "/")
+    end
+  end
+
+  @spec update_password(Plug.Conn.t(), map()) :: Plug.Conn.t()
+  def update_password(conn, params) do
+    with %Auth.User{local: false} = user <- conn.assigns[:current_user],
+         {:ok, _account} <-
+           Users.change_password(user.id, params["current_password"] || "", params["password"] || "", params["password_confirmation"] || "") do
+      # The version bump signed out every session, including this one; start a fresh one.
+      conn
+      |> UserAuth.sign_in(user)
+      |> render_page(:account, %{user: user, notice: "Password changed. Other sessions were signed out."})
+    else
+      {:error, reason} ->
+        conn |> put_status(422) |> render_page(:account, %{user: conn.assigns.current_user, error: error(reason)})
+
+      _ ->
+        redirect(conn, to: "/")
+    end
+  end
+
+  @spec reset(Plug.Conn.t(), map()) :: Plug.Conn.t()
+  def reset(conn, %{"token" => token}) do
+    case Users.reset_account_for_token(token) do
+      %{username: username} -> render_page(conn, :reset, %{token: token, username: username})
+      nil -> conn |> put_status(404) |> render_page(:message, %{title: "Link expired", error: error(:invalid_reset_token)})
+    end
+  end
+
+  @spec do_reset(Plug.Conn.t(), map()) :: Plug.Conn.t()
+  def do_reset(conn, %{"token" => token} = params) do
+    case Users.reset_password(token, params["password"] || "", params["password_confirmation"] || "") do
+      {:ok, _account} ->
+        render_page(conn, :message, %{title: "Password set", notice: "Your password was updated. You can sign in now."})
+
+      {:error, :invalid_reset_token} ->
+        conn |> put_status(404) |> render_page(:message, %{title: "Link expired", error: error(:invalid_reset_token)})
+
+      {:error, reason} ->
+        username = (Users.reset_account_for_token(token) || %{})[:username]
+        conn |> put_status(422) |> render_page(:reset, %{token: token, username: username, error: error(reason)})
+    end
+  end
+
   defp error(reason), do: Map.get(@errors, reason, "Something went wrong. Try again.")
 
   defp render_page(conn, page, extra) do
@@ -110,6 +165,10 @@ defmodule SymphonyElixirWeb.AuthController do
           username: nil,
           email: nil,
           first?: false,
+          notice: nil,
+          user: nil,
+          token: nil,
+          title: nil,
           csrf_token: CSRFProtection.get_csrf_token(),
           instance: Config.instance_name() || "Symphony"
         },
@@ -193,6 +252,57 @@ defmodule SymphonyElixirWeb.AuthController do
                   <button class="login-button" type="submit">{if @first?, do: "Create admin account", else: "Request access"}</button>
                 </form>
                 <p :if={!@first?} class="login-help">Already have an account? <a href="/login">Sign in</a>.</p>
+              <% :account -> %>
+                <h1 class="login-title">Your account</h1>
+                <p class="login-copy">
+                  Signed in as <strong>@{@user.username}</strong> ({@user.email}). Teams and permissions come from Linear.
+                </p>
+                <form class="login-form" method="post" action="/account/password">
+                  <input type="hidden" name="_csrf_token" value={@csrf_token} />
+                  <label class="login-label" for="current_password">Current password</label>
+                  <input id="current_password" class="login-input" type="password" name="current_password" autocomplete="current-password" required />
+                  <label class="login-label" for="password">New password</label>
+                  <input id="password" class="login-input" type="password" name="password" autocomplete="new-password" minlength="12" required />
+                  <label class="login-label" for="password_confirmation">Confirm new password</label>
+                  <input
+                    id="password_confirmation"
+                    class="login-input"
+                    type="password"
+                    name="password_confirmation"
+                    autocomplete="new-password"
+                    minlength="12"
+                    required
+                  />
+                  <p :if={@notice} class="login-notice" role="status">{@notice}</p>
+                  <p :if={@error} class="login-error" role="alert">{@error}</p>
+                  <button class="login-button" type="submit">Change password</button>
+                </form>
+                <p class="login-help"><a href="/">Back to the dashboard</a></p>
+              <% :reset -> %>
+                <h1 class="login-title">Set a new password</h1>
+                <p :if={@username} class="login-copy">For <strong>@{@username}</strong>.</p>
+                <form class="login-form" method="post" action={"/reset/#{@token}"}>
+                  <input type="hidden" name="_csrf_token" value={@csrf_token} />
+                  <label class="login-label" for="password">New password</label>
+                  <input id="password" class="login-input" type="password" name="password" autocomplete="new-password" minlength="12" autofocus required />
+                  <label class="login-label" for="password_confirmation">Confirm new password</label>
+                  <input
+                    id="password_confirmation"
+                    class="login-input"
+                    type="password"
+                    name="password_confirmation"
+                    autocomplete="new-password"
+                    minlength="12"
+                    required
+                  />
+                  <p :if={@error} class="login-error" role="alert">{@error}</p>
+                  <button class="login-button" type="submit">Set password</button>
+                </form>
+              <% :message -> %>
+                <h1 class="login-title">{@title}</h1>
+                <p :if={@notice} class="login-notice" role="status">{@notice}</p>
+                <p :if={@error} class="login-error" role="alert">{@error}</p>
+                <p class="login-help"><a href="/login">Go to sign in</a></p>
               <% :pending -> %>
                 <h1 class="login-title">Request sent</h1>
                 <p class="login-copy">
@@ -210,4 +320,7 @@ defmodule SymphonyElixirWeb.AuthController do
   defp page_title(:login), do: "Sign in"
   defp page_title(:signup), do: "Create account"
   defp page_title(:pending), do: "Request sent"
+  defp page_title(:account), do: "Your account"
+  defp page_title(:reset), do: "Set a new password"
+  defp page_title(:message), do: "Symphony"
 end

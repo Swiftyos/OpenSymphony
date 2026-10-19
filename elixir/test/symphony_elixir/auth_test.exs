@@ -5,6 +5,7 @@ defmodule SymphonyElixir.AuthTest do
   import Phoenix.LiveViewTest
 
   alias SymphonyElixir.{Auth, FactoryControls, UsageLedger, Users}
+  alias SymphonyElixirWeb.RateLimit
 
   @endpoint SymphonyElixirWeb.Endpoint
   @password "correct horse battery"
@@ -80,6 +81,7 @@ defmodule SymphonyElixir.AuthTest do
   setup do
     Auth.clear_cache()
     Users.reset()
+    RateLimit.reset()
     FactoryControls.reset()
     UsageLedger.reset()
     saved = Map.new([:linear_client_module, :fake_linear_recipient], &{&1, Application.get_env(:symphony_elixir, &1)})
@@ -131,7 +133,9 @@ defmodule SymphonyElixir.AuthTest do
     start_supervised!({SymphonyElixirWeb.Endpoint, []})
   end
 
-  defp session_for(account), do: build_conn() |> Plug.Test.init_test_session(%{"user_id" => account.id})
+  defp session_for(account) do
+    build_conn() |> Plug.Test.init_test_session(%{"user_id" => account.id, "session_version" => Users.get(account.id).session_version})
+  end
 
   test "mode is local on loopback and accounts everywhere else" do
     write_workflow_file!(Workflow.workflow_file_path())
@@ -283,6 +287,81 @@ defmodule SymphonyElixir.AuthTest do
       render_hook(view, "factory_control", %{"stage" => "merge", "field" => "paused", "value" => true})
       assert_reply(view, %{ok: false, error: "Only Linear admins" <> _})
       refute FactoryControls.paused?("merge")
+    end
+  end
+
+  describe "account management" do
+    setup do
+      accounts_mode!()
+      start_endpoint!()
+      {:ok, admin} = register!("ada", "ada@acme.test")
+      {:ok, mia} = register!("mia", "mia@acme.test")
+      {:ok, mia} = Users.approve(mia.id, "ada")
+      %{admin: admin, mia: mia}
+    end
+
+    test "changing a password signs out other sessions", %{mia: mia} do
+      old_session = session_for(mia)
+      assert html_response(get(old_session, "/account"), 200) =~ "@mia"
+
+      new_password = "a brand new passphrase"
+
+      conn =
+        post(session_for(mia), "/account/password", %{
+          "current_password" => @password,
+          "password" => new_password,
+          "password_confirmation" => new_password
+        })
+
+      assert html_response(conn, 200) =~ "Password changed"
+      # The session that made the change stays signed in.
+      assert html_response(conn |> recycle() |> get("/"), 200) =~ "Mia Member"
+      # Every older session is signed out.
+      assert redirected_to(get(old_session, "/")) == "/login"
+      assert {:ok, _} = Auth.sign_in("mia", new_password)
+      assert {:error, :invalid_credentials} = Auth.sign_in("mia", @password)
+
+      conn = post(session_for(mia), "/account/password", %{"current_password" => "wrong password!!", "password" => new_password, "password_confirmation" => new_password})
+      assert html_response(conn, 422) =~ "isn&#39;t right"
+    end
+
+    test "reset links set a new password once and then stop working", %{mia: mia} do
+      {:ok, token} = Users.create_reset_token(mia.id)
+      assert html_response(get(build_conn(), "/reset/#{token}"), 200) =~ "@mia"
+
+      new_password = "reset passphrase 123"
+      conn = post(build_conn(), "/reset/#{token}", %{"password" => new_password, "password_confirmation" => new_password})
+      assert html_response(conn, 200) =~ "Password set"
+      assert {:ok, _} = Auth.sign_in("mia", new_password)
+
+      assert html_response(get(build_conn(), "/reset/#{token}"), 404) =~ "invalid or has expired"
+      assert html_response(get(build_conn(), "/reset/not-a-token"), 404) =~ "invalid or has expired"
+    end
+
+    test "admins manage users; disabling signs the person out", %{admin: admin, mia: mia} do
+      assert {:error, {:redirect, %{to: "/"}}} = live(session_for(mia), "/admin/users")
+
+      mia_session = session_for(mia)
+      {:ok, view, html} = live(session_for(admin), "/admin/users")
+      assert html =~ "@mia"
+      assert html =~ "Member · PAY"
+
+      view |> element(~s(button[phx-click="reset"][phx-value-id="#{mia.id}"])) |> render_click()
+      assert render(view) =~ "/reset/"
+
+      view |> element(~s(button[phx-click="disable"][phx-value-id="#{mia.id}"])) |> render_click()
+      assert Users.get(mia.id).status == "disabled"
+      assert redirected_to(get(mia_session, "/")) == "/login"
+      assert {:error, :disabled} = Auth.sign_in("mia", @password)
+
+      # The first admin can't be disabled, by anyone.
+      assert {:error, :cannot_disable_bootstrap} = Users.disable(admin.id, "someone")
+    end
+
+    test "repeated sign-in attempts from one address are rate limited" do
+      statuses = for _ <- 1..21, do: post(build_conn(), "/login", %{"login" => "mia", "password" => "nope nope nope"}).status
+      assert List.last(statuses) == 429
+      assert Enum.count(statuses, &(&1 == 401)) == 20
     end
   end
 end

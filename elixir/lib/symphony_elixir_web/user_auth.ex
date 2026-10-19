@@ -10,9 +10,10 @@ defmodule SymphonyElixirWeb.UserAuth do
   import Plug.Conn
   import Phoenix.Controller
 
-  alias SymphonyElixir.{Auth, Config}
+  alias SymphonyElixir.{Auth, Config, Users}
 
   @session_key "user_id"
+  @version_key "session_version"
 
   @spec fetch_current_user(Plug.Conn.t(), term()) :: Plug.Conn.t()
   def fetch_current_user(conn, _opts) do
@@ -21,7 +22,7 @@ defmodule SymphonyElixirWeb.UserAuth do
         assign(conn, :current_user, Auth.local_user())
 
       :accounts ->
-        case Auth.user_for_id(get_session(conn, @session_key)) do
+        case Auth.user_for_id(get_session(conn, @session_key), get_session(conn, @version_key) || 0) do
           {:ok, user} -> assign(conn, :current_user, user)
           {:error, _reason} -> assign(conn, :current_user, nil)
         end
@@ -54,9 +55,16 @@ defmodule SymphonyElixirWeb.UserAuth do
 
   @spec sign_in(Plug.Conn.t(), Auth.User.t()) :: Plug.Conn.t()
   def sign_in(conn, %Auth.User{id: id}) do
+    version =
+      case Users.get(id) do
+        %{session_version: version} -> version
+        _ -> 0
+      end
+
     conn
     |> configure_session(renew: true)
     |> put_session(@session_key, id)
+    |> put_session(@version_key, version)
   end
 
   @spec sign_out(Plug.Conn.t()) :: Plug.Conn.t()
@@ -73,11 +81,21 @@ defmodule SymphonyElixirWeb.UserAuth do
         {:cont, Phoenix.Component.assign(socket, :current_user, Auth.local_user())}
 
       :accounts ->
-        case Auth.user_for_id(session[@session_key]) do
+        case Auth.user_for_id(session[@session_key], session[@version_key] || 0) do
           {:ok, user} -> {:cont, Phoenix.Component.assign(socket, :current_user, user)}
           {:error, _reason} -> {:halt, Phoenix.LiveView.redirect(socket, to: "/login")}
         end
     end
+  end
+
+  @doc """
+  LiveView mount hook for admin-only pages.
+  """
+  @spec require_admin(Phoenix.LiveView.Socket.t()) :: {:cont, Phoenix.LiveView.Socket.t()} | {:halt, Phoenix.LiveView.Socket.t()}
+  def require_admin(socket) do
+    if Auth.can_control?(socket.assigns[:current_user]),
+      do: {:cont, socket},
+      else: {:halt, Phoenix.LiveView.redirect(socket, to: "/")}
   end
 
   defp api_token_valid?(conn) do
