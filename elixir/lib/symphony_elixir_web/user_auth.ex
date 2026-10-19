@@ -1,18 +1,18 @@
 defmodule SymphonyElixirWeb.UserAuth do
   @moduledoc """
-  Plugs and LiveView hooks that put the signed-in Linear user on every request.
+  Plugs and LiveView hooks that put the signed-in user on every request.
 
-  In `:local` auth mode everyone is the local operator. In `:linear` mode the
-  browser session carries the user's Linear API key (encrypted cookie), and API
-  clients such as metrics scrapers may send one as `Authorization: Bearer <key>`.
+  In `:local` auth mode everyone is the local operator. In `:accounts` mode the
+  encrypted session cookie carries the account id; API clients such as metrics
+  scrapers may instead send `Authorization: Bearer <server.api_token>`.
   """
 
   import Plug.Conn
   import Phoenix.Controller
 
-  alias SymphonyElixir.Auth
+  alias SymphonyElixir.{Auth, Config}
 
-  @session_key "linear_api_key"
+  @session_key "user_id"
 
   @spec fetch_current_user(Plug.Conn.t(), term()) :: Plug.Conn.t()
   def fetch_current_user(conn, _opts) do
@@ -20,11 +20,9 @@ defmodule SymphonyElixirWeb.UserAuth do
       :local ->
         assign(conn, :current_user, Auth.local_user())
 
-      :linear ->
-        key = get_session(conn, @session_key) || bearer_key(conn)
-
-        case Auth.user_for_key(key) do
-          {:ok, user} -> conn |> assign(:current_user, user) |> assign(:linear_api_key, key)
+      :accounts ->
+        case Auth.user_for_id(get_session(conn, @session_key)) do
+          {:ok, user} -> assign(conn, :current_user, user)
           {:error, _reason} -> assign(conn, :current_user, nil)
         end
     end
@@ -43,51 +41,54 @@ defmodule SymphonyElixirWeb.UserAuth do
   def require_api_user(%{assigns: %{current_user: %Auth.User{}}} = conn, _opts), do: conn
 
   def require_api_user(conn, _opts) do
-    conn
-    |> put_resp_header("www-authenticate", ~s(Bearer realm="symphony"))
-    |> put_status(401)
-    |> json(%{error: %{code: "unauthorized", message: "Sign in at /login or send a Linear API key as a bearer token."}})
-    |> halt()
+    if api_token_valid?(conn) do
+      conn
+    else
+      conn
+      |> put_resp_header("www-authenticate", ~s(Bearer realm="symphony"))
+      |> put_status(401)
+      |> json(%{error: %{code: "unauthorized", message: "Sign in at /login or send server.api_token as a bearer token."}})
+      |> halt()
+    end
   end
 
-  @spec sign_in(Plug.Conn.t(), String.t()) :: Plug.Conn.t()
-  def sign_in(conn, api_key) do
+  @spec sign_in(Plug.Conn.t(), Auth.User.t()) :: Plug.Conn.t()
+  def sign_in(conn, %Auth.User{id: id}) do
     conn
     |> configure_session(renew: true)
-    |> put_session(@session_key, String.trim(api_key))
+    |> put_session(@session_key, id)
   end
 
   @spec sign_out(Plug.Conn.t()) :: Plug.Conn.t()
   def sign_out(conn), do: configure_session(conn, drop: true)
 
   @doc """
-  LiveView mount hook: assigns `:current_user` and the user's Linear key, or
-  redirects to the sign-in page.
+  LiveView mount hook: assigns `:current_user` or redirects to the sign-in page.
   """
   @spec on_mount(atom(), map(), map(), Phoenix.LiveView.Socket.t()) ::
           {:cont, Phoenix.LiveView.Socket.t()} | {:halt, Phoenix.LiveView.Socket.t()}
   def on_mount(:require_user, _params, session, socket) do
     case Auth.mode() do
       :local ->
-        {:cont, Phoenix.Component.assign(socket, current_user: Auth.local_user(), linear_api_key: nil)}
+        {:cont, Phoenix.Component.assign(socket, :current_user, Auth.local_user())}
 
-      :linear ->
-        key = session[@session_key]
-
-        case Auth.user_for_key(key) do
-          {:ok, user} ->
-            {:cont, Phoenix.Component.assign(socket, current_user: user, linear_api_key: key)}
-
-          {:error, _reason} ->
-            {:halt, Phoenix.LiveView.redirect(socket, to: "/login")}
+      :accounts ->
+        case Auth.user_for_id(session[@session_key]) do
+          {:ok, user} -> {:cont, Phoenix.Component.assign(socket, :current_user, user)}
+          {:error, _reason} -> {:halt, Phoenix.LiveView.redirect(socket, to: "/login")}
         end
     end
   end
 
-  defp bearer_key(conn) do
+  defp api_token_valid?(conn) do
+    configured = Config.settings!().server.api_token
+
     case get_req_header(conn, "authorization") do
-      ["Bearer " <> key | _] -> String.trim(key)
-      _ -> nil
+      ["Bearer " <> token | _] when is_binary(configured) ->
+        Plug.Crypto.secure_compare(String.trim(token), configured)
+
+      _ ->
+        false
     end
   end
 end

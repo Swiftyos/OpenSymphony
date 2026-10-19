@@ -1612,6 +1612,26 @@ pre {
   background: #ffffff;
 }
 
+.login-form {
+  display: grid;
+  gap: 8px;
+}
+
+.login-form .login-help {
+  margin-top: -2px;
+}
+
+.account-request {
+  grid-template-columns: auto minmax(0, 1fr);
+  row-gap: 6px;
+}
+
+.account-request-actions {
+  display: flex;
+  grid-column: 1 / -1;
+  gap: 6px;
+}
+
 /* ------------------------------------------------------------------ motion & a11y */
 
 @keyframes fx-dash {

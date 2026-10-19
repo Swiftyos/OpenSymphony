@@ -509,32 +509,40 @@ read-only for everyone.
 
 ### Sign-in and permissions
 
-There are no Symphony accounts to manage. People sign in with their own **Linear personal
-API key**, and Symphony asks Linear who they are, which teams they're in, and whether they're
-an admin:
+People sign in with a **username and password**. Who they are in Linear decides everything
+else: each account is tied to the Linear user with the same email, and that user's teams and
+admin flag set the permissions, so there are no roles or team lists to maintain in Symphony.
 
 ![Sign in](../.github/media/dashboard-sign-in.png)
 
+- **First run**: the first account created becomes the Symphony admin.
+- **Everyone else** signs up with the email they use for Linear. Sign-up only works for
+  active members of your Linear workspace, checked with Symphony's `tracker.api_key`. New
+  accounts wait in **Pending accounts** in the Needs-you rail until an admin approves them.
+  Approval is what proves the person really owns that email.
+
 | Who (in Linear)               | Can                                                            |
 | ----------------------------- | -------------------------------------------------------------- |
-| Workspace admin               | Everything, including stage controls for the whole factory     |
+| Workspace admin, or the first account | Everything: stage controls, approving accounts         |
 | Team member                   | Move that team's issues (approve, rework, block, …)            |
 | Guest                         | View only                                                      |
-| Anyone outside the workspace  | Can't sign in (must match the organization of `tracker.api_key`) |
+| Not in the workspace          | Can't sign up                                                  |
 
-- Changes are made **as the signed-in person** using their key, so Linear's history shows who
-  approved or blocked what.
-- The key is stored only in an encrypted, HTTP-only session cookie (30 days). Profiles and
-  team memberships are re-read from Linear every 10 minutes.
-- Session cookies are signed with `server.secret_key_base` (or `SYMPHONY_SECRET_KEY_BASE`). If
-  neither is set, Symphony generates one at `~/.symphony/secret_key_base`, so sessions survive
-  restarts.
-- The JSON API and `/metrics` accept a session or `Authorization: Bearer <Linear API key>`,
-  so a Prometheus scraper can use a key from a service account.
+- Moves are made with Symphony's Linear key, and a comment on the issue records who made
+  them (for example "Mia Member (@mia) moved this to In Progress · factory/merge").
+- Teams and admin rights are re-read from Linear every 10 minutes. Deactivating someone in
+  Linear blocks their sign-in.
+- Passwords are hashed with PBKDF2-SHA256 and a per-user salt. After 5 failed attempts the
+  account is locked for 15 minutes. Accounts are stored in `~/.symphony/users.json` (mode 0600).
+- The session cookie is encrypted and holds only the account id. It's signed with
+  `server.secret_key_base` (or `SYMPHONY_SECRET_KEY_BASE`). If neither is set, Symphony
+  generates one at `~/.symphony/secret_key_base`, so sessions survive restarts.
+- The JSON API and `/metrics` accept a session or `Authorization: Bearer <server.api_token>`
+  (for Prometheus and other scrapers).
 
-Sign-in mode follows where the server listens. On a loopback address (the default
-`127.0.0.1`) there is no sign-in: you are the local operator. On any other address, Linear
-sign-in is required. Override this with `server.auth: local | linear`.
+Sign-in follows where the server listens. On a loopback address (the default `127.0.0.1`)
+there is no sign-in and you are the local operator. On any other address, accounts are
+required. Override this with `server.auth: local | accounts`.
 
 ### Cost
 

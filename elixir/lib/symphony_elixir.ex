@@ -35,6 +35,7 @@ defmodule SymphonyElixir.Application do
       config_store,
       SymphonyElixir.UsageLedger,
       SymphonyElixir.FactoryControls,
+      SymphonyElixir.Users,
       SymphonyElixir.Auth,
       SymphonyElixir.Orchestrator,
       SymphonyElixir.HttpServer,

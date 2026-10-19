@@ -1,81 +1,79 @@
 defmodule SymphonyElixir.Auth do
   @moduledoc """
-  Dashboard sign-in backed entirely by Linear.
+  Who is using the dashboard and what they may do.
 
-  There is no user database. A person signs in with their own Linear personal API
-  key; Symphony asks Linear who they are, which teams they belong to, and
-  whether they are a workspace admin. Only members of the same Linear
-  organization as Symphony's tracker key are accepted.
+  Symphony keeps username/password accounts (`SymphonyElixir.Users`), but
+  everything about *who someone is* comes from Linear: an account is tied to the
+  Linear user with the same email, and that user's teams and admin flag decide
+  permissions. Profiles are re-read from Linear every 10 minutes using Symphony's
+  own tracker key, so changes in Linear (new team, removed admin, deactivated
+  user) apply without touching Symphony.
 
   Modes:
 
-    * `:local` - no sign-in; the single local operator has full control. The
-      default when the server binds to a loopback address.
-    * `:linear` - Linear API key sign-in. The default for any other address.
+    * `:local` - no sign-in; the local operator has full control. The default
+      when the server binds to a loopback address.
+    * `:accounts` - username/password sign-in. The default for any other address.
 
-  `server.auth: local | linear` overrides the default.
-
-  Profiles are cached for #{div(600_000, 60_000)} minutes, keyed by a hash of the
-  API key, so permissions follow Linear changes without a Linear call per request.
+  `server.auth: local | accounts` overrides the default.
   """
 
   use GenServer
   require Logger
 
-  alias SymphonyElixir.Config
+  alias SymphonyElixir.{Config, Users}
   alias SymphonyElixir.Linear.Client
 
   @table :symphony_auth_cache
   @profile_ttl_ms 600_000
 
-  @viewer_query """
-  query SymphonyViewer {
-    viewer {
-      id
-      name
-      displayName
-      email
-      avatarUrl
-      admin
-      guest
-      active
-      organization {
+  @member_query """
+  query SymphonyMemberByEmail($email: String!) {
+    users(filter: {email: {eqIgnoreCase: $email}}, first: 1) {
+      nodes {
         id
-        urlKey
         name
-      }
-      teams(first: 250) {
-        nodes {
-          id
-          key
-          name
+        displayName
+        email
+        avatarUrl
+        admin
+        guest
+        active
+        teams(first: 250) {
+          nodes {
+            id
+            key
+            name
+          }
         }
       }
     }
   }
   """
 
-  @organization_query """
-  query SymphonyOrganization {
-    organization {
-      id
-      urlKey
-      name
-    }
-  }
-  """
-
   defmodule User do
     @moduledoc false
-    @derive {Jason.Encoder, only: [:id, :name, :email, :avatar_url, :admin, :guest, :local, :teams]}
-    defstruct [:id, :name, :email, :avatar_url, :organization, admin: false, guest: false, local: false, teams: []]
+    @derive {Jason.Encoder, only: [:id, :username, :name, :email, :avatar_url, :admin, :guest, :local, :teams]}
+    defstruct [
+      :id,
+      :username,
+      :name,
+      :email,
+      :avatar_url,
+      :linear_user_id,
+      admin: false,
+      guest: false,
+      local: false,
+      teams: []
+    ]
 
     @type t :: %__MODULE__{
             id: String.t(),
+            username: String.t() | nil,
             name: String.t(),
             email: String.t() | nil,
             avatar_url: String.t() | nil,
-            organization: map() | nil,
+            linear_user_id: String.t() | nil,
             admin: boolean(),
             guest: boolean(),
             local: boolean(),
@@ -88,14 +86,14 @@ defmodule SymphonyElixir.Auth do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
   end
 
-  @spec mode(map() | nil) :: :local | :linear
+  @spec mode(map() | nil) :: :local | :accounts
   def mode(settings \\ nil) do
     settings = settings || Config.settings!()
 
     case settings.server.auth do
-      "linear" -> :linear
+      "accounts" -> :accounts
       "local" -> :local
-      _ -> if loopback?(settings.server.host), do: :local, else: :linear
+      _ -> if loopback?(settings.server.host), do: :local, else: :accounts
     end
   end
 
@@ -103,37 +101,86 @@ defmodule SymphonyElixir.Auth do
   def local_user, do: %User{id: "local", name: "Local operator", admin: true, local: true}
 
   @doc """
-  Verifies a Linear API key and returns the signed-in user.
+  Sign-up gate: the email must belong to an active member of the Linear
+  workspace. `:skip` when Symphony has no Linear tracker to ask (development).
   """
-  @spec sign_in(String.t()) :: {:ok, User.t()} | {:error, atom()}
-  def sign_in(api_key) when is_binary(api_key) do
-    api_key = String.trim(api_key)
-
-    with :ok <- validate_key_shape(api_key),
-         {:ok, viewer} <- fetch_viewer(api_key),
-         :ok <- check_active(viewer),
-         user = to_user(viewer),
-         :ok <- check_organization(user) do
-      cache_put({:user, key_hash(api_key)}, user)
-      {:ok, user}
+  @spec check_linear_member(String.t()) :: :ok | :skip | {:error, atom()}
+  def check_linear_member(email) do
+    case linear_profile(email) do
+      {:ok, %{"active" => false}} -> {:error, :inactive_user}
+      {:ok, _member} -> :ok
+      other -> other
     end
   end
-
-  def sign_in(_api_key), do: {:error, :invalid_key}
 
   @doc """
-  Resolves the user for a stored session key, refreshing from Linear when the
-  cached profile is stale.
+  Signs in with a username (or email) and password.
   """
-  @spec user_for_key(String.t() | nil) :: {:ok, User.t()} | {:error, atom()}
-  def user_for_key(api_key) when is_binary(api_key) and api_key != "" do
-    case cache_get({:user, key_hash(api_key)}) do
-      %User{} = user -> {:ok, user}
-      nil -> sign_in(api_key)
+  @spec sign_in(String.t(), String.t()) :: {:ok, User.t()} | {:error, atom()}
+  def sign_in(login, password) do
+    with {:ok, account} <- Users.authenticate(login, password) do
+      user_for_account(account)
     end
   end
 
-  def user_for_key(_api_key), do: {:error, :signed_out}
+  @doc """
+  Resolves the session's account id to a user with current Linear permissions.
+  """
+  @spec user_for_id(String.t() | nil) :: {:ok, User.t()} | {:error, atom()}
+  def user_for_id(account_id) do
+    case Users.get(account_id) do
+      %{status: "active"} = account -> user_for_account(account)
+      %{status: "pending"} -> {:error, :pending}
+      _ -> {:error, :signed_out}
+    end
+  end
+
+  @spec user_for_account(map()) :: {:ok, User.t()} | {:error, atom()}
+  def user_for_account(account) do
+    base = %User{
+      id: account.id,
+      username: account.username,
+      name: account.username,
+      email: account.email,
+      admin: account.bootstrap_admin
+    }
+
+    case linear_profile(account.email) do
+      {:ok, %{"active" => false}} ->
+        {:error, :inactive_user}
+
+      {:ok, member} ->
+        {:ok, with_linear_member(base, member, account.bootstrap_admin)}
+
+      :skip ->
+        {:ok, base}
+
+      {:error, :not_in_workspace} ->
+        {:error, :not_in_workspace}
+
+      {:error, _reason} ->
+        # Linear unreachable: keep the person signed in with no team rights
+        # rather than locking everyone out.
+        {:ok, base}
+    end
+  end
+
+  defp with_linear_member(base, member, bootstrap_admin?) do
+    teams =
+      (get_in(member, ["teams", "nodes"]) || [])
+      |> Enum.map(&%{id: &1["id"], key: &1["key"], name: &1["name"]})
+
+    %{
+      base
+      | name: member["displayName"] || member["name"] || base.username,
+        avatar_url: member["avatarUrl"],
+        linear_user_id: member["id"],
+        # The bootstrap account stays an admin so a fresh install can approve people.
+        admin: bootstrap_admin? or member["admin"] == true,
+        guest: member["guest"] == true and not bootstrap_admin?,
+        teams: teams
+    }
+  end
 
   @doc """
   Whether the user may move an issue (by identifier, e.g. `PAY-12`) between stages.
@@ -153,7 +200,7 @@ defmodule SymphonyElixir.Auth do
   def can_move?(_user, _identifier), do: false
 
   @doc """
-  Whether the user may change factory-wide stage controls.
+  Whether the user may change factory-wide stage controls and approve accounts.
   """
   @spec can_control?(User.t() | nil) :: boolean()
   def can_control?(%User{local: true}), do: true
@@ -183,102 +230,51 @@ defmodule SymphonyElixir.Auth do
     {:ok, %{}}
   end
 
-  defp validate_key_shape(key) do
-    if String.length(key) >= 20 and not String.contains?(key, [" ", "\n"]), do: :ok, else: {:error, :invalid_key}
-  end
-
-  defp fetch_viewer(api_key) do
-    case client().graphql(@viewer_query, %{}, api_key: api_key) do
-      {:ok, %{"data" => %{"viewer" => %{"id" => id} = viewer}}} when is_binary(id) ->
-        {:ok, viewer}
-
-      {:ok, %{"errors" => _errors}} ->
-        {:error, :invalid_key}
-
-      {:error, {:linear_api_status, status}} when status in [400, 401, 403] ->
-        {:error, :invalid_key}
-
-      {:error, reason} ->
-        Logger.warning("Linear sign-in check failed: #{inspect(reason)}")
-        {:error, :linear_unavailable}
-
-      _ ->
-        {:error, :invalid_key}
-    end
-  end
-
-  defp to_user(viewer) do
-    %User{
-      id: viewer["id"],
-      name: viewer["displayName"] || viewer["name"] || viewer["email"],
-      email: viewer["email"],
-      avatar_url: viewer["avatarUrl"],
-      admin: viewer["admin"] == true,
-      guest: viewer["guest"] == true,
-      organization: viewer["organization"],
-      teams:
-        (get_in(viewer, ["teams", "nodes"]) || [])
-        |> Enum.map(&%{id: &1["id"], key: &1["key"], name: &1["name"]})
-    }
-  end
-
-  defp check_active(%{"active" => false}), do: {:error, :inactive_user}
-  defp check_active(_viewer), do: :ok
-
-  defp check_organization(%User{organization: %{"id" => org_id}}) do
-    case expected_organization() do
-      {:ok, %{"id" => ^org_id}} -> :ok
-      {:ok, _other} -> {:error, :wrong_organization}
-      :skip -> :ok
-      {:error, _reason} -> {:error, :linear_unavailable}
-    end
-  end
-
-  defp check_organization(_user), do: {:error, :wrong_organization}
-
-  # The organization Symphony itself works in, from its tracker key. Without a
-  # Linear tracker (e.g. the memory tracker in development) there is nothing to
-  # compare against, so any valid Linear user is accepted.
-  defp expected_organization do
+  # The Linear user with this email, looked up with Symphony's tracker key.
+  defp linear_profile(email) when is_binary(email) do
     settings = Config.settings!()
+    key = {:profile, String.downcase(email)}
 
     cond do
       settings.tracker.kind != "linear" or is_nil(settings.tracker.api_key) ->
         :skip
 
-      org = cache_get(:organization) ->
-        {:ok, org}
+      cached = cache_get(key) ->
+        {:ok, cached}
 
       true ->
-        case client().graphql(@organization_query, %{}) do
-          {:ok, %{"data" => %{"organization" => %{"id" => _} = org}}} ->
-            cache_put(:organization, org, :infinity)
-            {:ok, org}
+        case client().graphql(@member_query, %{email: email}, []) do
+          {:ok, %{"data" => %{"users" => %{"nodes" => [member | _]}}}} ->
+            cache_put(key, member)
+            {:ok, member}
+
+          {:ok, %{"data" => %{"users" => %{"nodes" => []}}}} ->
+            {:error, :not_in_workspace}
 
           other ->
-            {:error, other}
+            Logger.warning("Linear member lookup failed: #{inspect(other, limit: 5)}")
+            {:error, :linear_unavailable}
         end
     end
   end
 
-  defp key_hash(key), do: :crypto.hash(:sha256, key)
+  defp linear_profile(_email), do: {:error, :not_in_workspace}
 
   defp cache_get(key) do
     now = System.monotonic_time(:millisecond)
 
     with true <- :ets.whereis(@table) != :undefined,
          [{^key, value, expires_at}] <- :ets.lookup(@table, key),
-         true <- expires_at == :infinity or expires_at > now do
+         true <- expires_at > now do
       value
     else
       _ -> nil
     end
   end
 
-  defp cache_put(key, value, ttl \\ @profile_ttl_ms) do
+  defp cache_put(key, value) do
     if :ets.whereis(@table) != :undefined do
-      expires_at = if ttl == :infinity, do: :infinity, else: System.monotonic_time(:millisecond) + ttl
-      :ets.insert(@table, {key, value, expires_at})
+      :ets.insert(@table, {key, value, System.monotonic_time(:millisecond) + @profile_ttl_ms})
     end
 
     :ok

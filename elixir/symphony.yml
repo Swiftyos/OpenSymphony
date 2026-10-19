@@ -32,8 +32,9 @@ instance:
 
 server:
   port: 4000
-  # host: 0.0.0.0        # any non-loopback host turns on Linear API key sign-in
-  # auth: linear         # or force: local | linear
+  # host: 0.0.0.0        # any non-loopback host turns on username/password sign-in
+  # auth: accounts       # or force: local | accounts
+  # api_token: $SYMPHONY_API_TOKEN   # bearer token for /api/v1/* and /metrics scrapers
   # controls: false      # read-only dashboard for everyone
 
 agent:

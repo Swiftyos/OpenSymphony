@@ -33,7 +33,7 @@ defmodule SymphonyElixir.HttpServer do
             snapshot_timeout_ms: snapshot_timeout_ms,
             secret_key_base: secret_key_base(),
             # With sign-in on, refuse LiveView sockets opened from other sites.
-            check_origin: if(SymphonyElixir.Auth.mode() == :linear, do: :conn, else: false)
+            check_origin: if(SymphonyElixir.Auth.mode() == :accounts, do: :conn, else: false)
           ]
 
           endpoint_config =

@@ -5,7 +5,7 @@ defmodule SymphonyElixirWeb.Endpoint do
 
   use Phoenix.Endpoint, otp_app: :symphony_elixir
 
-  # Encrypted (not just signed): the session holds the user's Linear API key.
+  # Encrypted and signed; holds only the signed-in account id.
   @session_options [
     store: :cookie,
     key: "_symphony_elixir_key",

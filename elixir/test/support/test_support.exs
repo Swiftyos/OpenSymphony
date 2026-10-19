@@ -218,6 +218,7 @@ defmodule SymphonyElixir.TestSupport do
           telemetry_resource_attributes: %{},
           server_port: nil,
           server_host: nil,
+          server_api_token: nil,
           instance_name: nil,
           prompt: @workflow_prompt
         ],
@@ -295,6 +296,7 @@ defmodule SymphonyElixir.TestSupport do
     telemetry_resource_attributes = Keyword.get(config, :telemetry_resource_attributes)
     server_port = Keyword.get(config, :server_port)
     server_host = Keyword.get(config, :server_host)
+    server_api_token = Keyword.get(config, :server_api_token)
     instance_name = Keyword.get(config, :instance_name)
     prompt = Keyword.get(config, :prompt)
 
@@ -374,7 +376,7 @@ defmodule SymphonyElixir.TestSupport do
           telemetry_log_tool_details,
           telemetry_resource_attributes
         ),
-        server_yaml(server_port, server_host),
+        server_yaml(server_port, server_host, server_api_token),
         instance_yaml(instance_name),
         "---",
         prompt
@@ -489,6 +491,7 @@ defmodule SymphonyElixir.TestSupport do
           telemetry_resource_attributes: %{},
           server_port: nil,
           server_host: nil,
+          server_api_token: nil,
           instance_name: nil,
           projects: [
             %{
@@ -563,6 +566,7 @@ defmodule SymphonyElixir.TestSupport do
     telemetry_resource_attributes = Keyword.get(config, :telemetry_resource_attributes)
     server_port = Keyword.get(config, :server_port)
     server_host = Keyword.get(config, :server_host)
+    server_api_token = Keyword.get(config, :server_api_token)
     instance_name = Keyword.get(config, :instance_name)
 
     projects =
@@ -652,7 +656,7 @@ defmodule SymphonyElixir.TestSupport do
           telemetry_log_tool_details,
           telemetry_resource_attributes
         ),
-        server_yaml(server_port, server_host),
+        server_yaml(server_port, server_host, server_api_token),
         instance_yaml(instance_name),
         "projects: #{yaml_value(projects)}"
       ]
@@ -852,13 +856,14 @@ defmodule SymphonyElixir.TestSupport do
     "  resource_attributes:\n" <> lines
   end
 
-  defp server_yaml(nil, nil), do: nil
+  defp server_yaml(nil, nil, nil), do: nil
 
-  defp server_yaml(port, host) do
+  defp server_yaml(port, host, api_token) do
     [
       "server:",
       port && "  port: #{yaml_value(port)}",
-      host && "  host: #{yaml_value(host)}"
+      host && "  host: #{yaml_value(host)}",
+      api_token && "  api_token: #{yaml_value(api_token)}"
     ]
     |> Enum.reject(&is_nil/1)
     |> Enum.join("\n")

@@ -9,8 +9,9 @@ defmodule SymphonyElixirWeb.DashboardLive do
   """
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
+  require Logger
 
-  alias SymphonyElixir.{Auth, Config, FactoryControls, IssueStage, Orchestrator, Tracker, UsageLedger}
+  alias SymphonyElixir.{Auth, Config, FactoryControls, IssueStage, Orchestrator, Tracker, UsageLedger, Users}
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixirWeb.{Endpoint, FactoryPresenter, ObservabilityPubSub, Presenter}
   @runtime_tick_ms 1_000
@@ -73,7 +74,9 @@ defmodule SymphonyElixirWeb.DashboardLive do
     reply =
       with :ok <- authorize(socket, Auth.can_move?(socket.assigns.current_user, identifier), :not_team_member),
            {:ok, {state_name, stage}} <- Map.fetch(@moves, action) |> move_or_error(action),
-           :ok <- Tracker.set_stage(id, state_name, stage, api_key: socket.assigns[:linear_api_key]) do
+           :ok <- Tracker.set_stage(id, state_name, stage) do
+        record_move(id, socket.assigns.current_user, state_name, stage)
+
         UsageLedger.observe_issue(%Issue{
           id: id,
           identifier: identifier,
@@ -92,6 +95,39 @@ defmodule SymphonyElixirWeb.DashboardLive do
       end
 
     {:reply, reply, socket}
+  end
+
+  def handle_event("approve_account", %{"id" => id}, socket) do
+    with :ok <- authorize(socket, Auth.can_control?(socket.assigns.current_user), :not_admin),
+         {:ok, _account} <- Users.approve(id, socket.assigns.current_user.username || "local") do
+      ObservabilityPubSub.broadcast_update()
+    end
+
+    {:noreply, socket}
+  end
+
+  def handle_event("reject_account", %{"id" => id}, socket) do
+    with :ok <- authorize(socket, Auth.can_control?(socket.assigns.current_user), :not_admin),
+         :ok <- Users.reject(id) do
+      ObservabilityPubSub.broadcast_update()
+    end
+
+    {:noreply, socket}
+  end
+
+  # Moves are made with Symphony's Linear key, so leave a note saying who did it.
+  defp record_move(_issue_id, %Auth.User{local: true}, _state_name, _stage), do: :ok
+
+  defp record_move(issue_id, user, state_name, stage) do
+    where = if stage, do: "#{state_name} · #{IssueStage.label_prefix()}/#{stage}", else: state_name
+
+    case Tracker.create_comment(issue_id, "**Symphony:** #{user.name} (@#{user.username}) moved this to **#{where}** from the dashboard.") do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Move comment failed issue_id=#{issue_id} reason=#{inspect(reason)}")
+    end
   end
 
   # Server enforces every permission; the client only hides what the user can't use.
@@ -119,7 +155,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp describe_error(:controls_disabled), do: "This dashboard is read-only (server.controls: false)."
   defp describe_error(:not_admin), do: "Only Linear admins can change stage controls."
   defp describe_error(:not_team_member), do: "You can only move issues from teams you belong to in Linear."
-  defp describe_error({:linear_api_status, 401}), do: "Linear rejected your key. Sign in again."
   defp describe_error({:stage_label_not_found, label}), do: "Create the Linear label #{label} first."
   defp describe_error(:state_not_found), do: "That Linear state does not exist for this team."
   defp describe_error(reason), do: inspect(reason)
@@ -209,12 +244,38 @@ defmodule SymphonyElixirWeb.DashboardLive do
               <div id="fx-drawer" class="fx-drawer-slot" data-fx="drawer" phx-update="ignore"></div>
               <div class="panel-head">
                 <h2 class="panel-title">Needs you</h2>
-                <span class={["count-pill", attention_count(@payload) > 0 && "count-pill-hot"]}>
-                  <%= attention_count(@payload) %>
+                <span class={["count-pill", attention_count(@payload, @current_user) > 0 && "count-pill-hot"]}>
+                  <%= attention_count(@payload, @current_user) %>
                 </span>
               </div>
 
-              <%= if attention_count(@payload) == 0 do %>
+              <div :if={pending_accounts(@current_user) != []} class="attention-group">
+                <h3 class="attention-title">
+                  <span class="attention-icon attention-icon-review" aria-hidden="true">+</span>
+                  Pending accounts
+                  <span class="attention-count numeric"><%= length(pending_accounts(@current_user)) %></span>
+                </h3>
+                <div :for={account <- pending_accounts(@current_user)} class="attention-item account-request">
+                  <span class="attention-id"><%= account.username %></span>
+                  <span class="attention-text" title={account.email}><%= account.email %></span>
+                  <span class="account-request-actions">
+                    <button type="button" class="fx-action is-primary" phx-click="approve_account" phx-value-id={account.id}>
+                      Approve
+                    </button>
+                    <button
+                      type="button"
+                      class="fx-action"
+                      phx-click="reject_account"
+                      phx-value-id={account.id}
+                      data-confirm={"Reject #{account.username}'s request?"}
+                    >
+                      Reject
+                    </button>
+                  </span>
+                </div>
+              </div>
+
+              <%= if attention_count(@payload, @current_user) == 0 do %>
                 <p class="all-clear">All clear. Nothing is waiting on a human.</p>
               <% else %>
                 <div :for={group <- attention_groups(@payload, @now)} class="attention-group">
@@ -439,10 +500,14 @@ defmodule SymphonyElixirWeb.DashboardLive do
     |> Enum.reject(&(&1.items == []))
   end
 
-  defp attention_count(payload) do
+  defp attention_count(payload, user) do
     payload
     |> attention_groups(DateTime.utc_now())
-    |> Enum.reduce(0, &(length(&1.items) + &2))
+    |> Enum.reduce(length(pending_accounts(user)), &(length(&1.items) + &2))
+  end
+
+  defp pending_accounts(user) do
+    if Auth.mode() == :accounts and Auth.can_control?(user), do: Users.list("pending"), else: []
   end
 
   defp factory_nodes(%{factory: %{flow: %{nodes: nodes}}}) do

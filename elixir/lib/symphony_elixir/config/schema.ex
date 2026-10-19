@@ -637,9 +637,11 @@ defmodule SymphonyElixir.Config.Schema do
       field(:host, :string, default: "127.0.0.1")
       # false makes the dashboard read-only for everyone (kill switch).
       field(:controls, :boolean)
-      # Dashboard sign-in: "local" (no sign-in) or "linear" (Linear API key).
-      # nil = local on loopback hosts, linear everywhere else.
+      # Dashboard sign-in: "local" (no sign-in) or "accounts" (username/password,
+      # permissions from Linear). nil = local on loopback hosts, accounts elsewhere.
       field(:auth, :string)
+      # Optional bearer token for the JSON API and /metrics (e.g. Prometheus).
+      field(:api_token, :string)
       # Signs and encrypts session cookies. nil = generated once and kept in
       # ~/.symphony/secret_key_base so sessions survive restarts.
       field(:secret_key_base, :string)
@@ -648,8 +650,9 @@ defmodule SymphonyElixir.Config.Schema do
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:port, :host, :controls, :auth, :secret_key_base], empty_values: [])
-      |> validate_inclusion(:auth, ["local", "linear"])
+      |> cast(attrs, [:port, :host, :controls, :auth, :secret_key_base, :api_token], empty_values: [])
+      |> validate_inclusion(:auth, ["local", "accounts"])
+      |> validate_length(:api_token, min: 24)
       |> validate_length(:secret_key_base, min: 64)
       |> validate_number(:port, greater_than_or_equal_to: 0)
     end
