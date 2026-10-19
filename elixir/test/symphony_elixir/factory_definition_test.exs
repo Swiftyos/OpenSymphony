@@ -127,4 +127,68 @@ defmodule SymphonyElixir.FactoryDefinitionTest do
       File.rm_rf!(dir)
     end
   end
+
+  describe "agent prompts" do
+    alias SymphonyElixir.{IssueStage, PromptBuilder}
+
+    defp issue(identifier, state, labels),
+      do: %Issue{id: "id-" <> identifier, identifier: identifier, title: "T", state: state, labels: labels, url: "https://linear.app/x"}
+
+    test "the prompt carries the current stage's instructions and allowed moves" do
+      write_workflow_file!(Workflow.workflow_file_path(), prompt: "Work on {{ issue.identifier }}.")
+      prompt = PromptBuilder.build_prompt(issue("PAY-1", "In Progress", ["factory/merge"]))
+
+      assert prompt =~ "Work on PAY-1."
+      assert prompt =~ "## Your current stage: Merge"
+      assert prompt =~ "Run the land skill"
+      assert prompt =~ "- **Done** (you): The PR is merged. Set state `Done` and remove any `factory/*` label."
+      assert prompt =~ "- **Blocked** (you): Landing is blocked. Set state `In Progress` and label `factory/blocked`"
+    end
+
+    test "a team's custom stage shapes its agents' prompts and only that team's" do
+      write_workflow_file!(Workflow.workflow_file_path(), prompt: "Go.")
+
+      qa = %{"id" => "qa", "name" => "QA", "kind" => "agent", "linear_state" => "In Progress", "label" => "qa", "instructions" => "Run the e2e suite."}
+
+      edited =
+        Store.get("PAY")
+        |> Map.update!("stages", &(&1 ++ [qa]))
+        |> Map.update!("transitions", fn ts ->
+          ts ++
+            [
+              %{"from" => "implement", "to" => "qa", "by" => "agent", "criteria" => "PR is open"},
+              %{"from" => "qa", "to" => "review", "by" => "agent", "criteria" => "E2E suite is green"}
+            ]
+        end)
+
+      {:ok, _} = Store.put("PAY", edited, 0, "mia")
+
+      assert IssueStage.stage(issue("PAY-2", "In Progress", ["factory/qa"])) == "qa"
+      prompt = PromptBuilder.build_prompt(issue("PAY-2", "In Progress", ["factory/qa"]))
+      assert prompt =~ "## Your current stage: QA"
+      assert prompt =~ "Run the e2e suite."
+      assert prompt =~ "- **In Review** (you): E2E suite is green."
+
+      # Implement now offers the QA move for PAY, but not for WEB.
+      assert PromptBuilder.build_prompt(issue("PAY-3", "In Progress", [])) =~ "**QA** (you)"
+      refute PromptBuilder.build_prompt(issue("WEB-3", "In Progress", [])) =~ "**QA**"
+
+      # WEB has no `qa` stage, so the label doesn't match a stage there.
+      assert IssueStage.stage(issue("WEB-4", "In Progress", ["factory/qa"])) == "implement"
+    end
+
+    test "templates can place the stage section themselves" do
+      write_workflow_file!(Workflow.workflow_file_path(), prompt: "{{ stage.prompt }}\n\nRest of the workflow.")
+      prompt = PromptBuilder.build_prompt(issue("PAY-5", "Todo", []))
+      assert prompt =~ "## Your current stage: Todo"
+      assert length(String.split(prompt, "## Your current stage")) == 2
+    end
+
+    test "human and parked stages are never dispatched, even with stage labels" do
+      write_workflow_file!(Workflow.workflow_file_path())
+      assert IssueStage.paused?(issue("PAY-6", "In Progress", ["factory/blocked"]))
+      assert IssueStage.paused?(issue("PAY-6", "In Progress", ["factory/merge", "factory/blocked"]))
+      refute IssueStage.paused?(issue("PAY-6", "In Progress", ["factory/merge"]))
+    end
+  end
 end

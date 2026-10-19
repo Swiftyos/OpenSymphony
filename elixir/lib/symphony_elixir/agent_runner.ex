@@ -273,6 +273,7 @@ defmodule SymphonyElixir.AgentRunner do
     - The previous agent turn completed normally, but the Linear issue is still in an active state.
     - This is continuation turn ##{turn_number} of #{max_turns} for the current agent run.
     - Current Linear state: #{issue.state}; factory stage: #{IssueStage.stage(issue) || "none"}.
+    - Your allowed moves are in the "Your current stage" section; re-read it if you are unsure what comes next.
     - Resume from the current workspace and workpad state instead of restarting from scratch.
     - The original task instructions and prior turn context are already present in this thread, so do not restate them before acting.
     - Focus on the remaining ticket work and do not end the turn while the issue stays active unless you are truly blocked.
@@ -288,6 +289,7 @@ defmodule SymphonyElixir.AgentRunner do
     - The previous agent turn completed normally, but the Linear issue is still in an active state.
     - This is continuation turn ##{turn_number} of #{max_turns} for the current agent run.
     - Current Linear state: #{issue.state}; factory stage: #{IssueStage.stage(issue) || "none"}.
+    - Your allowed moves are in the "Your current stage" section; re-read it if you are unsure what comes next.
     - Resume from the current workspace and workpad state instead of restarting from scratch.
     - The original task instructions and prior turn context are already present in this thread, so do not restate them before acting.
     - Focus on the remaining ticket work and do not end the turn while the issue stays active unless you are truly blocked.
@@ -319,7 +321,7 @@ defmodule SymphonyElixir.AgentRunner do
           not IssueStage.active?(refreshed_issue) ->
             {:done, refreshed_issue}
 
-          stage_changed?(IssueStage.stage(issue), IssueStage.stage(refreshed_issue)) ->
+          stage_changed?(IssueStage.stage_definition(issue), IssueStage.stage_definition(refreshed_issue)) ->
             # A new stage (for example implement -> merge) needs its own first-turn
             # prompt, so hand back to the orchestrator for a fresh dispatch.
             Logger.info("Stage changed for #{issue_context(refreshed_issue)} from=#{IssueStage.stage(issue) || "none"} to=#{IssueStage.stage(refreshed_issue)}; returning control to orchestrator")
@@ -340,9 +342,13 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp continue_with_issue?(issue, _issue_state_fetcher), do: {:done, issue}
 
-  # Picking up a Todo issue moves it to In Progress, which is the same work.
-  defp stage_changed?(nil, "implement"), do: false
-  defp stage_changed?(previous_stage, current_stage), do: previous_stage != current_stage
+  # Leaving a queue stage (Todo -> Implement) is the agent picking the work up,
+  # not a new stage that needs a fresh prompt.
+  defp stage_changed?(%{"kind" => "queue"}, _current_stage), do: false
+  defp stage_changed?(previous, current), do: stage_id(previous) != stage_id(current)
+
+  defp stage_id(%{"id" => id}), do: id
+  defp stage_id(_stage), do: nil
 
   defp selected_worker_host(nil, []), do: nil
 

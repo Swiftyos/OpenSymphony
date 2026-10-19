@@ -1,23 +1,16 @@
 defmodule SymphonyElixir.FactoryControls do
   @moduledoc """
-  Runtime controls for each agent stage of the factory, set from the dashboard.
+  Runtime controls for a team's agent stages, as set from the dashboard: pause
+  dispatch, cap concurrent agents, and choose the default harness and thinking
+  level. Issue labels still win over the harness and thinking defaults.
 
-  Per stage an operator can pause dispatch, cap concurrent agents, and choose the
-  default harness and thinking effort. Issue labels still win over these
-  defaults, so a one-off `claude` or `thinking/max` label keeps working.
-
-  Values live in a public ETS table (read on every dispatch decision, so reads
-  must be cheap) and are persisted to JSON on each change.
+  The values live on the stage in the team's factory definition
+  (`SymphonyElixir.Factory.Store`), keyed here by `{team, stage_id}`.
   """
 
-  use GenServer
-  require Logger
+  alias SymphonyElixir.Factory.{Definition, Store}
 
-  @table :symphony_factory_controls
-  @stages ["todo", "implement", "rework", "merge"]
-  @backends ["codex", "claude", "opencode"]
-  @efforts ["low", "medium", "high", "xhigh", "max"]
-
+  @type key :: {String.t() | nil, String.t()} | String.t() | nil
   @type stage_controls :: %{
           paused: boolean(),
           max_agents: pos_integer() | nil,
@@ -25,125 +18,62 @@ defmodule SymphonyElixir.FactoryControls do
           effort: String.t() | nil
         }
 
-  @spec start_link(keyword()) :: GenServer.on_start()
-  def start_link(opts \\ []) do
-    GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
-  end
+  @field_map %{"paused" => "paused", "max_agents" => "max_agents", "backend" => "harness", "effort" => "effort"}
 
-  @spec stages() :: [String.t()]
-  def stages, do: @stages
+  @spec get(key()) :: stage_controls()
+  def get(key) do
+    {team, stage_id} = normalize_key(key)
 
-  @spec get(String.t() | nil) :: stage_controls()
-  def get(stage) do
-    key = stage || "todo"
-
-    with true <- :ets.whereis(@table) != :undefined,
-         [{^key, controls}] <- :ets.lookup(@table, key) do
-      controls
-    else
-      _ -> default()
+    case Definition.stage(Store.get(team), stage_id) do
+      %{} = stage -> from_stage(stage)
+      nil -> %{paused: false, max_agents: nil, backend: nil, effort: nil}
     end
   end
 
-  @spec all() :: %{String.t() => stage_controls()}
-  def all, do: Map.new(@stages, &{&1, get(&1)})
+  @doc """
+  Controls for every agent-run stage of a team's factory, keyed by stage id.
+  """
+  @spec all(String.t() | nil) :: %{String.t() => stage_controls()}
+  def all(team \\ nil) do
+    Store.get(team)["stages"]
+    |> Enum.filter(&(&1["kind"] in ["queue", "agent"]))
+    |> Map.new(&{&1["id"], from_stage(&1)})
+  end
 
-  @spec paused?(String.t() | nil) :: boolean()
-  def paused?(stage), do: get(stage).paused
+  @spec paused?(key()) :: boolean()
+  def paused?(key), do: get(key).paused
 
   @doc """
-  Updates one field of a stage's controls. Returns the new controls.
+  Updates one control (`paused`, `max_agents`, `backend`, `effort`) on a team's stage.
   """
-  @spec put(String.t(), String.t(), term()) :: {:ok, stage_controls()} | {:error, term()}
-  def put(stage, field, value) do
-    GenServer.call(__MODULE__, {:put, stage, field, value})
+  @spec put(key(), String.t(), term(), String.t()) :: {:ok, stage_controls()} | {:error, term()}
+  def put(key, field, value, updated_by \\ "dashboard") do
+    {team, stage_id} = normalize_key(key)
+
+    with {:ok, stage_field} <- Map.fetch(@field_map, field) |> or_error({:invalid_control, field, value}),
+         %{} = stage <- Definition.stage(Store.get(team), stage_id) || {:error, {:unknown_stage, stage_id}},
+         true <- stage["kind"] in ["queue", "agent"] || {:error, {:unknown_stage, stage_id}},
+         {:ok, definition} <- Store.put_stage_field(team || Store.default_team(), stage_id, stage_field, value, updated_by) do
+      {:ok, from_stage(Definition.stage(definition, stage_id))}
+    else
+      {:error, [message | _]} -> {:error, {:invalid_control, field, value, message}}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   @doc false
   @spec reset() :: :ok
-  def reset do
-    if :ets.whereis(@table) != :undefined, do: :ets.delete_all_objects(@table)
-    :ok
+  def reset, do: Store.reset()
+
+  defp from_stage(stage) do
+    %{paused: stage["paused"] == true, max_agents: stage["max_agents"], backend: stage["harness"], effort: stage["effort"]}
   end
 
-  @impl true
-  def init(opts) do
-    path = Keyword.get(opts, :path, default_path())
-    :ets.new(@table, [:named_table, :public, :set, read_concurrency: true])
-    load(path)
-    {:ok, %{path: path}}
-  end
+  # Legacy callers pass a bare stage id for the default factory.
+  defp normalize_key({team, stage_id}), do: {team, stage_id || "todo"}
+  defp normalize_key(stage_id) when is_binary(stage_id), do: {nil, stage_id}
+  defp normalize_key(nil), do: {nil, "todo"}
 
-  @impl true
-  def handle_call({:put, stage, field, value}, _from, state) do
-    with :ok <- validate_stage(stage),
-         {:ok, field, value} <- cast(field, value) do
-      controls = Map.put(get(stage), field, value)
-      :ets.insert(@table, {stage, controls})
-      persist(state.path)
-      {:reply, {:ok, controls}, state}
-    else
-      {:error, reason} -> {:reply, {:error, reason}, state}
-    end
-  end
-
-  defp default, do: %{paused: false, max_agents: nil, backend: nil, effort: nil}
-
-  defp validate_stage(stage) when stage in @stages, do: :ok
-  defp validate_stage(stage), do: {:error, {:unknown_stage, stage}}
-
-  defp cast("paused", value) when is_boolean(value), do: {:ok, :paused, value}
-  defp cast("max_agents", nil), do: {:ok, :max_agents, nil}
-  defp cast("max_agents", value) when is_integer(value) and value > 0 and value <= 100, do: {:ok, :max_agents, value}
-  defp cast("backend", value) when value in [nil | @backends], do: {:ok, :backend, value}
-  defp cast("effort", value) when value in [nil | @efforts], do: {:ok, :effort, value}
-  defp cast(field, value), do: {:error, {:invalid_control, field, value}}
-
-  defp default_path do
-    case Application.get_env(:symphony_elixir, :factory_controls_path, :default) do
-      :default -> Path.expand("~/.symphony/factory_controls.json")
-      path -> path
-    end
-  end
-
-  defp persist(nil), do: :ok
-
-  defp persist(path) do
-    body = all() |> Jason.encode!(pretty: true)
-    tmp = path <> ".tmp"
-
-    with :ok <- File.mkdir_p(Path.dirname(path)),
-         :ok <- File.write(tmp, body),
-         :ok <- File.rename(tmp, path) do
-      :ok
-    else
-      {:error, reason} -> Logger.warning("Factory controls save failed path=#{path} reason=#{inspect(reason)}")
-    end
-  end
-
-  defp load(nil), do: :ok
-
-  defp load(path) do
-    with {:ok, body} <- File.read(path),
-         {:ok, %{} = stages} <- Jason.decode(body) do
-      Enum.each(stages, fn {stage, raw} -> load_stage(stage, raw) end)
-    else
-      {:error, :enoent} -> :ok
-      other -> Logger.warning("Factory controls load skipped path=#{path} reason=#{inspect(other, limit: 5)}")
-    end
-  end
-
-  defp load_stage(stage, raw) when stage in @stages and is_map(raw) do
-    controls =
-      Enum.reduce(raw, default(), fn {field, value}, acc ->
-        case cast(field, value) do
-          {:ok, key, cast_value} -> Map.put(acc, key, cast_value)
-          {:error, _reason} -> acc
-        end
-      end)
-
-    :ets.insert(@table, {stage, controls})
-  end
-
-  defp load_stage(_stage, _raw), do: :ok
+  defp or_error({:ok, value}, _error), do: {:ok, value}
+  defp or_error(:error, error), do: {:error, error}
 end

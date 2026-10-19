@@ -1,46 +1,75 @@
 defmodule SymphonyElixir.IssueStage do
   @moduledoc """
-  Resolves the factory stage of an issue from its Linear state plus stage labels.
+  Resolves which factory stage an issue is in, using its team's factory
+  definition (`SymphonyElixir.Factory.Store`).
 
-  Teams keep Linear's default workflow states (`Todo`, `In Progress`, `In Review`,
-  `Done`, ...) and express sub-stages with labels from a single label group, by
-  default `factory`. Linear reports grouped labels as `<group>/<child>`, so a
-  `factory` group with a `merge` child arrives as `factory/merge`. Flat labels
-  named `factory/merge` resolve identically.
+  A stage is identified by the issue's Linear workflow state plus an optional
+  stage label from the `<prefix>/` label group (by default `factory`; Linear
+  reports grouped labels as `factory/merge`, flat labels named the same work
+  too). The team is the issue identifier's prefix (`PAY-12` -> `PAY`).
 
-  An issue is dispatchable when its state is active and its stage is not paused.
+  An issue is dispatchable when its state is active and its stage kind is
+  `queue` or `agent`. Stages of kind `human`, `parked`, or `done`, and labels in
+  `tracker.paused_stages`, are never dispatched.
   """
 
-  alias SymphonyElixir.{Config, FactoryControls}
+  alias SymphonyElixir.Config
   alias SymphonyElixir.Config.Schema
+  alias SymphonyElixir.Factory.{Definition, Store}
   alias SymphonyElixir.Linear.Issue
 
-  @default_stage "implement"
+  @dispatchable_kinds ["queue", "agent"]
 
-  @spec stage(Issue.t(), Schema.t() | nil) :: String.t() | nil
-  def stage(issue, settings \\ nil)
+  @doc """
+  The issue's stage definition, or nil when no stage matches.
+  """
+  @spec stage_definition(Issue.t(), Schema.t() | nil) :: map() | nil
+  def stage_definition(issue, settings \\ nil)
 
-  def stage(%Issue{} = issue, settings) do
+  def stage_definition(%Issue{state: state_name} = issue, settings) when is_binary(state_name) do
     settings = settings || Config.settings!()
+    definition = Store.get(team(issue))
+    prefix = label_prefix(settings)
 
-    case stage_labels(issue, settings) do
-      [] -> default_stage(issue, settings)
+    case labelled_stages(definition, issue, prefix) do
+      [] -> Definition.stage_for(definition, state_name, [], prefix)
       [stage] -> stage
-      stages -> conflicting_stage(stages, settings)
+      # Two stage labels: prefer one that holds the issue still, so a human's
+      # "blocked" always wins over an agent stage.
+      stages -> Enum.find(stages, &(&1["kind"] not in @dispatchable_kinds)) || hd(Enum.sort_by(stages, & &1["id"]))
     end
   end
 
-  def stage(_issue, _settings), do: nil
+  def stage_definition(_issue, _settings), do: nil
+
+  @spec stage(Issue.t(), Schema.t() | nil) :: String.t() | nil
+  def stage(issue, settings \\ nil) do
+    case stage_definition(issue, settings) do
+      %{"id" => id} -> id
+      _ -> nil
+    end
+  end
+
+  @spec team(Issue.t() | nil) :: String.t() | nil
+  def team(%Issue{identifier: identifier}) when is_binary(identifier) do
+    case String.split(identifier, "-", parts: 2) do
+      [key, _number] when key != "" -> key
+      _ -> nil
+    end
+  end
+
+  def team(_issue), do: nil
 
   @spec warnings(Issue.t(), Schema.t() | nil) :: [String.t()]
   def warnings(issue, settings \\ nil)
 
   def warnings(%Issue{} = issue, settings) do
     settings = settings || Config.settings!()
+    definition = Store.get(team(issue))
 
-    case stage_labels(issue, settings) do
+    case labelled_stages(definition, issue, label_prefix(settings)) do
       stages when length(stages) > 1 ->
-        ["multiple stage labels (#{Enum.join(stages, ", ")}) found; using #{conflicting_stage(stages, settings)}"]
+        ["multiple stage labels (#{Enum.map_join(stages, ", ", & &1["id"])}) found; using #{stage(issue, settings)}"]
 
       _ ->
         []
@@ -49,29 +78,42 @@ defmodule SymphonyElixir.IssueStage do
 
   def warnings(_issue, _settings), do: []
 
+  @doc """
+  True when the issue's stage holds it still (human, parked, done, or a label in
+  `tracker.paused_stages`). Running agents in such a stage are stopped.
+  """
   @spec paused?(Issue.t(), Schema.t() | nil) :: boolean()
   def paused?(issue, settings \\ nil)
 
   def paused?(%Issue{} = issue, settings) do
     settings = settings || Config.settings!()
-    stage(issue, settings) in paused_stages(settings)
+
+    paused_label? =
+      issue
+      |> Issue.label_names()
+      |> Enum.any?(fn label -> is_binary(label) and normalize(label) in Enum.map(paused_stages(settings), &(label_prefix(settings) <> "/" <> &1)) end)
+
+    case stage_definition(issue, settings) do
+      %{"id" => id, "kind" => kind} -> paused_label? or kind not in @dispatchable_kinds or id in paused_stages(settings)
+      nil -> paused_label?
+    end
   end
 
   def paused?(_issue, _settings), do: false
 
   @doc """
-  True when an operator paused new dispatch for this issue's stage from the
-  dashboard. Unlike a paused stage label, this does not stop running agents.
+  True when someone paused new dispatch for this issue's stage from the
+  dashboard. Unlike `paused?/2`, this does not stop running agents.
   """
   @spec dispatch_paused?(Issue.t()) :: boolean()
-  def dispatch_paused?(%Issue{} = issue), do: FactoryControls.paused?(control_stage(issue))
+  def dispatch_paused?(%Issue{} = issue), do: match?(%{"paused" => true}, stage_definition(issue))
   def dispatch_paused?(_issue), do: false
 
   @doc """
-  The stage key used for dashboard controls; `Todo` issues map to `todo`.
+  The key dashboard controls and per-stage caps use: `{team, stage_id}`.
   """
-  @spec control_stage(Issue.t()) :: String.t() | nil
-  def control_stage(%Issue{} = issue), do: stage(issue) || "todo"
+  @spec control_stage(Issue.t()) :: {String.t() | nil, String.t()}
+  def control_stage(%Issue{} = issue), do: {team(issue), stage(issue) || "todo"}
 
   @spec active?(Issue.t(), Schema.t() | nil) :: boolean()
   def active?(issue, settings \\ nil)
@@ -89,10 +131,24 @@ defmodule SymphonyElixir.IssueStage do
   def active_state?(state_name, settings) when is_binary(state_name) do
     settings = settings || Config.settings!()
     normalized = normalize(state_name)
-    Enum.any?(settings.tracker.active_states, &(normalize(&1) == normalized))
+    Enum.any?(active_state_names(settings), &(normalize(&1) == normalized))
   end
 
   def active_state?(_state_name, _settings), do: false
+
+  @doc """
+  Linear states Symphony polls: `tracker.active_states` plus every state a
+  team's factory dispatches from, so adding a stage in a new state just works.
+  """
+  @spec active_state_names(Schema.t() | nil) :: [String.t()]
+  def active_state_names(settings \\ nil) do
+    settings = settings || Config.settings!()
+
+    Store.teams()
+    |> Enum.flat_map(&Definition.active_states(Store.get(&1)))
+    |> then(&(settings.tracker.active_states ++ &1))
+    |> Enum.uniq_by(&normalize/1)
+  end
 
   @spec label_prefix(Schema.t() | nil) :: String.t()
   def label_prefix(settings \\ nil) do
@@ -100,36 +156,20 @@ defmodule SymphonyElixir.IssueStage do
     normalize(settings.tracker.stage_label_prefix || "factory")
   end
 
-  defp stage_labels(%Issue{} = issue, settings) do
-    prefix = label_prefix(settings) <> "/"
-
+  defp labelled_stages(definition, %Issue{state: state_name} = issue, prefix) do
     issue
     |> Issue.label_names()
     |> Enum.filter(&is_binary/1)
     |> Enum.map(&normalize/1)
-    |> Enum.filter(&String.starts_with?(&1, prefix))
-    |> Enum.map(&String.replace_prefix(&1, prefix, ""))
-    |> Enum.reject(&(&1 == ""))
+    |> Enum.filter(&String.starts_with?(&1, prefix <> "/"))
     |> Enum.uniq()
-  end
-
-  # `Todo` has no stage until the agent picks it up; every other active state
-  # without a stage label is treated as normal implementation work.
-  defp default_stage(%Issue{state: state_name}, settings) when is_binary(state_name) do
-    cond do
-      normalize(state_name) == "todo" -> nil
-      active_state?(state_name, settings) -> @default_stage
-      true -> nil
-    end
-  end
-
-  defp default_stage(_issue, _settings), do: nil
-
-  # A paused label always wins so a human can park an issue regardless of other
-  # labels; otherwise pick deterministically so dispatch is stable.
-  defp conflicting_stage(stages, settings) do
-    paused = paused_stages(settings)
-    Enum.find(stages, &(&1 in paused)) || stages |> Enum.sort() |> List.first()
+    |> Enum.flat_map(fn label ->
+      case Definition.stage_for(definition, state_name, [label], prefix) do
+        %{"label" => stage_label} = stage when is_binary(stage_label) -> [stage]
+        _ -> []
+      end
+    end)
+    |> Enum.uniq_by(& &1["id"])
   end
 
   defp paused_stages(settings) do

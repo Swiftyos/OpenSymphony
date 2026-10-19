@@ -73,9 +73,9 @@ defmodule SymphonyElixir.FactoryControlsTest do
     assert FactoryControls.get("implement") == %{paused: false, max_agents: nil, backend: nil, effort: nil}
     assert {:ok, %{paused: true}} = FactoryControls.put("implement", "paused", true)
     assert {:ok, %{backend: "claude"}} = FactoryControls.put("implement", "backend", "claude")
-    assert {:error, {:invalid_control, "backend", "gpt"}} = FactoryControls.put("implement", "backend", "gpt")
+    assert {:error, {:invalid_control, "backend", "gpt", _message}} = FactoryControls.put("implement", "backend", "gpt")
     assert {:error, {:unknown_stage, "review"}} = FactoryControls.put("review", "paused", true)
-    assert {:error, {:invalid_control, "max_agents", 0}} = FactoryControls.put("merge", "max_agents", 0)
+    assert {:error, {:invalid_control, "max_agents", 0, _message}} = FactoryControls.put("merge", "max_agents", 0)
   end
 
   test "pausing a stage stops new dispatch but leaves running agents alone" do

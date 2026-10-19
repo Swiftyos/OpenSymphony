@@ -20,11 +20,11 @@ defmodule SymphonyElixir.IssueStageTest do
   test "stage comes from the factory label group and defaults to implement in progress" do
     write_workflow_file!(Workflow.workflow_file_path())
 
-    assert IssueStage.stage(issue("Todo", [])) == nil
+    assert IssueStage.stage(issue("Todo", [])) == "todo"
     assert IssueStage.stage(issue("In Progress", [])) == "implement"
     assert IssueStage.stage(issue("In Progress", ["factory/merge"])) == "merge"
     assert IssueStage.stage(issue("In Progress", ["Factory/Rework", "claude"])) == "rework"
-    assert IssueStage.stage(issue("Done", [])) == nil
+    assert IssueStage.stage(issue("Done", [])) == "done"
   end
 
   test "paused stages block dispatch while other stages stay active" do

@@ -24,17 +24,31 @@ defmodule SymphonyElixir.Factory.Store do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
   end
 
+  @default_team "DEFAULT"
+
   @doc """
-  The definition for a team (or the default template). `nil` team = default.
+  The definition for a team. Lookup order: the team's own definition, then the
+  organisation-wide `DEFAULT` definition, then the built-in template. `nil`
+  means the organisation default.
   """
   @spec get(String.t() | nil) :: Definition.t()
   def get(team) do
-    with key when is_binary(key) <- normalize_team(team),
-         true <- :ets.whereis(@table) != :undefined,
+    key = normalize_team(team) || @default_team
+
+    (lookup(key) || lookup(@default_team) || Definition.default_template())
+    |> Map.put("team", key)
+    |> Map.put("inherited", is_nil(lookup(key)))
+  end
+
+  @spec default_team() :: String.t()
+  def default_team, do: @default_team
+
+  defp lookup(key) do
+    with true <- :ets.whereis(@table) != :undefined,
          [{^key, definition}] <- :ets.lookup(@table, key) do
       definition
     else
-      _ -> Map.put(Definition.default_template(), "team", normalize_team(team))
+      _ -> nil
     end
   end
 
@@ -94,7 +108,7 @@ defmodule SymphonyElixir.Factory.Store do
   @impl true
   def handle_call({:put, team, definition, base_version, updated_by}, _from, state) do
     with {:ok, key} <- team_key(team),
-         current = get(key),
+         current = own_or_new(key),
          :ok <- check_version(current, base_version),
          {:ok, valid} <- Definition.validate(definition) do
       saved = stamp(valid, key, current["version"] + 1, updated_by)
@@ -109,7 +123,7 @@ defmodule SymphonyElixir.Factory.Store do
 
   def handle_call({:put_stage_field, team, stage_id, field, value, updated_by}, _from, state) do
     with {:ok, key} <- team_key(team),
-         current = get(key),
+         current = own_or_new(key),
          %{} <- Definition.stage(current, stage_id) || {:error, {:unknown_stage, stage_id}},
          updated = update_stage(current, stage_id, field, value),
          {:ok, valid} <- Definition.validate(updated) do
@@ -138,6 +152,9 @@ defmodule SymphonyElixir.Factory.Store do
     :ets.delete_all_objects(@table)
     {:reply, :ok, state}
   end
+
+  # A team that inherits starts its own copy from what it inherits, at version 0.
+  defp own_or_new(key), do: lookup(key) || get(key) |> Map.put("version", 0)
 
   defp check_version(%{"version" => version}, version), do: :ok
   defp check_version(current, _base_version), do: {:conflict, current}

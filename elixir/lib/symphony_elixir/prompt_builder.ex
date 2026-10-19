@@ -4,25 +4,33 @@ defmodule SymphonyElixir.PromptBuilder do
   """
 
   alias SymphonyElixir.{Config, IssueConfig, IssueStage, Workflow}
+  alias SymphonyElixir.Factory.StagePrompt
 
   @render_opts [strict_variables: true, strict_filters: true]
 
   @spec build_prompt(SymphonyElixir.Linear.Issue.t(), keyword()) :: String.t()
   def build_prompt(issue, opts \\ []) do
-    template =
-      resolve_prompt_template(issue, opts)
-      |> parse_template!()
+    source = resolve_prompt_template(issue, opts)
+    stage = StagePrompt.variables(issue)
 
-    template
-    |> Solid.render!(
-      %{
-        "attempt" => Keyword.get(opts, :attempt),
-        "issue" => issue |> Map.from_struct() |> to_solid_map() |> Map.put("stage", IssueStage.stage(issue)),
-        "factory" => %{"label_prefix" => IssueStage.label_prefix()}
-      },
-      @render_opts
-    )
-    |> IO.iodata_to_binary()
+    rendered =
+      source
+      |> parse_template!()
+      |> Solid.render!(
+        %{
+          "attempt" => Keyword.get(opts, :attempt),
+          "issue" => issue |> Map.from_struct() |> to_solid_map() |> Map.put("stage", stage["id"]),
+          "stage" => stage,
+          "factory" => %{"label_prefix" => IssueStage.label_prefix()}
+        },
+        @render_opts
+      )
+      |> IO.iodata_to_binary()
+
+    # Templates that don't place the stage section themselves get it appended.
+    if String.contains?(source, "stage.prompt") or stage["prompt"] == "",
+      do: rendered,
+      else: rendered <> "\n\n" <> stage["prompt"] <> "\n"
   end
 
   defp resolve_prompt_template(issue, opts) do
