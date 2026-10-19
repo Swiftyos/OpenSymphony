@@ -77,8 +77,10 @@ defmodule SymphonyElixir.Factory.Store do
   Updates one runtime control on a stage (paused, max_agents, harness, effort).
   Not version-checked: these are single-field toggles from the dashboard.
   """
-  @spec put_stage_field(String.t(), String.t(), String.t(), term(), String.t()) :: {:ok, Definition.t()} | {:error, term()}
-  def put_stage_field(team, stage_id, field, value, updated_by) when field in ["paused", "max_agents", "harness", "effort"] do
+  @spec put_stage_field(String.t(), String.t(), String.t(), term(), String.t()) ::
+          {:ok, Definition.t()} | {:error, term()}
+  def put_stage_field(team, stage_id, field, value, updated_by)
+      when field in ["paused", "max_agents", "harness", "effort"] do
     GenServer.call(__MODULE__, {:put_stage_field, team, stage_id, field, value, updated_by})
   end
 

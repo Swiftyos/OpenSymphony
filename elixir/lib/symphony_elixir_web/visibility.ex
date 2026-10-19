@@ -9,7 +9,15 @@ defmodule SymphonyElixirWeb.Visibility do
 
   alias SymphonyElixir.Auth
 
-  @host_fields [:workspace_path, :worker_host, :account, :account_id, :account_email, :account_credential_kind, :session_id]
+  @host_fields [
+    :workspace_path,
+    :worker_host,
+    :account,
+    :account_id,
+    :account_email,
+    :account_credential_kind,
+    :session_id
+  ]
 
   @spec filter_payload(map(), Auth.User.t() | nil) :: map()
   def filter_payload(%{error: _} = payload, _user), do: payload
@@ -41,12 +49,14 @@ defmodule SymphonyElixirWeb.Visibility do
     payload
     |> Map.update(:running, [], &(&1 |> Enum.filter(fn e -> visible?.(e.issue_identifier) end) |> Enum.map(fn e -> drop_host_fields(e) end)))
     |> Map.update(:retrying, [], &(&1 |> Enum.filter(fn e -> visible?.(e.issue_identifier) end) |> Enum.map(fn e -> drop_host_fields(e) end)))
-    |> Map.update(:projects, [], fn projects ->
-      Enum.map(projects, &Map.update(&1, :issues, [], fn issues -> Enum.filter(issues, fn i -> visible?.(i[:issue_identifier]) end) end))
-    end)
+    |> Map.update(:projects, [], fn projects -> Enum.map(projects, &restrict_project_issues(&1, visible?)) end)
     |> Map.put(:accounts, [])
     |> Map.update(:factory, nil, &restrict_factory(&1, visible?))
     |> then(fn p -> Map.put(p, :counts, %{running: length(p.running), retrying: length(p.retrying)}) end)
+  end
+
+  defp restrict_project_issues(project, visible?) do
+    Map.update(project, :issues, [], fn issues -> Enum.filter(issues, fn i -> visible?.(i[:issue_identifier]) end) end)
   end
 
   defp restrict_factory(nil, _visible?), do: nil

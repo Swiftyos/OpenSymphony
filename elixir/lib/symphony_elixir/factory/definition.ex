@@ -203,18 +203,27 @@ defmodule SymphonyElixir.Factory.Definition do
     Enum.flat_map(stages, fn stage ->
       label = stage["name"] |> blank_to_nil() || stage["id"]
 
-      [
-        !Regex.match?(@id_pattern, stage["id"]) && "stage id #{inspect(stage["id"])} must be lowercase letters, digits, or dashes",
-        stage["name"] == "" && "stage #{label} needs a name",
-        stage["kind"] not in @kinds && "stage #{label} has unknown kind #{inspect(stage["kind"])}",
-        stage["linear_state"] == "" && "stage #{label} needs a Linear state",
-        stage["label"] && !Regex.match?(@id_pattern, stage["label"]) && "stage #{label} label must be lowercase letters, digits, or dashes",
-        stage["harness"] not in [nil | @backends] && "stage #{label} has unknown harness #{inspect(stage["harness"])}",
-        stage["effort"] not in [nil | @efforts] && "stage #{label} has unknown thinking level #{inspect(stage["effort"])}",
-        not valid_max_agents?(stage["max_agents"]) && "stage #{label} max agents must be a whole number from 1 to 100"
-      ]
+      (stage_identity_errors(stage, label) ++ stage_option_errors(stage, label))
       |> Enum.filter(&is_binary/1)
     end)
+  end
+
+  defp stage_identity_errors(stage, label) do
+    [
+      !Regex.match?(@id_pattern, stage["id"]) && "stage id #{inspect(stage["id"])} must be lowercase letters, digits, or dashes",
+      stage["name"] == "" && "stage #{label} needs a name",
+      stage["kind"] not in @kinds && "stage #{label} has unknown kind #{inspect(stage["kind"])}",
+      stage["linear_state"] == "" && "stage #{label} needs a Linear state"
+    ]
+  end
+
+  defp stage_option_errors(stage, label) do
+    [
+      stage["label"] && !Regex.match?(@id_pattern, stage["label"]) && "stage #{label} label must be lowercase letters, digits, or dashes",
+      stage["harness"] not in [nil | @backends] && "stage #{label} has unknown harness #{inspect(stage["harness"])}",
+      stage["effort"] not in [nil | @efforts] && "stage #{label} has unknown thinking level #{inspect(stage["effort"])}",
+      not valid_max_agents?(stage["max_agents"]) && "stage #{label} max agents must be a whole number from 1 to 100"
+    ]
   end
 
   defp identity_errors(stages) do

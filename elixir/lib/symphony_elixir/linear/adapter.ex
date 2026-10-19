@@ -130,7 +130,11 @@ defmodule SymphonyElixir.Linear.Adapter do
          {:ok, state_id} <- stage_state_id(response),
          {:ok, label_ids} <- stage_label_ids(response, prefix, stage),
          {:ok, update} <-
-           client_module().graphql(@set_stage_mutation, %{issueId: issue_id, stateId: state_id, labelIds: label_ids}, graphql_opts),
+           client_module().graphql(
+             @set_stage_mutation,
+             %{issueId: issue_id, stateId: state_id, labelIds: label_ids},
+             graphql_opts
+           ),
          true <- get_in(update, ["data", "issueUpdate", "success"]) == true do
       :ok
     else

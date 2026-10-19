@@ -15,7 +15,15 @@ defmodule SymphonyElixir.SecurityTest do
       {:ok,
        for id <- ids, String.starts_with?(id, "id-PAY-") do
          identifier = String.replace_prefix(id, "id-", "")
-         %SymphonyElixir.Linear.Issue{id: id, identifier: identifier, title: "x", state: "In Review", labels: [], project_slug: "project"}
+
+         %SymphonyElixir.Linear.Issue{
+           id: id,
+           identifier: identifier,
+           title: "x",
+           state: "In Review",
+           labels: [],
+           project_slug: "project"
+         }
        end}
     end
 

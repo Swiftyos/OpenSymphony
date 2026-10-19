@@ -610,7 +610,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp format_compact(value) when is_integer(value) and value >= 10_000, do: "#{round(value / 1_000)}k"
   defp format_compact(value) when is_integer(value) and value >= 1_000, do: "#{Float.round(value / 1_000, 1)}k"
   defp format_compact(value) when is_integer(value), do: Integer.to_string(value)
-  defp format_compact(_value), do: "–"
 
   defp format_int(value) when is_integer(value) do
     value
@@ -619,9 +618,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
     |> String.replace(~r/.{3}(?=.)/, "\\0,")
     |> String.reverse()
   end
-
-  defp format_int(value) when is_float(value), do: value |> round() |> format_int()
-  defp format_int(_value), do: "n/a"
 
   defp issue_rows(%{running: running, retrying: retrying}) do
     Enum.map(running, &Map.put(&1, :status, :running)) ++

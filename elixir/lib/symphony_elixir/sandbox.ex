@@ -130,7 +130,7 @@ defmodule SymphonyElixir.Sandbox do
       # Busybox-friendly: only /proc, tr, and grep. The reaper itself is not tagged.
       script =
         "for p in /proc/[0-9]*; do " <>
-          "tr '\\0' '\\n' < \"$p/environ\" 2>/dev/null | grep -qx '#{@exec_marker}' && kill -TERM \"${p#/proc/}\" 2>/dev/null; " <>
+          ~s[tr '\\0' '\\n' < "$p/environ" 2>/dev/null | grep -qx '#{@exec_marker}' && kill -TERM "${p#/proc/}" 2>/dev/null; ] <>
           "done; true"
 
       docker(settings, ["exec", container_name(workspace), "sh", "-c", script])

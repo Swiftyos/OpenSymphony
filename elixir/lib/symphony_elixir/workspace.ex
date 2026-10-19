@@ -26,7 +26,14 @@ defmodule SymphonyElixir.Workspace do
            {:ok, workspace} <- workspace_path_for_issue(issue_context, safe_id, worker_host, settings),
            :ok <- validate_workspace_path(workspace, worker_host, settings),
            {:ok, workspace, created?} <- ensure_workspace(workspace, worker_host, settings),
-           {:ok, created?} <- maybe_recreate_incomplete_workspace(workspace, issue_context, created?, worker_host, settings),
+           {:ok, created?} <-
+             maybe_recreate_incomplete_workspace(
+               workspace,
+               issue_context,
+               created?,
+               worker_host,
+               settings
+             ),
            :ok <- initialize_new_workspace(workspace, issue_context, created?, worker_host, settings) do
         {:ok, workspace}
       end
@@ -448,18 +455,7 @@ defmodule SymphonyElixir.Workspace do
     Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=local")
 
     task =
-      Task.async(fn ->
-        # Hooks run inside the workspace container when sandboxing is enabled so
-        # dependency installs and builds stay isolated per issue.
-        case Sandbox.command_spec(workspace, command, [], settings: settings, shell: "sh") do
-          {:ok, %{executable: executable, args: args, cd: cd}} ->
-            cmd_opts = if is_binary(cd), do: [cd: cd, stderr_to_stdout: true], else: [stderr_to_stdout: true]
-            System.cmd(executable, args, cmd_opts)
-
-          {:error, reason} ->
-            {"sandbox unavailable: #{inspect(reason)}", 125}
-        end
-      end)
+      Task.async(fn -> run_local_hook_command(workspace, command, settings) end)
 
     case Task.yield(task, timeout_ms) do
       {:ok, cmd_result} ->
@@ -489,6 +485,19 @@ defmodule SymphonyElixir.Workspace do
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  defp run_local_hook_command(workspace, command, settings) do
+    # Hooks run inside the workspace container when sandboxing is enabled so
+    # dependency installs and builds stay isolated per issue.
+    case Sandbox.command_spec(workspace, command, [], settings: settings, shell: "sh") do
+      {:ok, %{executable: executable, args: args, cd: cd}} ->
+        cmd_opts = if is_binary(cd), do: [cd: cd, stderr_to_stdout: true], else: [stderr_to_stdout: true]
+        System.cmd(executable, args, cmd_opts)
+
+      {:error, reason} ->
+        {"sandbox unavailable: #{inspect(reason)}", 125}
     end
   end
 

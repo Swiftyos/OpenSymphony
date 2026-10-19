@@ -31,7 +31,15 @@ defmodule SymphonyElixir.AuthTest do
     end
 
     defp known_issue("id-PAY-1"),
-      do: %SymphonyElixir.Linear.Issue{id: "id-PAY-1", identifier: "PAY-1", title: "Refunds", state: "In Review", labels: [], project_slug: "project", url: "https://linear.app/acme/issue/PAY-1"}
+      do: %SymphonyElixir.Linear.Issue{
+        id: "id-PAY-1",
+        identifier: "PAY-1",
+        title: "Refunds",
+        state: "In Review",
+        labels: [],
+        project_slug: "project",
+        url: "https://linear.app/acme/issue/PAY-1"
+      }
 
     defp known_issue("id-WEB-1"),
       do: %SymphonyElixir.Linear.Issue{id: "id-WEB-1", identifier: "WEB-1", title: "Cart", state: "In Review", labels: [], project_slug: "project"}

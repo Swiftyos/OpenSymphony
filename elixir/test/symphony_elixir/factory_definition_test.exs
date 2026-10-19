@@ -51,7 +51,7 @@ defmodule SymphonyElixir.FactoryDefinitionTest do
     assert {:error, errors} = Definition.validate(broken)
     assert "two stages share the id \"build\"" in errors
     assert "stage Again has unknown kind \"robot\"" in errors
-    assert "two stages use Linear state \"in progress\" with label \"build\"" in errors
+    assert ~s(two stages use Linear state "in progress" with label "build") in errors
     assert Enum.any?(errors, &(&1 =~ "must be lowercase letters"))
     assert Enum.any?(errors, &(&1 =~ "max agents"))
     assert "a connection ends at unknown stage \"ship\"" in errors

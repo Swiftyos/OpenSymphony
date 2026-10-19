@@ -53,7 +53,8 @@ defmodule SymphonyElixir.FactoryControls do
     with {:ok, stage_field} <- Map.fetch(@field_map, field) |> or_error({:invalid_control, field, value}),
          %{} = stage <- Definition.stage(Store.get(team), stage_id) || {:error, {:unknown_stage, stage_id}},
          true <- stage["kind"] in ["queue", "agent"] || {:error, {:unknown_stage, stage_id}},
-         {:ok, definition} <- Store.put_stage_field(team || Store.default_team(), stage_id, stage_field, value, updated_by) do
+         {:ok, definition} <-
+           Store.put_stage_field(team || Store.default_team(), stage_id, stage_field, value, updated_by) do
       {:ok, from_stage(Definition.stage(definition, stage_id))}
     else
       {:error, [message | _]} -> {:error, {:invalid_control, field, value, message}}

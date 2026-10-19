@@ -11,25 +11,8 @@ defmodule SymphonyElixir.Factory.StagePrompt do
 
   @spec render(Issue.t()) :: String.t()
   def render(%Issue{} = issue) do
-    with %{} = stage <- IssueStage.stage_definition(issue) do
-      definition = Store.get(IssueStage.team(issue))
-      prefix = IssueStage.label_prefix()
-
-      [
-        "## Your current stage: #{stage["name"]}",
-        "",
-        blank_or(stage["instructions"], "Follow the workflow for this stage."),
-        "",
-        "### Allowed moves from here",
-        "",
-        moves(definition, stage, prefix),
-        "",
-        "Move the issue by setting its Linear state and `#{prefix}/*` stage label exactly as listed. " <>
-          "Only make moves marked for agents; moves marked for humans are theirs to make. " <>
-          "If none of these fit, record why in the workpad and stop."
-      ]
-      |> Enum.join("\n")
-    else
+    case IssueStage.stage_definition(issue) do
+      %{} = stage -> render_stage(issue, stage)
       _ -> ""
     end
   end
@@ -52,19 +35,41 @@ defmodule SymphonyElixir.Factory.StagePrompt do
 
   def variables(_issue), do: variables(%Issue{})
 
+  defp render_stage(issue, stage) do
+    definition = Store.get(IssueStage.team(issue))
+    prefix = IssueStage.label_prefix()
+
+    [
+      "## Your current stage: #{stage["name"]}",
+      "",
+      blank_or(stage["instructions"], "Follow the workflow for this stage."),
+      "",
+      "### Allowed moves from here",
+      "",
+      moves(definition, stage, prefix),
+      "",
+      "Move the issue by setting its Linear state and `#{prefix}/*` stage label exactly as listed. " <>
+        "Only make moves marked for agents; moves marked for humans are theirs to make. " <>
+        "If none of these fit, record why in the workpad and stop."
+    ]
+    |> Enum.join("\n")
+  end
+
   defp moves(definition, stage, prefix) do
     case Definition.transitions_from(definition, stage["id"]) do
       [] ->
         "- None. This stage ends the flow."
 
       transitions ->
-        Enum.map_join(transitions, "\n", fn transition ->
-          target = Definition.stage(definition, transition["to"])
-          who = if transition["by"] == "agent", do: "you", else: "a human"
-          criteria = blank_or(transition["criteria"], "when the work for this stage is done")
-          "- **#{target["name"]}** (#{who}): #{criteria}. Set state `#{target["linear_state"]}`#{label_text(target, prefix)}."
-        end)
+        Enum.map_join(transitions, "\n", &move_line(definition, &1, prefix))
     end
+  end
+
+  defp move_line(definition, transition, prefix) do
+    target = Definition.stage(definition, transition["to"])
+    who = if transition["by"] == "agent", do: "you", else: "a human"
+    criteria = blank_or(transition["criteria"], "when the work for this stage is done")
+    "- **#{target["name"]}** (#{who}): #{criteria}. Set state `#{target["linear_state"]}`#{label_text(target, prefix)}."
   end
 
   defp label_text(%{"label" => label}, prefix) when is_binary(label), do: " and label `#{prefix}/#{label}` (remove other `#{prefix}/*` labels)"

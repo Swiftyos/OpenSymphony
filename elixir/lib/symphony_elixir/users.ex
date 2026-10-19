@@ -157,16 +157,18 @@ defmodule SymphonyElixir.Users do
     now_ms = System.system_time(:millisecond)
 
     if ready?() do
-      Enum.find_value(all_records(), fn record ->
-        reset = record[:reset]
-
-        if is_map(reset) and :crypto.hash_equals(Base.decode64!(reset.hash), hash) and reset.expires_ms > now_ms,
-          do: public(record)
-      end)
+      Enum.find_value(all_records(), &reset_record_match(&1, hash, now_ms))
     end
   end
 
   def reset_account_for_token(_token), do: nil
+
+  defp reset_record_match(record, hash, now_ms) do
+    reset = record[:reset]
+
+    if is_map(reset) and :crypto.hash_equals(Base.decode64!(reset.hash), hash) and reset.expires_ms > now_ms,
+      do: public(record)
+  end
 
   @spec reset_password(String.t(), String.t(), String.t()) :: {:ok, user()} | {:error, atom()}
   def reset_password(token, new_password, confirmation) do

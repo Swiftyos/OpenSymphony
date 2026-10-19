@@ -109,7 +109,17 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:kind, :endpoint, :api_key, :project_slug, :assignee, :active_states, :terminal_states, :stage_label_prefix, :paused_stages],
+        [
+          :kind,
+          :endpoint,
+          :api_key,
+          :project_slug,
+          :assignee,
+          :active_states,
+          :terminal_states,
+          :stage_label_prefix,
+          :paused_stages
+        ],
         empty_values: []
       )
       |> update_change(:kind, &Schema.normalize_optional_string/1)
@@ -869,7 +879,7 @@ defmodule SymphonyElixir.Config.Schema do
   defp validate_pricing(:pricing, pricing) do
     Enum.flat_map(pricing, fn
       {key, %{} = rates} ->
-        if Enum.all?(rates, fn {rate_key, value} -> rate_key in ["input_per_mtok", "output_per_mtok"] and is_number(value) and value >= 0 end) do
+        if Enum.all?(rates, &valid_pricing_rate?/1) do
           []
         else
           [pricing: "#{key} must only set non-negative input_per_mtok / output_per_mtok numbers"]
@@ -878,6 +888,10 @@ defmodule SymphonyElixir.Config.Schema do
       {key, _rates} ->
         [pricing: "#{key} must be a map of input_per_mtok / output_per_mtok"]
     end)
+  end
+
+  defp valid_pricing_rate?({rate_key, value}) do
+    rate_key in ["input_per_mtok", "output_per_mtok"] and is_number(value) and value >= 0
   end
 
   defp finalize_settings(settings, raw_config, opts) do

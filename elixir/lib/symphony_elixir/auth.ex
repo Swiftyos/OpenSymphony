@@ -132,10 +132,17 @@ defmodule SymphonyElixir.Auth do
   def user_for_id(account_id, session_version \\ nil) do
     case Users.get(account_id) do
       # A password change or disable bumps the version and ends older sessions.
-      %{session_version: version} when is_integer(session_version) and version != session_version -> {:error, :signed_out}
-      %{status: "active"} = account -> user_for_account(account)
-      %{status: "pending"} -> {:error, :pending}
-      _ -> {:error, :signed_out}
+      %{session_version: version} when is_integer(session_version) and version != session_version ->
+        {:error, :signed_out}
+
+      %{status: "active"} = account ->
+        user_for_account(account)
+
+      %{status: "pending"} ->
+        {:error, :pending}
+
+      _ ->
+        {:error, :signed_out}
     end
   end
 

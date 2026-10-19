@@ -43,16 +43,19 @@ defmodule SymphonyElixir.HttpServer do
             |> Keyword.merge(endpoint_opts)
 
           Application.put_env(:symphony_elixir, Endpoint, endpoint_config)
-
-          with {:ok, _pid} = started <- Endpoint.start_link() do
-            # On a fresh install the first-account setup code goes to the log at boot.
-            if SymphonyElixir.Auth.mode() == :accounts, do: SymphonyElixir.Users.setup_code()
-            started
-          end
+          start_endpoint()
         end
 
       _ ->
         :ignore
+    end
+  end
+
+  defp start_endpoint do
+    with {:ok, _pid} = started <- Endpoint.start_link() do
+      # On a fresh install the first-account setup code goes to the log at boot.
+      if SymphonyElixir.Auth.mode() == :accounts, do: SymphonyElixir.Users.setup_code()
+      started
     end
   end
 

@@ -67,47 +67,52 @@ defmodule SymphonyElixir.AgentRoute do
     default_backend = stage_controls.backend || settings.agent.backend
     default_effort = stage_controls.effort || Schema.normalize_optional_effort(settings.agent.default_effort)
 
-    {backend, backend_warnings} =
-      case backend_matches do
-        [backend] ->
-          {backend, []}
-
-        [] ->
-          {default_backend, []}
-
-        conflicts ->
-          {default_backend,
-           [
-             "multiple backend labels (#{Enum.join(conflicts, ", ")}) found; falling back to default backend #{default_backend}"
-           ]}
-      end
-
-    {effort, effort_warnings} =
-      case effort_matches do
-        [effort] ->
-          {effort, []}
-
-        [] ->
-          {default_effort, []}
-
-        conflicts when is_binary(default_effort) ->
-          {default_effort,
-           [
-             "multiple thinking labels (#{Enum.join(conflicts, ", ")}) found; falling back to default effort #{default_effort}"
-           ]}
-
-        conflicts ->
-          {nil,
-           [
-             "multiple thinking labels (#{Enum.join(conflicts, ", ")}) found; ignoring effort override"
-           ]}
-      end
+    {backend, backend_warnings} = resolve_backend(backend_matches, default_backend)
+    {effort, effort_warnings} = resolve_effort(effort_matches, default_effort)
 
     %__MODULE__{
       backend: backend,
       effort: effort,
       warnings: backend_warnings ++ effort_warnings
     }
+  end
+
+  defp resolve_backend(backend_matches, default_backend) do
+    case backend_matches do
+      [backend] ->
+        {backend, []}
+
+      [] ->
+        {default_backend, []}
+
+      conflicts ->
+        {default_backend,
+         [
+           "multiple backend labels (#{Enum.join(conflicts, ", ")}) found; falling back to default backend #{default_backend}"
+         ]}
+    end
+  end
+
+  defp resolve_effort(effort_matches, default_effort) do
+    case effort_matches do
+      [effort] ->
+        {effort, []}
+
+      [] ->
+        {default_effort, []}
+
+      conflicts when is_binary(default_effort) ->
+        {default_effort,
+         [
+           "multiple thinking labels (#{Enum.join(conflicts, ", ")}) found; falling back to default effort #{default_effort}"
+         ]}
+
+      conflicts ->
+        {nil,
+         [
+           "multiple thinking labels (#{Enum.join(conflicts, ", ")}) found; ignoring effort override"
+         ]}
+    end
   end
 
   @spec backend_labels() :: [String.t()]
