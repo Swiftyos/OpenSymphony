@@ -367,6 +367,40 @@ defmodule SymphonyElixir.ClaudeCodeCoverageTest do
   end
 
   describe "Tooling.bootstrap_workspace/3" do
+    test "bootstraps remote workspaces over ssh and reports remote failures", %{root: root, workspace_root: workspace_root} do
+      configure_claude!(workspace_root, "claude")
+      ssh_bin = Path.join(root, "fake-ssh-bin")
+      File.mkdir_p!(ssh_bin)
+      ssh_log = Path.join(root, "ssh.log")
+      fake_ssh = Path.join(ssh_bin, "ssh")
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      printf '%s\\n' "$*" >> "#{ssh_log}"
+      if [ -n "$FAKE_SSH_FAIL" ]; then
+        echo "remote bootstrap broke"
+        exit 7
+      fi
+      exit 0
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+      System.put_env("PATH", ssh_bin <> ":" <> System.get_env("PATH", ""))
+      previous_fail = System.get_env("FAKE_SSH_FAIL")
+      on_exit(fn -> restore_env("FAKE_SSH_FAIL", previous_fail) end)
+
+      System.delete_env("FAKE_SSH_FAIL")
+      assert :ok = Tooling.bootstrap_workspace("/remote/ws", "worker-01", timeout_ms: 1_000)
+      assert File.read!(ssh_log) =~ "worker-01"
+
+      System.put_env("FAKE_SSH_FAIL", "1")
+
+      assert {:error, {:claude_tooling_failed, {:remote_bootstrap_failed, "worker-01", 7, output}}} =
+               Tooling.bootstrap_workspace("/remote/ws", "worker-01", timeout_ms: 1_000)
+
+      assert output =~ "remote bootstrap broke"
+    end
+
     test "reports remote bootstrap errors when ssh is unavailable", %{root: root, workspace_root: workspace_root} do
       configure_claude!(workspace_root, "claude", tracker_kind: "linear")
       empty_bin = Path.join(root, "no-ssh-bin")

@@ -40,10 +40,11 @@ defmodule SymphonyElixir.ClaudeCode.Tooling do
     end
   end
 
-  defp bootstrap_remote_workspace(workspace, worker_host, linear_enabled?, timeout) do
+  # System.cmd/3 (used by SSH.run/3) has no :timeout option and raises on it, so it is not passed.
+  defp bootstrap_remote_workspace(workspace, worker_host, linear_enabled?, _timeout) do
     script = remote_bootstrap_script(workspace, linear_enabled?)
 
-    case SSH.run(worker_host, script, stderr_to_stdout: true, timeout: timeout) do
+    case SSH.run(worker_host, script, stderr_to_stdout: true) do
       {:ok, {_output, 0}} ->
         :ok
 
