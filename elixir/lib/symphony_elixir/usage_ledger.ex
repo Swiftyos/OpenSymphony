@@ -302,12 +302,12 @@ defmodule SymphonyElixir.UsageLedger do
 
   defp team_key(_identifier), do: nil
 
-  defp codex_model(command) when is_binary(command) do
-    case Regex.run(~r/(?:--model|-m)[=\s]+["']?([^\s"']+)/, command, capture: :all_but_first) do
-      [model] -> model
+  defp codex_model(command) do
+    with true <- is_binary(command),
+         [model] <- Regex.run(~r/(?:--model|-m)[=\s]+["']?([^\s"']+)/, command, capture: :all_but_first) do
+      model
+    else
       _ -> nil
     end
   end
-
-  defp codex_model(_command), do: nil
 end

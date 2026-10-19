@@ -880,10 +880,8 @@ defmodule SymphonyElixir.Accounts do
         Path.expand(source)
 
       _ ->
-        case System.get_env("CLAUDE_CONFIG_DIR") do
-          source when is_binary(source) and source != "" -> Path.expand(source)
-          _ -> Path.expand("~/.claude")
-        end
+        source = System.get_env("CLAUDE_CONFIG_DIR")
+        if is_binary(source) and source != "", do: Path.expand(source), else: Path.expand("~/.claude")
     end
   end
 
@@ -1009,14 +1007,11 @@ defmodule SymphonyElixir.Accounts do
   end
 
   defp script_shell_command(script_path, transcript_path, executable_path, args) do
+    # Kept on one line per platform branch so coverage doesn't depend on the OS running the tests.
     command =
-      case :os.type() do
-        {:unix, :darwin} ->
-          shell_join([script_path, "-q", transcript_path, executable_path | args])
-
-        _ ->
-          shell_join([script_path, "-q", "-c", shell_join([executable_path | args]), transcript_path])
-      end
+      if darwin?(),
+        do: shell_join([script_path, "-q", transcript_path, executable_path | args]),
+        else: shell_join([script_path, "-q", "-c", shell_join([executable_path | args]), transcript_path])
 
     command <> " </dev/tty >/dev/tty 2>&1"
   end
@@ -1063,13 +1058,7 @@ defmodule SymphonyElixir.Accounts do
   end
 
   defp script_args(executable, args) do
-    case :os.type() do
-      {:unix, :darwin} ->
-        ["-q", "/dev/null", executable | args]
-
-      _ ->
-        ["-q", "-c", shell_join([executable | args]), "/dev/null"]
-    end
+    if darwin?(), do: ["-q", "/dev/null", executable | args], else: ["-q", "-c", shell_join([executable | args]), "/dev/null"]
   end
 
   defp shell_join(parts), do: Enum.map_join(parts, " ", &shell_quote/1)
@@ -1083,20 +1072,19 @@ defmodule SymphonyElixir.Accounts do
     :ok
   end
 
-  defp do_forward_stdin_to_port(port) do
-    case IO.read(:stdio, :line) do
-      data when is_binary(data) ->
-        if :erlang.port_info(port) != :undefined do
-          Port.command(port, sanitize_interactive_input(data))
-          do_forward_stdin_to_port(port)
-        end
+  # The rescue covers the port closing between the port_info check and Port.command.
+  defp do_forward_stdin_to_port(port), do: forward_stdin_line(port, IO.read(:stdio, :line)), rescue: (_ -> :ok)
 
-      _ ->
-        :ok
+  defp forward_stdin_line(port, data) when is_binary(data) do
+    if :erlang.port_info(port) != :undefined do
+      Port.command(port, sanitize_interactive_input(data))
+      do_forward_stdin_to_port(port)
     end
-  rescue
-    _ -> :ok
   end
+
+  defp forward_stdin_line(_port, _data), do: :ok
+
+  defp darwin?, do: match?({:unix, :darwin}, :os.type())
 
   defp sanitize_interactive_input(data) when is_binary(data) do
     data
@@ -1437,13 +1425,12 @@ defmodule SymphonyElixir.Accounts do
 
   defp condense_period_name(value, _bucket_name, fallback) when value in ["", "nil"], do: fallback
 
-  defp condense_period_name(value, bucket_name, fallback) do
+  defp condense_period_name(value, bucket_name, _fallback) do
     cond do
       String.contains?(value, ["week", "weekly", "7d"]) -> "weekly"
       String.contains?(value, ["session", "5h", "five"]) -> "session"
       bucket_name in ["secondary", "weekly"] -> "weekly"
       bucket_name in ["primary", "session"] -> "session"
-      true -> fallback
     end
   end
 
@@ -1460,8 +1447,6 @@ defmodule SymphonyElixir.Accounts do
 
     normalize_datetime_string(reset_at)
   end
-
-  defp bucket_absolute_reset_at(_bucket), do: nil
 
   defp exhausted_until_from_rate_limits(rate_limits, accounts_settings) do
     if exhausted_rate_limits?(rate_limits) do

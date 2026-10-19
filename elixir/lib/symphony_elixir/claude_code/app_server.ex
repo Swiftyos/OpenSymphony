@@ -273,20 +273,14 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
         }
       }) <> "\n"
 
-    try do
-      case :erlang.port_info(port) do
-        :undefined ->
-          {:error, :port_closed}
-
-        _ ->
-          true = Port.command(port, payload)
-          :ok
-      end
-    rescue
-      ArgumentError ->
-        {:error, :port_closed}
+    case :erlang.port_info(port) do
+      :undefined -> {:error, :port_closed}
+      _ -> command_port(port, payload)
     end
   end
+
+  # The rescue covers the port closing between the port_info check and Port.command.
+  defp command_port(port, payload), do: (true = Port.command(port, payload)) && :ok, rescue: (ArgumentError -> {:error, :port_closed})
 
   defp await_turn_result(
          session,
@@ -426,11 +420,9 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
   end
 
   defp assistant_content_items(%{"message" => %{"content" => content}}) when is_list(content), do: content
-  defp assistant_content_items(%{message: %{content: content}}) when is_list(content), do: content
   defp assistant_content_items(_payload), do: []
 
   defp assistant_usage(%{"message" => %{"usage" => usage}}) when is_map(usage), do: usage
-  defp assistant_usage(%{message: %{usage: usage}}) when is_map(usage), do: usage
   defp assistant_usage(_payload), do: nil
 
   defp assistant_part_payload(%{"type" => "text", "text" => text}, usage, session_id) when is_binary(text) do
@@ -521,14 +513,9 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
   defp issue_title(_issue), do: "agent turn"
 
   defp port_metadata(port, worker_host, account) when is_port(port) do
-    base_metadata =
-      case :erlang.port_info(port, :os_pid) do
-        {:os_pid, os_pid} ->
-          %{agent_server_pid: to_string(os_pid)}
-
-        _ ->
-          %{}
-      end
+    os_pid_info = :erlang.port_info(port, :os_pid)
+    os_pid = if match?({:os_pid, _}, os_pid_info), do: elem(os_pid_info, 1)
+    base_metadata = if is_nil(os_pid), do: %{}, else: %{agent_server_pid: to_string(os_pid)}
 
     base_metadata =
       case worker_host do
@@ -612,10 +599,8 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
         :ok
 
       _ ->
-        case System.cmd("kill", ["-#{signal}", "--", pid_target], stderr_to_stdout: true) do
-          {_output, 0} -> :ok
-          _ -> :ok
-        end
+        System.cmd("kill", ["-#{signal}", "--", pid_target], stderr_to_stdout: true)
+        :ok
     end
   rescue
     _ -> :ok

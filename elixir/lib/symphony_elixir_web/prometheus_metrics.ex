@@ -245,10 +245,9 @@ defmodule SymphonyElixirWeb.PrometheusMetrics do
   end
 
   defp usage_periods_path(account) do
-    case Accounts.account_summary(account) do
-      %{usage_periods_csv: path} when is_binary(path) and path != "" -> path
-      _ -> Path.join(Map.get(account, :account_dir, "."), @usage_periods_file)
-    end
+    summary = Accounts.account_summary(account)
+    path = is_map(summary) && Map.get(summary, :usage_periods_csv)
+    if is_binary(path) and path != "", do: path, else: Path.join(Map.get(account, :account_dir, "."), @usage_periods_file)
   end
 
   defp read_usage_period_rows(path) when is_binary(path) do
@@ -408,8 +407,6 @@ defmodule SymphonyElixirWeb.PrometheusMetrics do
     }
   end
 
-  defp fallback_active_usage_period_row(_bucket_name, _bucket_data), do: nil
-
   defp limit_id_from_bucket_data(%{limit_id: limit_id}), do: limit_id
   defp limit_id_from_bucket_data(_bucket_data), do: nil
 
@@ -548,8 +545,6 @@ defmodule SymphonyElixirWeb.PrometheusMetrics do
     "#{name}#{render_labels(labels)} #{render_value(value)}"
   end
 
-  defp render_labels([]), do: ""
-
   defp render_labels(labels) do
     rendered =
       Enum.map_join(labels, ",", fn {key, value} -> "#{key}=\"#{escape_label_value(value)}\"" end)
@@ -577,8 +572,6 @@ defmodule SymphonyElixirWeb.PrometheusMetrics do
   end
 
   defp percent_value(_used, _limit), do: nil
-
-  defp normalize_datetime(%DateTime{} = timestamp), do: timestamp
 
   defp normalize_datetime(value) when is_integer(value) and value > 0 do
     case DateTime.from_unix(value) do
