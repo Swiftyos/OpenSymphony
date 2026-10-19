@@ -642,6 +642,8 @@ defmodule SymphonyElixir.Config.Schema do
       field(:auth, :string)
       # Optional bearer token for the JSON API and /metrics (e.g. Prometheus).
       field(:api_token, :string)
+      # Behind a TLS-terminating proxy: trust X-Forwarded-For / X-Forwarded-Proto.
+      field(:trust_proxy, :boolean, default: false)
       # Signs and encrypts session cookies. nil = generated once and kept in
       # ~/.symphony/secret_key_base so sessions survive restarts.
       field(:secret_key_base, :string)
@@ -650,7 +652,7 @@ defmodule SymphonyElixir.Config.Schema do
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:port, :host, :controls, :auth, :secret_key_base, :api_token], empty_values: [])
+      |> cast(attrs, [:port, :host, :controls, :auth, :secret_key_base, :api_token, :trust_proxy], empty_values: [])
       |> validate_inclusion(:auth, ["local", "accounts"])
       |> validate_length(:api_token, min: 24)
       |> validate_length(:secret_key_base, min: 64)

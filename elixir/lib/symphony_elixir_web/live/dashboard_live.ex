@@ -14,7 +14,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   alias SymphonyElixir.{Auth, Config, FactoryControls, IssueStage, Orchestrator, Tracker, UsageLedger, Users}
   alias SymphonyElixir.Linear.Issue
-  alias SymphonyElixirWeb.{Endpoint, FactoryPresenter, ObservabilityPubSub, Presenter}
+  alias SymphonyElixirWeb.{Endpoint, FactoryPresenter, ObservabilityPubSub, Presenter, UserAuth, Visibility}
   @runtime_tick_ms 1_000
 
   # Issue moves offered from the flow diagram: action => {Linear state, stage label}.
@@ -31,7 +31,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
     socket =
       socket
       |> assign(:instance_name, SymphonyElixir.Config.instance_name())
-      |> assign(:payload, load_payload())
+      |> assign(:payload, load_payload(socket.assigns[:current_user]))
       |> assign(:now, DateTime.utc_now())
 
     if connected?(socket) do
@@ -52,14 +52,14 @@ defmodule SymphonyElixirWeb.DashboardLive do
   def handle_info(:observability_updated, socket) do
     {:noreply,
      socket
-     |> assign(:payload, load_payload())
+     |> assign(:payload, load_payload(socket.assigns.current_user))
      |> assign(:now, DateTime.utc_now())}
   end
 
   @impl true
   def handle_event("factory_control", %{"stage" => stage, "field" => field} = params, socket) do
     reply =
-      with :ok <- authorize(socket, Auth.can_control?(socket.assigns.current_user), :not_admin),
+      with :ok <- authorize(socket, &Auth.can_control?/1, :not_admin),
            {:ok, controls} <- FactoryControls.put(stage, field, Map.get(params, "value")) do
         ObservabilityPubSub.broadcast_update()
         %{ok: true, controls: controls}
@@ -70,23 +70,18 @@ defmodule SymphonyElixirWeb.DashboardLive do
     {:reply, reply, socket}
   end
 
-  def handle_event("factory_move", %{"id" => id, "issue" => identifier, "action" => action} = params, socket)
-      when is_binary(id) and is_binary(identifier) do
+  # Only the issue id comes from the browser. Everything else (team, title, url,
+  # project) is read back from the tracker, so a client can't pass one issue's
+  # identifier for the permission check and mutate another.
+  def handle_event("factory_move", %{"id" => id, "action" => action}, socket) when is_binary(id) do
     reply =
-      with :ok <- authorize(socket, Auth.can_move?(socket.assigns.current_user, identifier), :not_team_member),
-           {:ok, {state_name, stage}} <- Map.fetch(@moves, action) |> move_or_error(action),
-           :ok <- Tracker.set_stage(id, state_name, stage) do
-        record_move(id, socket.assigns.current_user, state_name, stage)
-
-        UsageLedger.observe_issue(%Issue{
-          id: id,
-          identifier: identifier,
-          title: params["title"],
-          url: params["url"],
-          project_slug: params["project"],
-          state: state_name,
-          labels: if(stage, do: ["#{IssueStage.label_prefix()}/#{stage}"], else: [])
-        })
+      with {:ok, {state_name, stage}} <- Map.fetch(@moves, action) |> move_or_error(action),
+           :ok <- authorize(socket, fn _user -> true end, :signed_out),
+           {:ok, %Issue{} = issue} <- fetch_movable_issue(id),
+           :ok <- authorize(socket, &Auth.can_move?(&1, issue.identifier), :not_team_member),
+           :ok <- Tracker.set_stage(issue.id, state_name, stage) do
+        record_move(issue.id, socket.assigns.current_user, state_name, stage)
+        UsageLedger.observe_issue(%{issue | state: state_name, labels: replace_stage_label(issue.labels, stage)})
 
         Orchestrator.request_refresh()
         ObservabilityPubSub.broadcast_update()
@@ -99,7 +94,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   def handle_event("approve_account", %{"id" => id}, socket) do
-    with :ok <- authorize(socket, Auth.can_control?(socket.assigns.current_user), :not_admin),
+    with :ok <- authorize(socket, &Auth.can_control?/1, :not_admin),
          {:ok, _account} <- Users.approve(id, socket.assigns.current_user.username || "local") do
       ObservabilityPubSub.broadcast_update()
     end
@@ -108,7 +103,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   def handle_event("reject_account", %{"id" => id}, socket) do
-    with :ok <- authorize(socket, Auth.can_control?(socket.assigns.current_user), :not_admin),
+    with :ok <- authorize(socket, &Auth.can_control?/1, :not_admin),
          :ok <- Users.reject(id) do
       ObservabilityPubSub.broadcast_update()
     end
@@ -122,7 +117,9 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp record_move(issue_id, user, state_name, stage) do
     where = if stage, do: "#{state_name} · #{IssueStage.label_prefix()}/#{stage}", else: state_name
 
-    case Tracker.create_comment(issue_id, "**Symphony:** #{user.name} (@#{user.username}) moved this to **#{where}** from the dashboard.") do
+    body = "**Symphony:** #{escape_markdown(user.name)} (@#{escape_markdown(user.username)}) moved this to **#{escape_markdown(where)}** from the dashboard."
+
+    case Tracker.create_comment(issue_id, body) do
       :ok ->
         :ok
 
@@ -131,12 +128,16 @@ defmodule SymphonyElixirWeb.DashboardLive do
     end
   end
 
+  # Linear display names are user-controlled; keep them from adding links or formatting.
+  defp escape_markdown(text), do: String.replace(to_string(text), ~r/([\\`*_{}\[\]()#+\-.!|<>~])/, "\\\\\\1")
+
   # Server enforces every permission; the client only hides what the user can't use.
-  defp authorize(_socket, allowed?, denied_reason) do
-    cond do
-      not FactoryPresenter.controls_enabled?(Config.settings!()) -> {:error, :controls_disabled}
-      allowed? -> :ok
-      true -> {:error, denied_reason}
+  # Checks against a freshly resolved user, so a disabled account or a lost
+  # Linear role can't keep acting from a page opened earlier.
+  defp authorize(socket, allowed?, denied_reason) when is_function(allowed?, 1) do
+    with true <- FactoryPresenter.controls_enabled?(Config.settings!()) || {:error, :controls_disabled},
+         {:ok, user} <- UserAuth.refresh_user(socket) do
+      if allowed?.(user), do: :ok, else: {:error, denied_reason}
     end
   end
 
@@ -150,6 +151,33 @@ defmodule SymphonyElixirWeb.DashboardLive do
     |> Jason.encode!()
   end
 
+  defp fetch_movable_issue(id) do
+    case Tracker.fetch_issue_states_by_ids([id]) do
+      {:ok, [%Issue{} = issue | _]} ->
+        if in_configured_project?(issue), do: {:ok, issue}, else: {:error, :issue_not_found}
+
+      {:ok, []} ->
+        {:error, :issue_not_found}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # Symphony may only move issues from the Linear projects it is configured for.
+  defp in_configured_project?(%Issue{project_slug: slug}) do
+    case Config.linear_project_routes() |> Enum.map(& &1.slug) do
+      [] -> true
+      slugs -> slug in slugs
+    end
+  end
+
+  defp replace_stage_label(labels, stage) do
+    prefix = IssueStage.label_prefix() <> "/"
+    kept = Enum.reject(labels || [], &String.starts_with?(String.downcase(&1), prefix))
+    if stage, do: kept ++ [prefix <> stage], else: kept
+  end
+
   defp move_or_error({:ok, move}, _action), do: {:ok, move}
   defp move_or_error(:error, action), do: {:error, {:unknown_action, action}}
 
@@ -157,6 +185,9 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp describe_error(:not_admin), do: "Only Linear admins can change stage controls."
   defp describe_error(:not_team_member), do: "You can only move issues from teams you belong to in Linear."
   defp describe_error({:stage_label_not_found, label}), do: "Create the Linear label #{label} first."
+  defp describe_error(:signed_out), do: "Your session ended. Sign in again."
+  defp describe_error(:pending), do: "Your session ended. Sign in again."
+  defp describe_error(:issue_not_found), do: "That issue isn't in a project this Symphony manages."
   defp describe_error(:state_not_found), do: "That Linear state does not exist for this team."
   defp describe_error(reason), do: inspect(reason)
 
@@ -226,9 +257,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
                   Pending accounts
                   <span class="attention-count numeric"><%= length(pending_accounts(@current_user)) %></span>
                 </h3>
+                <p class="attention-more">Only approve people you expect. <a href="/admin/users">Review in Users</a></p>
                 <div :for={account <- pending_accounts(@current_user)} class="attention-item account-request">
                   <span class="attention-id"><%= account.username %></span>
-                  <span class="attention-text" title={account.email}><%= account.email %></span>
+                  <span class="attention-text" title={"#{account.email} · requested from #{account[:requested_from] || "unknown"}"}>
+                    <%= account.email %>
+                  </span>
                   <span class="account-request-actions">
                     <button type="button" class="fx-action is-primary" phx-click="approve_account" phx-value-id={account.id}>
                       Approve
@@ -300,7 +334,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                   <tr :for={entry <- issue_rows(@payload)} class={entry.status == :retrying && "row-retrying"}>
                     <td>
                       <div class="issue-cell">
-                        <a class="issue-id" href={entry.issue_url || "/api/v1/#{entry.issue_identifier}"}>
+                        <a class="issue-id" href={safe_url(entry.issue_url) || "/api/v1/#{entry.issue_identifier}"}>
                           <%= entry.issue_identifier %>
                         </a>
                         <span class="issue-title" title={entry.issue_title}><%= entry.issue_title || "Untitled issue" %></span>
@@ -409,8 +443,10 @@ defmodule SymphonyElixirWeb.DashboardLive do
     """
   end
 
-  defp load_payload do
-    Presenter.state_payload(orchestrator(), snapshot_timeout_ms())
+  defp load_payload(user) do
+    orchestrator()
+    |> Presenter.state_payload(snapshot_timeout_ms())
+    |> Visibility.filter_payload(user)
   end
 
   defp orchestrator do
@@ -479,8 +515,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
       id: issue.issue,
       text: issue.title || "",
       age: age_from_ms(issue.since_ms, now),
-      href: issue[:url] || "/api/v1/#{issue.issue}",
-      external: is_binary(issue[:url])
+      href: safe_url(issue[:url]) || "/api/v1/#{issue.issue}",
+      external: is_binary(safe_url(issue[:url]))
     }
   end
 
@@ -489,8 +525,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
       id: entry.issue_identifier,
       text: entry[:error] || "retry #{entry[:attempt]}",
       age: "#{entry[:attempt]}×",
-      href: entry[:issue_url] || "/api/v1/#{entry.issue_identifier}",
-      external: is_binary(entry[:issue_url])
+      href: safe_url(entry[:issue_url]) || "/api/v1/#{entry.issue_identifier}",
+      external: is_binary(safe_url(entry[:issue_url]))
     }
   end
 
@@ -503,6 +539,10 @@ defmodule SymphonyElixirWeb.DashboardLive do
       external: false
     }
   end
+
+  # Only https links are rendered, so stored values can never become javascript: URLs.
+  defp safe_url("https://" <> _rest = url), do: url
+  defp safe_url(_url), do: nil
 
   defp age_from_ms(ms, now) when is_integer(ms) do
     format_age(DateTime.to_unix(now, :millisecond) - ms)

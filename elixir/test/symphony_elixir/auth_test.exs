@@ -23,6 +23,21 @@ defmodule SymphonyElixir.AuthTest do
       end
     end
 
+    def fetch_issue_states_by_ids(ids) do
+      issues =
+        for id <- ids, issue = known_issue(id), issue != nil, do: issue
+
+      {:ok, issues}
+    end
+
+    defp known_issue("id-PAY-1"),
+      do: %SymphonyElixir.Linear.Issue{id: "id-PAY-1", identifier: "PAY-1", title: "Refunds", state: "In Review", labels: [], project_slug: "project", url: "https://linear.app/acme/issue/PAY-1"}
+
+    defp known_issue("id-WEB-1"),
+      do: %SymphonyElixir.Linear.Issue{id: "id-WEB-1", identifier: "WEB-1", title: "Cart", state: "In Review", labels: [], project_slug: "project"}
+
+    defp known_issue(_id), do: nil
+
     defp member("mia@acme.test"), do: users([user("u-1", "Mia Member", false, [team("PAY")])])
     defp member("ada@acme.test"), do: users([user("u-2", "Ada Admin", true, [])])
     defp member("gone@acme.test"), do: users([Map.put(user("u-4", "Gone", false, []), "active", false)])
@@ -115,7 +130,14 @@ defmodule SymphonyElixir.AuthTest do
 
   defp register!(username, email) do
     Users.register(
-      %{"username" => username, "email" => email, "password" => @password, "password_confirmation" => @password},
+      %{
+        "username" => username,
+        "email" => email,
+        "password" => @password,
+        "password_confirmation" => @password,
+        # Only consulted (and only non-nil) while no accounts exist.
+        "setup_code" => Users.setup_code()
+      },
       &Auth.check_linear_member/1
     )
   end
@@ -217,18 +239,17 @@ defmodule SymphonyElixir.AuthTest do
       assert redirected_to(get(build_conn(), "/login")) == "/signup"
       assert html_response(get(build_conn(), "/signup"), 200) =~ "this account will be the admin"
 
-      conn =
-        post(build_conn(), "/signup", %{
-          "username" => "mia",
-          "email" => "mia@acme.test",
-          "password" => @password,
-          "password_confirmation" => @password
-        })
+      signup = %{"username" => "mia", "email" => "mia@acme.test", "password" => @password, "password_confirmation" => @password}
 
+      # The first account needs the setup code from the server log.
+      assert html_response(post(build_conn(), "/signup", signup), 422) =~ "setup code"
+      assert html_response(post(build_conn(), "/signup", Map.put(signup, "setup_code", "AAAA-BBBB")), 422) =~ "setup code"
+
+      conn = post(build_conn(), "/signup", Map.put(signup, "setup_code", Users.setup_code()))
       assert redirected_to(conn) == "/"
       assert html_response(conn |> recycle() |> get("/"), 200) =~ "Mia Member"
 
-      conn = conn |> recycle() |> get("/logout")
+      conn = conn |> recycle() |> post("/logout")
       assert redirected_to(conn) == "/login"
       assert redirected_to(conn |> recycle() |> get("/")) == "/login"
     end
@@ -277,6 +298,14 @@ defmodule SymphonyElixir.AuthTest do
 
       render_hook(view, "factory_move", %{"id" => "id-WEB-1", "issue" => "WEB-1", "action" => "approve"})
       assert_reply(view, %{ok: false, error: "You can only move issues from teams you belong to" <> _})
+
+      # Lying about the identifier doesn't help: the team comes from the tracker.
+      render_hook(view, "factory_move", %{"id" => "id-WEB-1", "issue" => "PAY-1", "action" => "approve"})
+      assert_reply(view, %{ok: false, error: "You can only move issues from teams you belong to" <> _})
+      refute_received {:set_stage, %{issueId: "id-WEB-1"}}
+
+      render_hook(view, "factory_move", %{"id" => "id-NOPE-9", "action" => "approve"})
+      assert_reply(view, %{ok: false})
 
       render_hook(view, "factory_move", %{"id" => "id-PAY-1", "issue" => "PAY-1", "action" => "approve"})
       assert_reply(view, %{ok: true})

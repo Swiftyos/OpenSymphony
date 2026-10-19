@@ -42,7 +42,6 @@ defmodule SymphonyElixirWeb.Router do
     post("/login", AuthController, :create)
     get("/signup", AuthController, :signup)
     post("/signup", AuthController, :register)
-    get("/logout", AuthController, :delete)
     post("/logout", AuthController, :delete)
   end
 

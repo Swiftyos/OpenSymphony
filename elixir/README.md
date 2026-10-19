@@ -515,11 +515,15 @@ admin flag set the permissions, so there are no roles or team lists to maintain 
 
 ![Sign in](../.github/media/dashboard-sign-in.png)
 
-- **First run**: the first account created becomes the Symphony admin.
+- **First run**: the first account created becomes the Symphony admin. Creating it needs a
+  one-time **setup code** that Symphony prints to its server log at startup (and again when
+  someone opens `/signup`), so reaching the page alone isn't enough to claim admin.
 - **Everyone else** signs up with the email they use for Linear. Sign-up only works for
   active members of your Linear workspace, checked with Symphony's `tracker.api_key`. New
   accounts wait in **Pending accounts** in the Needs-you rail until an admin approves them.
-  Approval is what proves the person really owns that email.
+  Approval is what proves the person really owns that email. Symphony can't verify email
+  ownership itself, so the approval screen shows when and from which address each request
+  came. Only approve people you expect.
 
 | Who (in Linear)               | Can                                                            |
 | ----------------------------- | -------------------------------------------------------------- |
@@ -528,6 +532,12 @@ admin flag set the permissions, so there are no roles or team lists to maintain 
 | Guest                         | View only                                                      |
 | Not in the workspace          | Can't sign up                                                  |
 
+- People only see their own teams' issues, sessions, and spend (admins see everything). Host
+  details such as workspace paths and worker hosts are hidden from non-admins.
+- Disabling an account, or changing or resetting its password, signs it out everywhere,
+  including dashboard tabs that are already open.
+- Admins can reset passwords from **Users**. That gives a one-time link (valid 24 hours) to
+  send to the person, with no email setup needed.
 - Moves are made with Symphony's Linear key, and a comment on the issue records who made
   them (for example "Mia Member (@mia) moved this to In Progress · factory/merge").
 - Teams and admin rights are re-read from Linear every 10 minutes. Deactivating someone in
@@ -539,6 +549,23 @@ admin flag set the permissions, so there are no roles or team lists to maintain 
   generates one at `~/.symphony/secret_key_base`, so sessions survive restarts.
 - The JSON API and `/metrics` accept a session or `Authorization: Bearer <server.api_token>`
   (for Prometheus and other scrapers).
+
+#### Running in production
+
+- **Use TLS.** Symphony serves plain HTTP, so put it behind a TLS-terminating reverse proxy
+  (Caddy, nginx, a load balancer) and set `server.trust_proxy: true`. Symphony then takes the
+  client address and `https` from `X-Forwarded-For` / `X-Forwarded-Proto`, which makes the
+  session cookie `Secure` and gives each client its own rate-limit bucket. Without
+  `trust_proxy`, everyone behind the proxy shares one sign-in limit (20 attempts per 15
+  minutes), so set it.
+- Only enable `trust_proxy` when the proxy is the sole way to reach Symphony. Otherwise
+  clients could spoof those headers.
+- Set `server.secret_key_base` (or `SYMPHONY_SECRET_KEY_BASE`) when running more than one
+  instance, or when `~/.symphony` isn't persistent.
+- State lives in `~/.symphony` (accounts, session secret, factories, usage), which Symphony
+  creates as owner-only (0700, files 0600). Back it up.
+- Without sign-in (`local` mode) Symphony only answers requests addressed to `localhost`,
+  `127.0.0.1`, or `[::1]`, which blocks DNS-rebinding attacks from web pages.
 
 Sign-in follows where the server listens. On a loopback address (the default `127.0.0.1`)
 there is no sign-in and you are the local operator. On any other address, accounts are

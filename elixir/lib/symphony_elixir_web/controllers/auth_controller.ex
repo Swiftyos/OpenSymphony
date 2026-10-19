@@ -19,8 +19,9 @@ defmodule SymphonyElixirWeb.AuthController do
   plug(RateLimit, :reset when action in [:do_reset])
 
   @errors %{
-    invalid_credentials: "That username or password isn't right.",
-    locked: "Too many attempts. Try again in 15 minutes.",
+    invalid_credentials: "That username or password isn't right. After 5 failed tries, sign-in pauses for 15 minutes.",
+    # Same text as a wrong password, so the lockout doesn't reveal which accounts exist.
+    locked: "That username or password isn't right. After 5 failed tries, sign-in pauses for 15 minutes.",
     pending: "Your account is waiting for an admin to approve it.",
     disabled: "This account has been disabled.",
     inactive_user: "That Linear account is deactivated.",
@@ -32,7 +33,8 @@ defmodule SymphonyElixirWeb.AuthController do
     password_mismatch: "The passwords don't match.",
     username_taken: "That username is taken.",
     email_taken: "An account with that email already exists.",
-    invalid_reset_token: "This reset link is invalid or has expired. Ask an admin for a new one."
+    invalid_reset_token: "This reset link is invalid or has expired. Ask an admin for a new one.",
+    invalid_setup_code: "That setup code isn't right. Copy it from the Symphony server log."
   }
 
   @spec new(Plug.Conn.t(), map()) :: Plug.Conn.t()
@@ -66,13 +68,21 @@ defmodule SymphonyElixirWeb.AuthController do
     if Auth.mode() == :local or conn.assigns[:current_user] do
       redirect(conn, to: "/")
     else
-      render_page(conn, :signup, %{first?: not Users.any?()})
+      first? = not Users.any?()
+      # Writes the setup code to the server log the first time it's needed.
+      if first?, do: Users.setup_code()
+      render_page(conn, :signup, %{first?: first?})
     end
   end
 
   @spec register(Plug.Conn.t(), map()) :: Plug.Conn.t()
   def register(conn, params) do
-    case Users.register(params, &Auth.check_linear_member/1) do
+    request = %{
+      "requested_from" => conn.remote_ip |> :inet.ntoa() |> to_string(),
+      "requested_user_agent" => conn |> get_req_header("user-agent") |> List.first() |> then(&(&1 && String.slice(&1, 0, 200)))
+    }
+
+    case Users.register(Map.merge(params, request), &Auth.check_linear_member/1) do
       {:ok, %{status: "active"} = account} ->
         {:ok, user} = Auth.user_for_account(account)
 
@@ -118,6 +128,8 @@ defmodule SymphonyElixirWeb.AuthController do
          {:ok, _account} <-
            Users.change_password(user.id, params["current_password"] || "", params["password"] || "", params["password_confirmation"] || "") do
       # The version bump signed out every session, including this one; start a fresh one.
+      UserAuth.disconnect_sessions(user.id)
+
       conn
       |> UserAuth.sign_in(user)
       |> render_page(:account, %{user: user, notice: "Password changed. Other sessions were signed out."})
@@ -141,7 +153,8 @@ defmodule SymphonyElixirWeb.AuthController do
   @spec do_reset(Plug.Conn.t(), map()) :: Plug.Conn.t()
   def do_reset(conn, %{"token" => token} = params) do
     case Users.reset_password(token, params["password"] || "", params["password_confirmation"] || "") do
-      {:ok, _account} ->
+      {:ok, account} ->
+        UserAuth.disconnect_sessions(account.id)
         render_page(conn, :message, %{title: "Password set", notice: "Your password was updated. You can sign in now."})
 
       {:error, :invalid_reset_token} ->
@@ -223,8 +236,21 @@ defmodule SymphonyElixirWeb.AuthController do
                 </p>
                 <form class="login-form" method="post" action="/signup">
                   <input type="hidden" name="_csrf_token" value={@csrf_token} />
+                  <%= if @first? do %>
+                    <label class="login-label" for="setup_code">Setup code</label>
+                    <input
+                      id="setup_code"
+                      class="login-input"
+                      name="setup_code"
+                      placeholder="XXXX-XXXX"
+                      autocomplete="off"
+                      autofocus
+                      required
+                    />
+                    <p class="login-help">Printed in the Symphony server log when no accounts exist yet.</p>
+                  <% end %>
                   <label class="login-label" for="username">Username</label>
-                  <input id="username" class="login-input" name="username" value={@username} autocomplete="username" autofocus required />
+                  <input id="username" class="login-input" name="username" value={@username} autocomplete="username" required />
                   <label class="login-label" for="email">Linear email</label>
                   <input id="email" class="login-input" type="email" name="email" value={@email} autocomplete="email" required />
                   <label class="login-label" for="password">Password</label>

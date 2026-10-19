@@ -54,7 +54,7 @@ defmodule SymphonyElixirWeb.FactoryPresenter do
       controls_enabled: controls_enabled?(settings),
       defaults: %{backend: settings.agent.backend, effort: settings.agent.default_effort},
       priced: map_size(pricing) > 0,
-      usage: Enum.map(ledger.usage, &price_row(&1, pricing)),
+      usage: Enum.map(ledger.usage, &(&1 |> price_row(pricing) |> Map.update(:url, nil, fn url -> https_url(url) end))),
       flow: flow_payload(ledger.flow, running_by_issue)
     }
   end
@@ -65,6 +65,10 @@ defmodule SymphonyElixirWeb.FactoryPresenter do
   """
   @spec controls_enabled?(map()) :: boolean()
   def controls_enabled?(settings), do: settings.server.controls != false
+
+  # Stored URLs can come from anywhere; only https ones are sent to the browser.
+  defp https_url("https://" <> _rest = url), do: url
+  defp https_url(_url), do: nil
 
   defp price_row(row, pricing) do
     rates = Map.get(pricing, "#{row.backend}/#{row.model}") || Map.get(pricing, row.backend)
@@ -112,7 +116,7 @@ defmodule SymphonyElixirWeb.FactoryPresenter do
                 id: issue[:id],
                 issue: issue.issue,
                 title: issue.title,
-                url: issue.url,
+                url: https_url(issue.url),
                 project: issue.project,
                 team: issue.team,
                 since_ms: issue.since_ms,

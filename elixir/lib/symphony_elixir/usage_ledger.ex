@@ -224,13 +224,9 @@ defmodule SymphonyElixir.UsageLedger do
     if take_dirty() do
       snapshot = snapshot()
       body = Jason.encode!(%{version: @format_version, usage: snapshot.usage, flow: snapshot.flow})
-      tmp_path = path <> ".tmp"
 
-      with :ok <- File.mkdir_p(Path.dirname(path)),
-           :ok <- File.write(tmp_path, body),
-           :ok <- File.rename(tmp_path, path) do
-        :ok
-      else
+      case SymphonyElixir.PrivateFile.write(path, body) do
+        :ok -> :ok
         {:error, reason} -> Logger.warning("Usage ledger flush failed path=#{path} reason=#{inspect(reason)}")
       end
     end

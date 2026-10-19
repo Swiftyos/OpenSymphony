@@ -82,6 +82,11 @@
     return "$" + n.toFixed(3);
   }
 
+  // Only https links are rendered; anything else (javascript:, data:) is dropped.
+  function safeUrl(url) {
+    return typeof url === "string" && /^https:\/\//i.test(url) ? url : null;
+  }
+
   function since(ms) {
     if (!ms) return "";
     var s = Math.max(0, (Date.now() - ms) / 1000);
@@ -607,7 +612,7 @@
     this.renderDrawer();
     this.push(
       "factory_move",
-      { id: issue.id, issue: issue.issue, action: action, title: issue.title, url: issue.url, project: issue.project },
+      { id: issue.id, action: action },
       function (reply) {
         delete self.state.pending[key];
         if (reply && reply.ok) {
@@ -759,9 +764,10 @@
     node.issues.forEach(function (issue) {
       var row = el("div", "fx-issue-row");
       var info = el("div", "fx-issue-info");
-      var idEl = issue.url ? el("a", "fx-issue-id", issue.issue) : el("span", "fx-issue-id", issue.issue);
-      if (issue.url) {
-        idEl.href = issue.url;
+      var issueUrl = safeUrl(issue.url);
+      var idEl = issueUrl ? el("a", "fx-issue-id", issue.issue) : el("span", "fx-issue-id", issue.issue);
+      if (issueUrl) {
+        idEl.href = issueUrl;
         idEl.target = "_blank";
         idEl.rel = "noopener";
       }
@@ -1045,9 +1051,10 @@
     groups.forEach(function (g) {
       var row = el("div", "fx-bar-row");
       var labelCell = el("div", "fx-bar-label");
-      var name = g.url && self.state.group === "issue" ? el("a", "fx-bar-name", g.label) : el("span", "fx-bar-name", g.label);
+      var groupUrl = safeUrl(g.url);
+      var name = groupUrl && self.state.group === "issue" ? el("a", "fx-bar-name", g.label) : el("span", "fx-bar-name", g.label);
       if (name.tagName === "A") {
-        name.href = g.url;
+        name.href = groupUrl;
         name.target = "_blank";
         name.rel = "noopener";
       }

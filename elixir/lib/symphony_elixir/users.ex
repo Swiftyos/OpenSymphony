@@ -62,7 +62,8 @@ defmodule SymphonyElixir.Users do
          :ok <- validate_email(email),
          :ok <- validate_password(password, confirmation),
          :ok <- linear_check.(email) |> skip_ok() do
-      GenServer.call(__MODULE__, {:register, username, email, hash_password(password)})
+      request = %{from: Map.get(params, "requested_from"), user_agent: Map.get(params, "requested_user_agent")}
+      GenServer.call(__MODULE__, {:register, username, email, hash_password(password), Map.get(params, "setup_code"), request})
     end
   end
 
@@ -78,7 +79,9 @@ defmodule SymphonyElixir.Users do
 
       record ->
         # Hash outside the GenServer so concurrent sign-ins don't queue on PBKDF2.
-        with :ok <- GenServer.call(__MODULE__, {:check_lock, record.id}) do
+        # The attempt is counted before hashing, so parallel guesses can't all
+        # slip past the lock check.
+        with :ok <- GenServer.call(__MODULE__, {:begin_attempt, record.id}) do
           GenServer.call(__MODULE__, {:record_attempt, record.id, verify_password(password, record.password_hash)})
         end
     end
@@ -173,6 +176,15 @@ defmodule SymphonyElixir.Users do
     end
   end
 
+  @doc """
+  The one-time code required to create the first (admin) account. Generated and
+  written to the server log on first use; `nil` once any account exists. Proves
+  the person setting Symphony up can read the server's logs, not just reach the
+  page.
+  """
+  @spec setup_code() :: String.t() | nil
+  def setup_code, do: GenServer.call(__MODULE__, :setup_code)
+
   @spec any?() :: boolean()
   def any?, do: ready?() and :ets.info(@table, :size) > 0
 
@@ -190,14 +202,17 @@ defmodule SymphonyElixir.Users do
     path = Keyword.get(opts, :path, default_path())
     :ets.new(@table, [:named_table, :protected, :set, read_concurrency: true])
     load(path)
-    {:ok, %{path: path, failures: %{}}}
+    {:ok, %{path: path, failures: %{}, setup_code: nil}}
   end
 
   @impl true
-  def handle_call({:register, username, email, password_hash}, _from, state) do
+  def handle_call({:register, username, email, password_hash, setup_code, request}, _from, state) do
     records = all_records()
 
     cond do
+      records == [] and not setup_code_valid?(state, setup_code) ->
+        {:reply, {:error, :invalid_setup_code}, state}
+
       Enum.any?(records, &(&1.username == username)) ->
         {:reply, {:error, :username_taken}, state}
 
@@ -218,33 +233,63 @@ defmodule SymphonyElixir.Users do
           approved_by: if(first?, do: "bootstrap", else: nil),
           last_sign_in_at: nil,
           session_version: 1,
-          reset: nil
+          reset: nil,
+          # Shown to the approving admin: Symphony can't verify email ownership itself.
+          requested_from: request.from,
+          requested_user_agent: request.user_agent
         }
 
         :ets.insert(@table, {record.id, record})
         persist(state.path)
-        {:reply, {:ok, public(record)}, state}
+        {:reply, {:ok, public(record)}, %{state | setup_code: nil}}
     end
   end
 
-  def handle_call({:check_lock, id}, _from, state) do
+  def handle_call(:setup_code, _from, state) do
+    cond do
+      all_records() != [] ->
+        {:reply, nil, state}
+
+      is_binary(state.setup_code) ->
+        {:reply, state.setup_code, state}
+
+      true ->
+        code = 4 |> :crypto.strong_rand_bytes() |> Base.encode16() |> String.replace(~r/(.{4})(.{4})/, "\\1-\\2")
+
+        Logger.warning("""
+        Symphony has no accounts yet. To create the first (admin) account, open /signup and enter this setup code:
+
+            #{code}
+
+        The code is only shown here, in the server log, and is replaced on restart.
+        """)
+
+        {:reply, code, %{state | setup_code: code}}
+    end
+  end
+
+  def handle_call({:begin_attempt, id}, _from, state) do
     now_ms = System.monotonic_time(:millisecond)
 
     case Map.get(state.failures, id) do
-      {count, since} when count >= @max_failures and now_ms - since < @lockout_ms -> {:reply, {:error, :locked}, state}
-      _ -> {:reply, :ok, state}
+      {count, since} when count >= @max_failures and now_ms - since < @lockout_ms ->
+        {:reply, {:error, :locked}, state}
+
+      {count, since} when now_ms - since < @lockout_ms ->
+        {:reply, :ok, %{state | failures: Map.put(state.failures, id, {count + 1, since})}}
+
+      _expired_or_none ->
+        {:reply, :ok, %{state | failures: Map.put(state.failures, id, {1, now_ms})}}
     end
   end
 
   def handle_call({:record_attempt, id, password_ok?}, _from, state) do
-    now_ms = System.monotonic_time(:millisecond)
-    {count, since} = Map.get(state.failures, id, {0, now_ms})
     record = lookup(id)
 
     cond do
+      # The failure was already counted in :begin_attempt.
       is_nil(record) or not password_ok? ->
-        count = if now_ms - since >= @lockout_ms, do: 1, else: count + 1
-        {:reply, {:error, :invalid_credentials}, %{state | failures: Map.put(state.failures, id, {count, now_ms})}}
+        {:reply, {:error, :invalid_credentials}, state}
 
       record.status == "pending" ->
         {:reply, {:error, :pending}, state}
@@ -348,6 +393,13 @@ defmodule SymphonyElixir.Users do
     end
   end
 
+  defp setup_code_valid?(%{setup_code: expected}, given) when is_binary(expected) and is_binary(given) do
+    normalized = given |> String.trim() |> String.upcase()
+    byte_size(normalized) == byte_size(expected) and :crypto.hash_equals(normalized, expected)
+  end
+
+  defp setup_code_valid?(_state, _given), do: false
+
   defp skip_ok(:skip), do: :ok
   defp skip_ok(other), do: other
 
@@ -413,14 +465,9 @@ defmodule SymphonyElixir.Users do
 
   defp persist(path) do
     body = Jason.encode!(%{version: 1, users: all_records()}, pretty: true)
-    tmp = path <> ".tmp"
 
-    with :ok <- File.mkdir_p(Path.dirname(path)),
-         :ok <- File.write(tmp, body),
-         :ok <- File.chmod(tmp, 0o600),
-         :ok <- File.rename(tmp, path) do
-      :ok
-    else
+    case SymphonyElixir.PrivateFile.write(path, body) do
+      :ok -> :ok
       {:error, reason} -> Logger.error("User accounts save failed path=#{path} reason=#{inspect(reason)}")
     end
   end
@@ -449,7 +496,9 @@ defmodule SymphonyElixir.Users do
       approved_by: raw["approved_by"],
       last_sign_in_at: raw["last_sign_in_at"],
       session_version: raw["session_version"] || 1,
-      reset: load_reset(raw["reset"])
+      reset: load_reset(raw["reset"]),
+      requested_from: raw["requested_from"],
+      requested_user_agent: raw["requested_user_agent"]
     }
 
     :ets.insert(@table, {id, record})

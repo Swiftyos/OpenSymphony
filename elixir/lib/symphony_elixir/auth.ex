@@ -26,6 +26,8 @@ defmodule SymphonyElixir.Auth do
 
   @table :symphony_auth_cache
   @profile_ttl_ms 600_000
+  # Failed lookups are remembered briefly so pages can't hammer Linear.
+  @negative_ttl_ms 60_000
 
   @member_query """
   query SymphonyMemberByEmail($email: String!) {
@@ -243,7 +245,7 @@ defmodule SymphonyElixir.Auth do
         :skip
 
       cached = cache_get(key) ->
-        {:ok, cached}
+        if is_atom(cached), do: {:error, cached}, else: {:ok, cached}
 
       true ->
         case client().graphql(@member_query, %{email: email}, []) do
@@ -252,10 +254,12 @@ defmodule SymphonyElixir.Auth do
             {:ok, member}
 
           {:ok, %{"data" => %{"users" => %{"nodes" => []}}}} ->
+            cache_put(key, :not_in_workspace, @negative_ttl_ms)
             {:error, :not_in_workspace}
 
           other ->
             Logger.warning("Linear member lookup failed: #{inspect(other, limit: 5)}")
+            cache_put(key, :linear_unavailable, @negative_ttl_ms)
             {:error, :linear_unavailable}
         end
     end
@@ -275,9 +279,9 @@ defmodule SymphonyElixir.Auth do
     end
   end
 
-  defp cache_put(key, value) do
+  defp cache_put(key, value, ttl_ms \\ @profile_ttl_ms) do
     if :ets.whereis(@table) != :undefined do
-      :ets.insert(@table, {key, value, System.monotonic_time(:millisecond) + @profile_ttl_ms})
+      :ets.insert(@table, {key, value, System.monotonic_time(:millisecond) + ttl_ms})
     end
 
     :ok

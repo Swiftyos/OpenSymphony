@@ -6,18 +6,22 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
   use Phoenix.Controller, formats: [:json]
 
   alias Plug.Conn
-  alias SymphonyElixirWeb.{Endpoint, Presenter, PrometheusMetrics}
+  alias SymphonyElixirWeb.{Endpoint, Presenter, PrometheusMetrics, Visibility}
 
   @spec state(Conn.t(), map()) :: Conn.t()
   def state(conn, _params) do
-    json(conn, Presenter.state_payload(orchestrator(), snapshot_timeout_ms()))
+    payload = Presenter.state_payload(orchestrator(), snapshot_timeout_ms())
+    json(conn, Visibility.filter_payload(payload, conn.assigns[:current_user]))
   end
 
   @spec issue(Conn.t(), map()) :: Conn.t()
   def issue(conn, %{"issue_identifier" => issue_identifier}) do
     case Presenter.issue_payload(issue_identifier, orchestrator(), snapshot_timeout_ms()) do
       {:ok, payload} ->
-        json(conn, payload)
+        case Visibility.filter_issue(payload, conn.assigns[:current_user], issue_identifier) do
+          {:ok, visible} -> json(conn, visible)
+          :hidden -> error_response(conn, 404, "issue_not_found", "Issue not found")
+        end
 
       {:error, :issue_not_found} ->
         error_response(conn, 404, "issue_not_found", "Issue not found")

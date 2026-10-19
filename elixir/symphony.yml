@@ -35,6 +35,7 @@ server:
   # host: 0.0.0.0        # any non-loopback host turns on username/password sign-in
   # auth: accounts       # or force: local | accounts
   # api_token: $SYMPHONY_API_TOKEN   # bearer token for /api/v1/* and /metrics scrapers
+  # trust_proxy: true    # behind a TLS proxy: use X-Forwarded-For / X-Forwarded-Proto
   # controls: false      # read-only dashboard for everyone
 
 agent:

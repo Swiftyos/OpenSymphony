@@ -26,4 +26,6 @@ config :symphony_elixir,
 config :symphony_elixir, usage_ledger_path: nil, factory_controls_path: nil, secret_key_base_path: nil,
   users_path: nil,
   factories_dir: nil,
+  # ConnTest requests use host "www.example.com"; the guard is tested explicitly.
+  enforce_local_host: false,
   password_iterations: 1_000

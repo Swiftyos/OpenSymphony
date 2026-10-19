@@ -52,7 +52,15 @@ defmodule SymphonyElixirWeb.Topbar do
             </p>
             <a href="/account">Account &amp; password</a>
             <a :if={Auth.can_control?(@current_user)} href="/admin/users">Users</a>
-            <a href="/logout">Sign out</a>
+            <%!-- POST-only so other sites can't sign people out; the token comes from the page's meta tag. --%>
+            <form
+              method="post"
+              action="/logout"
+              onsubmit="this._csrf_token.value = document.querySelector('meta[name=csrf-token]').content"
+            >
+              <input type="hidden" name="_csrf_token" value="" />
+              <button type="submit" class="user-menu-signout">Sign out</button>
+            </form>
           </div>
         </details>
       </div>

@@ -176,13 +176,9 @@ defmodule SymphonyElixir.Factory.Store do
 
   defp persist(dir, key, definition) do
     path = Path.join(dir, key <> ".json")
-    tmp = path <> ".tmp"
 
-    with :ok <- File.mkdir_p(dir),
-         :ok <- File.write(tmp, Jason.encode!(definition, pretty: true)),
-         :ok <- File.rename(tmp, path) do
-      :ok
-    else
+    case SymphonyElixir.PrivateFile.write(path, Jason.encode!(definition, pretty: true)) do
+      :ok -> :ok
       {:error, reason} -> Logger.error("Factory save failed team=#{key} path=#{path} reason=#{inspect(reason)}")
     end
   end

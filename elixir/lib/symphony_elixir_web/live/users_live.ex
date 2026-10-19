@@ -42,10 +42,14 @@ defmodule SymphonyElixirWeb.UsersLive do
 
   @impl true
   def handle_event(action, %{"id" => id}, socket) when action in ["approve", "reject", "disable", "enable", "reset"] do
-    if Auth.can_control?(socket.assigns.current_user) do
-      {:noreply, socket |> apply_action(action, id) |> load_accounts()}
-    else
-      {:noreply, assign(socket, :flash_message, "Only admins can manage accounts.")}
+    case UserAuth.refresh_user(socket) do
+      {:ok, user} ->
+        if Auth.can_control?(user),
+          do: {:noreply, socket |> apply_action(action, id) |> load_accounts()},
+          else: {:noreply, assign(socket, :flash_message, "Only admins can manage accounts.")}
+
+      {:error, _reason} ->
+        {:noreply, redirect(socket, to: "/login")}
     end
   end
 
@@ -58,7 +62,7 @@ defmodule SymphonyElixirWeb.UsersLive do
   defp apply_action(socket, "disable", id) do
     if id == socket.assigns.current_user.id,
       do: assign(socket, :flash_message, "You can't disable your own account."),
-      else: result(socket, Users.disable(id, actor(socket)), "Disabled and signed out.")
+      else: socket |> result(Users.disable(id, actor(socket)), "Disabled and signed out.") |> tap(fn _ -> UserAuth.disconnect_sessions(id) end)
   end
 
   defp apply_action(socket, "reset", id) do
@@ -141,6 +145,10 @@ defmodule SymphonyElixirWeb.UsersLive do
 
         <div :for={{title, status, accounts} <- @groups} :if={accounts != [] or status == "active"} class="users-group">
           <h3 class="users-group-title">{title} <span class="numeric muted">{length(accounts)}</span></h3>
+          <p :if={status == "pending" and accounts != []} class="approval-warning">
+            Symphony can't prove someone owns the email they signed up with, and approving gives them that person's
+            Linear permissions. Only approve requests you expect, ideally after checking with the person directly.
+          </p>
           <table class="data-table users-table">
             <thead>
               <tr>
@@ -157,6 +165,9 @@ defmodule SymphonyElixirWeb.UsersLive do
                   <div class="issue-cell">
                     <span class="issue-id">@{account.username}</span>
                     <span class="issue-project">{account.email}</span>
+                    <span :if={status == "pending" and account[:requested_from]} class="issue-project">
+                      requested {account.created_at} from {account.requested_from}
+                    </span>
                   </div>
                 </td>
                 <td>

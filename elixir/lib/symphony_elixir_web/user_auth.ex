@@ -65,7 +65,33 @@ defmodule SymphonyElixirWeb.UserAuth do
     |> configure_session(renew: true)
     |> put_session(@session_key, id)
     |> put_session(@version_key, version)
+    # Lets disconnect_sessions/1 drop this person's open LiveView sockets.
+    |> put_session(:live_socket_id, socket_topic(id))
   end
+
+  @doc """
+  Disconnects every open dashboard tab for an account. They reconnect through
+  `on_mount`, which re-checks the account (disabled, new password, ...).
+  """
+  @spec disconnect_sessions(String.t()) :: :ok
+  def disconnect_sessions(account_id) when is_binary(account_id) do
+    SymphonyElixirWeb.Endpoint.broadcast(socket_topic(account_id), "disconnect", %{})
+    :ok
+  end
+
+  @doc """
+  Re-resolves the socket's user before a mutating event, so permission changes
+  in Linear or Symphony apply to already-open pages too.
+  """
+  @spec refresh_user(Phoenix.LiveView.Socket.t()) :: {:ok, Auth.User.t()} | {:error, atom()}
+  def refresh_user(socket) do
+    case Auth.mode() do
+      :local -> {:ok, Auth.local_user()}
+      :accounts -> Auth.user_for_id(socket.assigns.current_user.id, socket.assigns[:session_version] || 0)
+    end
+  end
+
+  defp socket_topic(account_id), do: "users_socket:" <> account_id
 
   @spec sign_out(Plug.Conn.t()) :: Plug.Conn.t()
   def sign_out(conn), do: configure_session(conn, drop: true)
@@ -82,7 +108,7 @@ defmodule SymphonyElixirWeb.UserAuth do
 
       :accounts ->
         case Auth.user_for_id(session[@session_key], session[@version_key] || 0) do
-          {:ok, user} -> {:cont, Phoenix.Component.assign(socket, :current_user, user)}
+          {:ok, user} -> {:cont, Phoenix.Component.assign(socket, current_user: user, session_version: session[@version_key] || 0)}
           {:error, _reason} -> {:halt, Phoenix.LiveView.redirect(socket, to: "/login")}
         end
     end

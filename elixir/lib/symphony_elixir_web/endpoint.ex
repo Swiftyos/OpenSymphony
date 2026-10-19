@@ -5,7 +5,7 @@ defmodule SymphonyElixirWeb.Endpoint do
 
   use Phoenix.Endpoint, otp_app: :symphony_elixir
 
-  # Encrypted and signed; holds only the signed-in account id.
+  # Encrypted and signed; holds only the signed-in account id and session version.
   @session_options [
     store: :cookie,
     key: "_symphony_elixir_key",
@@ -34,8 +34,20 @@ defmodule SymphonyElixirWeb.Endpoint do
     json_decoder: Jason
   )
 
+  plug(:proxy_headers)
+  plug(:local_host_only)
   plug(Plug.MethodOverride)
   plug(Plug.Head)
-  plug(Plug.Session, @session_options)
+  plug(:session)
   plug(SymphonyElixirWeb.Router)
+
+  defp proxy_headers(conn, opts), do: SymphonyElixirWeb.RequestGuards.proxy_headers(conn, opts)
+  defp local_host_only(conn, opts), do: SymphonyElixirWeb.RequestGuards.local_host_only(conn, opts)
+
+  # Built per request so the cookie is marked Secure whenever the request is https
+  # (directly or via a trusted proxy).
+  defp session(conn, _opts) do
+    secure? = SymphonyElixirWeb.RequestGuards.https?(conn)
+    Plug.Session.call(conn, Plug.Session.init(Keyword.put(@session_options, :secure, secure?)))
+  end
 end

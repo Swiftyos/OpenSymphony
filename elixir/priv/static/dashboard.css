@@ -1771,6 +1771,36 @@ a.brand:hover {
   gap: 6px;
 }
 
+.approval-warning {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border: 1px solid rgba(250, 178, 25, 0.45);
+  border-radius: 9px;
+  color: var(--ink-2);
+  font-size: 0.8rem;
+}
+
+.approval-warning::before {
+  content: "! ";
+  color: var(--warning);
+  font-weight: 700;
+}
+
+.user-menu-signout {
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink-2);
+  text-align: left;
+}
+
+.user-menu-signout:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--ink);
+}
+
 /* ------------------------------------------------------------------ motion & a11y */
 
 @keyframes fx-dash {

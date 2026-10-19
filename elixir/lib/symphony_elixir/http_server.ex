@@ -32,8 +32,9 @@ defmodule SymphonyElixir.HttpServer do
             orchestrator: orchestrator,
             snapshot_timeout_ms: snapshot_timeout_ms,
             secret_key_base: secret_key_base(),
-            # With sign-in on, refuse LiveView sockets opened from other sites.
-            check_origin: if(SymphonyElixir.Auth.mode() == :accounts, do: :conn, else: false)
+            # Refuse LiveView sockets opened from other sites: with sign-in, the page's
+            # own host; without it, only localhost (DNS-rebinding protection).
+            check_origin: if(SymphonyElixir.Auth.mode() == :accounts, do: :conn, else: SymphonyElixirWeb.RequestGuards.local_origins())
           ]
 
           endpoint_config =
@@ -42,7 +43,12 @@ defmodule SymphonyElixir.HttpServer do
             |> Keyword.merge(endpoint_opts)
 
           Application.put_env(:symphony_elixir, Endpoint, endpoint_config)
-          Endpoint.start_link()
+
+          with {:ok, _pid} = started <- Endpoint.start_link() do
+            # On a fresh install the first-account setup code goes to the log at boot.
+            if SymphonyElixir.Auth.mode() == :accounts, do: SymphonyElixir.Users.setup_code()
+            started
+          end
         end
 
       _ ->
@@ -84,8 +90,8 @@ defmodule SymphonyElixir.HttpServer do
   defp normalize_host(host) when is_binary(host), do: host
   defp normalize_host(host), do: to_string(host)
 
-  # Sessions carry the signed-in user's Linear key in an encrypted cookie, so the
-  # secret must be stable across restarts or everyone is signed out on deploy.
+  # Signs and encrypts session cookies; it must be stable across restarts or
+  # everyone is signed out on deploy. Anyone holding it can forge sessions.
   defp secret_key_base do
     configured = Config.settings!().server.secret_key_base || System.get_env("SYMPHONY_SECRET_KEY_BASE")
 
@@ -109,14 +115,9 @@ defmodule SymphonyElixir.HttpServer do
         String.trim(secret)
 
       _ ->
-        secret = generate_secret_key_base()
-
-        with :ok <- File.mkdir_p(Path.dirname(path)),
-             :ok <- File.write(path, secret),
-             :ok <- File.chmod(path, 0o600) do
-          secret
-        else
-          _error -> secret
+        case SymphonyElixir.PrivateFile.create_once(path, generate_secret_key_base()) do
+          {:ok, secret} when byte_size(secret) >= 64 -> String.trim(secret)
+          _error -> generate_secret_key_base()
         end
     end
   end

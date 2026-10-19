@@ -56,7 +56,7 @@ defmodule SymphonyElixir.FactoryControlsTest do
   defp restore_app_env(key, value), do: Application.put_env(:symphony_elixir, key, value)
 
   defp issue(id, state, labels \\ []) do
-    %Issue{id: "id-" <> id, identifier: id, title: "Task " <> id, state: state, labels: labels, project_slug: "proj", url: "https://linear.app/x/" <> id}
+    %Issue{id: "id-" <> id, identifier: id, title: "Task " <> id, state: state, labels: labels, project_slug: "project", url: "https://linear.app/x/" <> id}
   end
 
   defp empty_state(running \\ %{}) do
