@@ -144,6 +144,22 @@ defmodule SymphonyElixir.FactoryCoverageTest do
       assert log =~ "Factory definition skipped path=#{Path.join(dir, "bad name.json")}"
     end
 
+    test "project flows persist as project--<slug>.json and reload under their scope" do
+      dir = tmp_dir!("factories-projects")
+      File.write!(Path.join(dir, "project--web-app.json"), Jason.encode!(Definition.default_template()))
+      File.write!(Path.join(dir, "project--bad slug.json"), Jason.encode!(Definition.default_template()))
+      capture_log(fn -> start_supervised!({Store, dir: dir}) end)
+
+      assert Store.projects() == ["web-app"]
+      assert Store.teams() == []
+      assert {:ok, %{"team" => "project:Checkout"}} = Store.put("project:Checkout", Definition.default_template(), 0, "me")
+      assert File.exists?(Path.join(dir, "project--Checkout.json"))
+
+      assert Store.reset_team("project:Checkout") == :ok
+      refute File.exists?(Path.join(dir, "project--Checkout.json"))
+      assert Store.reset_team("project:bad slug") == {:error, :invalid_team}
+    end
+
     test "logs but keeps the save when persisting fails" do
       blocker = Path.join(tmp_dir!("factories-blocked"), "not-a-dir")
       File.write!(blocker, "file in the way")

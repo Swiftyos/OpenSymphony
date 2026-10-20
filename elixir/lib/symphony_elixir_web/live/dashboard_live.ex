@@ -122,6 +122,43 @@ defmodule SymphonyElixirWeb.DashboardLive do
     end
   end
 
+  # Drafts a whole flow for a scope (team, project, or the default) from a
+  # description, starting from the editor's current draft.
+  def handle_event("factory_assist_flow", %{"team" => scope, "request" => request} = params, socket) when is_binary(scope) do
+    case authorize(socket, &Auth.can_edit_factory?(&1, scope), :not_team_editor) do
+      :ok ->
+        ref = Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
+        base = assist_definition(params["definition"], scope)
+
+        opts = [
+          scope_label: scope_label(scope),
+          linear_states: known_states(base),
+          label_prefix: IssueStage.label_prefix(),
+          skills: params["skills"] != false
+        ]
+
+        socket = start_async(socket, {:assist, ref}, fn -> Assistant.draft_flow(base, request, opts) end)
+        {:reply, %{ok: true, pending: true, ref: ref}, socket}
+
+      {:error, reason} ->
+        {:reply, %{ok: false, error: describe_error(reason)}, socket}
+    end
+  end
+
+  # Drops a team's or project's own flow so it inherits again.
+  def handle_event("factory_reset", %{"team" => scope}, socket) when is_binary(scope) do
+    reply =
+      with :ok <- authorize(socket, &Auth.can_edit_factory?(&1, scope), :not_team_editor),
+           :ok <- Store.reset_team(scope) do
+        ObservabilityPubSub.broadcast_update()
+        %{ok: true}
+      else
+        {:error, reason} -> %{ok: false, error: describe_error(reason)}
+      end
+
+    {:reply, reply, socket}
+  end
+
   def handle_event("approve_account", %{"id" => id}, socket) do
     with :ok <- authorize(socket, &Auth.can_control?/1, :not_admin),
          {:ok, _account} <- Users.approve(id, socket.assigns.current_user.username || "local") do
@@ -164,10 +201,21 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp assist_definition(_draft, team), do: Store.get(team)
 
+  defp scope_label("project:" <> slug), do: "the project #{get_in(UsageLedger.projects(), [slug, :name]) || slug}"
+  defp scope_label(scope), do: if(scope == Store.default_team(), do: "the whole organisation (the default flow)", else: "the #{scope} team")
+
+  defp known_states(definition) do
+    settings = Config.settings!()
+
+    (Enum.map(definition["stages"], & &1["linear_state"]) ++
+       settings.tracker.active_states ++ ["In Review"] ++ settings.tracker.terminal_states)
+    |> Enum.uniq_by(&String.downcase/1)
+  end
+
   # Members make the person-moved connections of their team's flow; admins can
   # make any connection the flow defines.
   defp allowed_move(socket, issue, to) do
-    definition = Store.get(IssueStage.team(issue))
+    definition = IssueStage.definition(issue)
     from = IssueStage.stage(issue)
 
     with %{} = target <- Definition.stage(definition, to) || {:error, :unknown_target},
@@ -177,15 +225,22 @@ defmodule SymphonyElixirWeb.DashboardLive do
     end
   end
 
-  defp sync_stage_labels(team, definition) do
+  # Linear labels belong to teams: a project's flow needs them in every team
+  # whose issues the project holds.
+  defp sync_stage_labels(scope, definition) do
     labels = definition["stages"] |> Enum.map(& &1["label"]) |> Enum.filter(&is_binary/1)
 
-    if team != Store.default_team() and labels != [] do
-      Task.start(fn -> log_label_sync(team, Tracker.ensure_stage_labels(team, labels)) end)
-    end
+    teams =
+      case scope do
+        "project:" <> slug -> get_in(UsageLedger.projects(), [slug, :teams]) || []
+        team -> if team == Store.default_team(), do: [], else: [team]
+      end
 
+    if labels != [], do: Enum.each(teams, &sync_team_labels(&1, labels))
     :ok
   end
+
+  defp sync_team_labels(team, labels), do: Task.start(fn -> log_label_sync(team, Tracker.ensure_stage_labels(team, labels)) end)
 
   defp log_label_sync(_team, {:ok, []}), do: :ok
   defp log_label_sync(team, {:ok, created}), do: Logger.info("Created Linear labels team=#{team} labels=#{Enum.join(created, ",")}")

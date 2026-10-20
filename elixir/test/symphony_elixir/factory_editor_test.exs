@@ -7,7 +7,7 @@ defmodule SymphonyElixir.FactoryEditorTest do
   alias SymphonyElixir.{Auth, FactoryControls, IssueStage, Tracker, UsageLedger, Users}
   alias SymphonyElixir.Factory.{Definition, StagePrompt, Store}
   alias SymphonyElixir.Linear.Adapter
-  alias SymphonyElixirWeb.FactoryPresenter
+  alias SymphonyElixirWeb.{FactoryPresenter, Visibility}
 
   @endpoint SymphonyElixirWeb.Endpoint
   @password "correct horse battery"
@@ -202,9 +202,83 @@ defmodule SymphonyElixir.FactoryEditorTest do
       refute Auth.can_edit_factory?(%Auth.User{id: "m", name: "m", teams: []}, nil)
     end
 
+    test "a project's own flow wins over its team's, which wins over the default" do
+      template = Definition.default_template()
+      qa = %{"id" => "qa", "name" => "QA", "kind" => "agent", "linear_state" => "QA", "label" => nil}
+      {:ok, _} = Store.put("DEFAULT", template, 0, "ada")
+      {:ok, _} = Store.put("project:checkout", %{template | "stages" => template["stages"] ++ [qa]}, 0, "mia")
+
+      in_project = %Issue{id: "1", identifier: "PAY-1", state: "QA", project_slug: "checkout"}
+      elsewhere = %Issue{in_project | project_slug: "web"}
+
+      assert IssueStage.flow_scope(in_project) == "project:checkout"
+      assert IssueStage.control_stage(in_project) == {"project:checkout", "qa"}
+      assert IssueStage.flow_scope(elsewhere) == "PAY"
+      assert IssueStage.stage(elsewhere) == nil
+      assert "QA" in IssueStage.active_state_names()
+
+      # Views say which flow they came from.
+      assert %{"team" => "project:web", "source" => "DEFAULT", "inherited" => true} = Store.get("project:web", "PAY")
+      {:ok, _} = Store.put("PAY", template, 0, "mia")
+      assert %{"source" => "PAY"} = Store.get("project:web", "PAY")
+      assert %{"source" => "project:checkout", "inherited" => false} = Store.get(" project:checkout ")
+      assert Store.projects() == ["checkout"]
+      assert Store.teams() == ["DEFAULT", "PAY"]
+      assert Store.project_scope("bad slug") == nil
+      assert Store.project_scope(nil) == nil
+      assert Store.scope_for("PAY", nil) == "PAY"
+    end
+
+    test "the presenter lists projects with their teams, and their own issues and loops" do
+      template = Definition.default_template()
+      {:ok, _} = Store.put("project:checkout", template, 0, "mia")
+
+      for {id, project, journey} <- [{"PAY-1", "checkout", ["Todo", "In Progress", "In Review"]}, {"PAY-2", "web", ["Todo", "In Progress"]}, {"WEB-1", "web", ["Todo"]}] do
+        Enum.each(journey, &UsageLedger.observe_issue(%Issue{id: id, identifier: id, title: id, state: &1, project_slug: project}))
+      end
+
+      web = %Issue{identifier: "WEB-1", project_slug: "web", project_name: "Web App"}
+      UsageLedger.record_tokens(%{issue: web, backend: "claude"}, %{input_tokens: 1, output_tokens: 1})
+
+      payload = FactoryPresenter.payload([], Config.settings!())
+      projects = Enum.filter(payload.teams, &(&1.kind == "project"))
+
+      assert [%{key: "project:checkout", name: "checkout", teams: ["PAY"], custom: true}, %{key: "project:web", name: "Web App", teams: ["PAY", "WEB"], custom: false}] =
+               Enum.map(projects, &Map.take(&1, [:key, :name, :teams, :custom]))
+
+      # Configured projects are listed even before they have work.
+      write_workflow_file!(Workflow.workflow_file_path(), tracker_project_slug: nil, tracker_projects: [%{slug: "fresh"}])
+      assert "project:fresh" in Enum.map(FactoryPresenter.payload([], Config.settings!()).teams, & &1.key)
+
+      # A project without its own flow shows its main team's (here PAY's, inherited from the default).
+      assert %{"source" => "template", "team" => "project:web"} = payload.definitions["project:web"]
+      assert payload.flows["project:checkout"].edges == %{"todo>implement" => 1, "implement>review" => 1}
+      assert payload.flows["project:checkout"].nodes["review"].count == 1
+      # PAY's own diagram leaves out the issue that follows the project's flow.
+      assert payload.flows["PAY"].nodes["review"].count == 0
+      assert payload.flows["PAY"].edges == %{"todo>implement" => 1}
+      assert payload.flows["project:web"].nodes["todo"].count == 1
+    end
+
+    test "members edit the flows of projects their teams work in; viewers see only their teams' issues" do
+      mia = %Auth.User{id: "m", name: "m", teams: [%{id: "t", key: "PAY", name: "P"}]}
+      Enum.each(["Todo", "In Progress"], &UsageLedger.observe_issue(%Issue{id: "1", identifier: "PAY-1", state: &1, project_slug: "shared"}))
+      UsageLedger.observe_issue(%Issue{id: "2", identifier: "WEB-1", state: "In Progress", project_slug: "shared"})
+      UsageLedger.observe_issue(%Issue{id: "3", identifier: "WEB-2", state: "Todo", project_slug: "web-only"})
+
+      assert Auth.can_edit_factory?(mia, "project:shared")
+      refute Auth.can_edit_factory?(mia, "project:web-only")
+
+      factory = FactoryPresenter.payload([], Config.settings!())
+      payload = Visibility.filter_payload(%{running: [], retrying: [], projects: [], factory: factory}, mia)
+      assert Enum.map(payload.factory.teams, & &1.key) == ["PAY", "project:shared"]
+      assert payload.factory.team == "PAY"
+      assert %{count: 1, issues: [%{issue: "PAY-1"}]} = payload.factory.flows["project:shared"].nodes["implement"]
+    end
+
     test "the presenter shows the default flow when no team has work or a flow yet" do
       payload = FactoryPresenter.payload([], Config.settings!())
-      assert payload.teams == [%{key: "DEFAULT", name: "Default flow", custom: false}]
+      assert payload.teams == [%{key: "DEFAULT", kind: "default", name: "Default flow", custom: false}]
       assert payload.definitions["DEFAULT"]["stages"] |> length() == 7
     end
   end
@@ -293,6 +367,46 @@ defmodule SymphonyElixir.FactoryEditorTest do
       assert_reply(view, %{ok: true, controls: %{max_agents: 2}})
       assert FactoryControls.get({"PAY", "merge"}).max_agents == 2
       assert Store.custom?("PAY")
+    end
+
+    test "whole flows are drafted with AI for teams and projects, and project flows can be dropped", %{mia: mia} do
+      bin = Path.join(System.tmp_dir!(), "symphony-editor-flow-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(bin)
+      template = Definition.default_template()
+      flow = Jason.encode!(%{"summary" => "Same flow.", "stages" => template["stages"], "transitions" => template["transitions"]})
+      File.write!(Path.join(bin, "claude"), "#!/bin/sh\nprintf '%s' '#{flow}'\n")
+      File.chmod!(Path.join(bin, "claude"), 0o755)
+      path = System.get_env("PATH")
+      System.put_env("PATH", bin <> ":" <> path)
+      UsageLedger.observe_issue(%Issue{id: "1", identifier: "PAY-1", state: "Todo", project_slug: "checkout"})
+      checkout = %Issue{identifier: "PAY-1", project_slug: "checkout", project_name: "Checkout"}
+      UsageLedger.record_tokens(%{issue: checkout, backend: "claude"}, %{input_tokens: 1, output_tokens: 0})
+
+      try do
+        {:ok, view, _html} = live(session_for(mia), "/")
+        render_hook(view, "factory_assist_flow", %{"team" => "project:checkout", "request" => "Keep it simple.", "definition" => Store.get("project:checkout", "PAY")})
+        assert_reply(view, %{ok: true, pending: true, ref: ref})
+        assert_push_event(view, "factory_assist_result", %{ref: ^ref, ok: true, suggestion: suggestion}, 5_000)
+        assert %{summary: "Same flow.", changes: %{added: [], removed: []}} = suggestion
+
+        render_hook(view, "factory_assist_flow", %{"team" => "DEFAULT", "request" => "x"})
+        assert_reply(view, %{ok: false, error: "Only this team's members" <> _})
+
+        # Saving a project flow syncs its labels to the project's teams.
+        render_hook(view, "factory_save", %{"team" => "project:checkout", "version" => 0, "definition" => template})
+        assert_reply(view, %{ok: true})
+        assert_receive {:graphql, _, %{input: %{name: "factory"}}}, 1_000
+
+        render_hook(view, "factory_reset", %{"team" => "project:checkout"})
+        assert_reply(view, %{ok: true})
+        refute Store.custom?("project:checkout")
+
+        render_hook(view, "factory_reset", %{"team" => "WEB"})
+        assert_reply(view, %{ok: false})
+      after
+        System.put_env("PATH", path)
+        File.rm_rf!(bin)
+      end
     end
 
     test "AI drafts run in the background and are pushed when ready", %{mia: mia} do

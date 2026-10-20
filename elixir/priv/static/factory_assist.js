@@ -6,6 +6,7 @@
 // the person reviews the preview and clicks Apply.
 //
 // window.SymphonyAssist.forPanel(panel) -> function(team, draft, stage, apply)
+// window.SymphonyAssist.flowForPanel(panel) -> function(scope, label, draft, apply)
 (function () {
   "use strict";
 
@@ -136,10 +137,171 @@
     request.focus();
   }
 
+  var KIND_LABEL = { queue: "Queue", agent: "Agent", human: "Person", parked: "Parked", done: "Done" };
+
+  // Whole-flow drafting: describe the process, get a complete flow (stages,
+  // connections, instructions, skills) to review before it replaces the draft.
+  function openFlow(panel, scope, scopeLabel, draft, apply) {
+    var existing = document.querySelector(".fx-assist-modal");
+    if (existing) existing.remove();
+
+    var modal = el("div", "fx-assist-modal");
+    var dialog = el("div", "fx-assist fx-assist-flow");
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.setAttribute("aria-label", "Design the flow with AI");
+    modal.appendChild(dialog);
+
+    var head = el("div", "fx-drawer-head");
+    var title = el("div");
+    title.appendChild(el("h3", "fx-drawer-title", "✦ Design the " + scopeLabel + " flow with AI"));
+    title.appendChild(
+      el("p", "fx-drawer-copy", "Describe how work should move through this factory: the stages, who checks what, and what happens when something fails. Your agent harness drafts the whole flow, including stage instructions and skills. You review it before it replaces the draft in the editor.")
+    );
+    head.appendChild(title);
+    dialog.appendChild(head);
+
+    var request = el("textarea", "fx-textarea");
+    request.rows = 6;
+    request.placeholder =
+      "e.g. Agents implement and open a PR. A second agent reviews the diff for security issues and sends it back if it finds any. Then QA runs Playwright against the preview deploy. A person approves, an agent merges. Anything blocked waits for a person.";
+    request.value = draft && draft._flowRequest ? draft._flowRequest : "";
+    dialog.appendChild(request);
+
+    var skill = el("label", "fx-check");
+    var skillBox = el("input");
+    skillBox.type = "checkbox";
+    skillBox.checked = true;
+    skill.appendChild(skillBox);
+    skill.appendChild(document.createTextNode(" Also write skill files for agent stages"));
+    dialog.appendChild(skill);
+
+    var status = el("p", "fx-drawer-copy");
+    var preview = el("div", "fx-assist-preview");
+    var actions = el("div", "fx-issue-actions");
+    dialog.appendChild(status);
+    dialog.appendChild(preview);
+    dialog.appendChild(actions);
+
+    var busy = false;
+    var close = function () {
+      modal.remove();
+      document.removeEventListener("keydown", onKey);
+    };
+    var onKey = function (e) {
+      if (e.key === "Escape" && !busy) close();
+    };
+    document.addEventListener("keydown", onKey);
+    modal.addEventListener("click", function (e) {
+      if (e.target === modal && !busy) close();
+    });
+
+    var draftIt = function () {
+      var text = request.value.trim();
+      if (!text) {
+        request.focus();
+        return;
+      }
+      if (draft) draft._flowRequest = text;
+      busy = true;
+      status.textContent = "Designing… your agent harness is writing the whole flow. This usually takes one to three minutes.";
+      status.classList.add("is-working");
+      preview.textContent = "";
+      actions.textContent = "";
+      actions.appendChild(button("Close", "fx-action", function () {
+        busy = false;
+        close();
+      }));
+
+      panel.push("factory_assist_flow", { team: scope, request: text, skills: skillBox.checked, definition: draft }, function (reply) {
+        var finish = function (result) {
+          busy = false;
+          status.classList.remove("is-working");
+          actions.textContent = "";
+          if (!result || !result.ok) {
+            status.textContent = (result && result.error) || "The assistant couldn't design this flow.";
+            actions.appendChild(button("Try again", "fx-action is-primary", draftIt));
+            actions.appendChild(button("Close", "fx-action", close));
+            return;
+          }
+          renderPreview(result.suggestion);
+        };
+        if (reply && reply.ok && reply.pending) panel.waitFor("factory_assist_result", reply.ref, finish);
+        else finish(reply);
+      });
+    };
+
+    var renderPreview = function (s) {
+      var d = s.definition;
+      status.textContent = "Review the design. Apply replaces the editor's draft; nothing changes until you Save.";
+      preview.textContent = "";
+      if (s.summary) preview.appendChild(el("p", "fx-assist-summary", s.summary));
+
+      var changes = s.changes || {};
+      var chips = el("div", "fx-assist-changes");
+      [["added", "Added"], ["changed", "Changed"], ["removed", "Removed"]].forEach(function (pair) {
+        (changes[pair[0]] || []).forEach(function (name) {
+          chips.appendChild(el("span", "fx-change fx-change-" + pair[0], pair[1] + " · " + name));
+        });
+      });
+      if (chips.children.length) preview.appendChild(chips);
+
+      preview.appendChild(el("h4", "fx-assist-h", "Stages (" + d.stages.length + ")"));
+      var stages = el("div", "fx-assist-stages");
+      d.stages.forEach(function (st) {
+        var item = el("details", "fx-assist-stage");
+        var summary = el("summary");
+        summary.appendChild(el("span", "fx-kind fx-kind-" + st.kind, KIND_LABEL[st.kind] || st.kind));
+        summary.appendChild(el("strong", null, st.name));
+        summary.appendChild(el("span", "fx-assist-where", st.linear_state + (st.label ? " · " + st.label : "")));
+        if (st.skill) summary.appendChild(el("span", "fx-assist-skill", "skill"));
+        item.appendChild(summary);
+        if (st.instructions) item.appendChild(el("pre", "fx-assist-text", st.instructions));
+        if (st.skill && st.skill.content) {
+          item.appendChild(el("h4", "fx-assist-h", "Skill · " + st.skill.path));
+          item.appendChild(el("pre", "fx-assist-text", st.skill.content));
+        }
+        stages.appendChild(item);
+      });
+      preview.appendChild(stages);
+
+      var names = {};
+      d.stages.forEach(function (st) {
+        names[st.id] = st.name;
+      });
+      preview.appendChild(el("h4", "fx-assist-h", "Connections (" + d.transitions.length + ")"));
+      var list = el("ul", "fx-assist-list");
+      d.transitions.forEach(function (t) {
+        list.appendChild(el("li", null, names[t.from] + " → " + names[t.to] + " (" + (t.by === "human" ? "person" : "agent") + ")" + (t.criteria ? ": " + t.criteria : "")));
+      });
+      preview.appendChild(list);
+
+      actions.appendChild(
+        button("Apply to editor", "fx-action is-primary", function () {
+          apply(s);
+          close();
+        })
+      );
+      actions.appendChild(button("Redraft", "fx-action", draftIt));
+      actions.appendChild(button("Discard", "fx-action", close));
+    };
+
+    actions.appendChild(button("Design flow", "fx-action is-primary", draftIt));
+    actions.appendChild(button("Cancel", "fx-action", close));
+
+    document.body.appendChild(modal);
+    request.focus();
+  }
+
   window.SymphonyAssist = {
     forPanel: function (panel) {
       return function (team, draft, stage, apply) {
         open(panel, team, draft, stage, apply);
+      };
+    },
+    flowForPanel: function (panel) {
+      return function (scope, scopeLabel, draft, apply) {
+        openFlow(panel, scope, scopeLabel, draft, apply);
       };
     }
   };

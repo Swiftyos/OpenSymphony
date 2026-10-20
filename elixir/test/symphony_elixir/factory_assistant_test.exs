@@ -37,7 +37,7 @@ defmodule SymphonyElixir.FactoryAssistantTest do
     definition = Definition.default_template()
     assert {:error, "Describe what the stage should do."} = Assistant.draft(definition, "merge", "   ")
     assert {:error, "That stage isn't in the flow."} = Assistant.draft(definition, "nope", "x")
-    assert {:error, "Keep the description under 2,000 characters."} = Assistant.draft(definition, "merge", String.duplicate("a", 2_001))
+    assert {:error, "Keep the description under 4,000 characters."} = Assistant.draft(definition, "merge", String.duplicate("a", 4_001))
   end
 
   describe "running the harness" do
@@ -126,6 +126,112 @@ defmodule SymphonyElixir.FactoryAssistantTest do
 
     test "non-text requests are refused", %{definition: definition} do
       assert {:error, "Describe what the stage should do."} = Assistant.draft(definition, "merge", nil)
+    end
+
+    @flow %{
+      "summary" => "Adds a security review.",
+      "stages" => [
+        %{"id" => "todo", "name" => "Todo", "kind" => "queue", "linear_state" => "Todo", "instructions" => "Pick it up."},
+        %{
+          "id" => "implement",
+          "name" => "Build",
+          "kind" => "agent",
+          "linear_state" => "In Progress",
+          "label" => "implement",
+          "default" => true,
+          "instructions" => "Build it.",
+          "skill" => "---\nname: build\n---\nsteps"
+        },
+        %{"id" => "security", "name" => "Security", "kind" => "agent", "linear_state" => "In Progress", "label" => "security", "instructions" => "Audit.", "skill" => %{"content" => "audit"}},
+        %{"id" => "blocked", "name" => "Blocked", "kind" => "parked", "linear_state" => "In Progress", "label" => "blocked"},
+        %{"id" => "review", "name" => "In Review", "kind" => "human", "linear_state" => "In Review"},
+        %{"id" => "done", "name" => "Done", "kind" => "done", "linear_state" => "Done"},
+        %{"id" => "orphan", "name" => "Orphan", "kind" => "parked", "linear_state" => "Backlog"},
+        "junk"
+      ],
+      "transitions" => [
+        %{"from" => "todo", "to" => "implement", "by" => "agent", "criteria" => "picked up"},
+        %{"from" => "implement", "to" => "security", "by" => "agent", "criteria" => "PR open"},
+        %{"from" => "implement", "to" => "blocked", "by" => "agent", "criteria" => "stuck"},
+        %{"from" => "security", "to" => "implement", "by" => "agent", "criteria" => "findings"},
+        %{"from" => "security", "to" => "review", "by" => "agent", "criteria" => "clean"},
+        %{"from" => "review", "to" => "done", "by" => "human", "criteria" => "approved"}
+      ]
+    }
+
+    test "flows: a whole flow is drafted, validated, laid out, and keeps runtime controls", %{bin: bin, definition: definition} do
+      fake(bin, "claude", "cat <<'JSON'\n#{Jason.encode!(%{"result" => Jason.encode!(@flow)})}\nJSON\n")
+      base = update_in(definition["stages"], fn stages -> Enum.map(stages, &if(&1["id"] == "implement", do: Map.merge(&1, %{"harness" => "codex", "max_agents" => 3}), else: &1)) end)
+
+      assert {:ok, suggestion} =
+               Assistant.draft_flow(base, "Add a security review.", harness: "claude", scope_label: "the project Checkout", linear_states: ["Todo", "In Progress"])
+
+      assert suggestion.summary == "Adds a security review."
+      stages = Map.new(suggestion.definition["stages"], &{&1["id"], &1})
+      assert Map.keys(stages) |> Enum.sort() == ["blocked", "done", "implement", "orphan", "review", "security", "todo"]
+      refute Map.has_key?(suggestion.definition, "version")
+
+      # Controls carry over by id; skills are wrapped at the stage's own path.
+      assert %{"harness" => "codex", "max_agents" => 3, "skill" => %{"path" => ".codex/skills/implement/SKILL.md"}} = stages["implement"]
+      assert stages["security"]["skill"] == %{"path" => ".codex/skills/security/SKILL.md", "content" => "audit"}
+      assert stages["todo"]["skill"] == nil
+
+      # Columns follow distance from the start, the start-to-done path shares one row,
+      # parked stages sit above it, and unreachable or done stages go last.
+      assert stages["todo"]["position"] == %{"x" => 80, "y" => 160}
+      assert stages["implement"]["position"] == %{"x" => 300, "y" => 160}
+      assert stages["security"]["position"] == %{"x" => 520, "y" => 160}
+      assert stages["blocked"]["position"] == %{"x" => 520, "y" => 40}
+      assert stages["review"]["position"]["y"] == 160
+      assert stages["done"]["position"]["x"] > stages["review"]["position"]["x"]
+      assert stages["orphan"]["position"]["x"] == stages["done"]["position"]["x"]
+
+      assert suggestion.changes.added == ["Security", "Orphan"]
+      assert suggestion.changes.removed |> Enum.sort() == ["Merge", "Rework"]
+      assert "Build" in suggestion.changes.changed
+    end
+
+    test "flows: an invalid draft gets one repair round, then a plain error", %{bin: bin, definition: definition} do
+      bad = Jason.encode!(%{"stages" => [%{"id" => "x", "name" => "X", "kind" => "agent", "linear_state" => "Todo"}], "transitions" => []})
+      counter = Path.join(bin, "calls")
+
+      fake(bin, "claude", """
+      n=$(cat #{counter} 2>/dev/null || echo 0); echo $((n+1)) > #{counter}
+      if [ "$n" = "0" ]; then printf '%s' '#{bad}'; else printf '%s' '#{Jason.encode!(@flow)}'; fi
+      """)
+
+      assert {:ok, %{definition: %{"stages" => [_ | _]}}} = Assistant.draft_flow(definition, "Add security.", harness: "claude")
+      assert File.read!(counter) == "2\n"
+
+      fake(bin, "claude", "printf '%s' '#{bad}'")
+      assert {:error, "The assistant's flow still had problems: a factory needs a done stage" <> _} = Assistant.draft_flow(definition, "x", harness: "claude")
+
+      assert {:error, "Describe the flow you want."} = Assistant.draft_flow(definition, " ")
+    end
+
+    test "flows: the prompt describes the scope, states, and current flow", %{definition: definition} do
+      opts = [scope_label: "the PAY team", linear_states: ["Todo", "QA"], label_prefix: "line", skills: false]
+      prompt = Assistant.build_flow_prompt(definition, "Ship faster.", opts)
+      assert prompt =~ "AI software factory for the PAY team"
+      assert prompt =~ "Linear states known to exist: Todo, QA."
+      assert prompt =~ "`line/<label>`"
+      assert prompt =~ "- review -> merge (human): The reviewer approves the PR"
+      assert prompt =~ ~s(Set every "skill" to null.)
+      assert Assistant.build_flow_prompt(definition, "x", []) =~ "Use the standard Linear states"
+    end
+
+    test "flows: an unchanged stage set keeps its positions", %{definition: definition} do
+      moved = %{definition | "stages" => Enum.map(definition["stages"], &Map.put(&1, "position", %{"x" => 1, "y" => 2}))}
+      assert Enum.all?(Assistant.layout(definition, moved)["stages"], &(&1["position"] == %{"x" => 1, "y" => 2}))
+
+      # A flow with no start (everything has an incoming connection) starts from its first stage.
+      stages = [%{"id" => "a", "kind" => "agent"}, %{"id" => "b", "kind" => "done"}]
+      loop = %{"stages" => stages, "transitions" => [%{"from" => "a", "to" => "b"}, %{"from" => "b", "to" => "a"}]}
+      assert [%{"position" => %{"x" => 80}}, %{"position" => %{"x" => 300}}] = Assistant.layout(loop)["stages"]
+
+      # Nothing reaches done: no main row; done still goes last.
+      cut = %{loop | "transitions" => [%{"from" => "b", "to" => "a"}]}
+      assert [%{"position" => %{"x" => 300, "y" => 160}}, %{"position" => %{"x" => 520, "y" => 160}}] = Assistant.layout(cut)["stages"]
     end
 
     test "escaped quotes and braces inside JSON strings don't end the object early" do

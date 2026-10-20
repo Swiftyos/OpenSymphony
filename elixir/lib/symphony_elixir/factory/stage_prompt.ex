@@ -5,7 +5,7 @@ defmodule SymphonyElixir.Factory.StagePrompt do
   the exact Linear state and stage label to apply for each.
   """
 
-  alias SymphonyElixir.Factory.{Definition, Store}
+  alias SymphonyElixir.Factory.Definition
   alias SymphonyElixir.IssueStage
   alias SymphonyElixir.Linear.Issue
 
@@ -36,7 +36,7 @@ defmodule SymphonyElixir.Factory.StagePrompt do
   def variables(_issue), do: variables(%Issue{})
 
   defp render_stage(issue, stage) do
-    definition = Store.get(IssueStage.team(issue))
+    definition = IssueStage.definition(issue)
     prefix = IssueStage.label_prefix()
 
     [

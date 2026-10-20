@@ -1,7 +1,8 @@
 defmodule SymphonyElixir.IssueStage do
   @moduledoc """
-  Resolves which factory stage an issue is in, using its team's factory
-  definition (`SymphonyElixir.Factory.Store`).
+  Resolves which factory stage an issue is in, using the flow it follows
+  (`SymphonyElixir.Factory.Store`): its project's if the project has its own,
+  otherwise its team's, otherwise the organisation default.
 
   A stage is identified by the issue's Linear workflow state plus an optional
   stage label from the `<prefix>/` label group (by default `factory`; Linear
@@ -28,7 +29,7 @@ defmodule SymphonyElixir.IssueStage do
 
   def stage_definition(%Issue{state: state_name} = issue, settings) when is_binary(state_name) do
     settings = settings || Config.settings!()
-    definition = Store.get(team(issue))
+    definition = definition(issue)
     prefix = label_prefix(settings)
 
     case labelled_stages(definition, issue, prefix) do
@@ -60,12 +61,25 @@ defmodule SymphonyElixir.IssueStage do
 
   def team(_issue), do: nil
 
+  @doc """
+  The scope whose flow the issue follows: `project:<slug>`, a team key, or nil
+  (the organisation default).
+  """
+  @spec flow_scope(Issue.t()) :: String.t() | nil
+  def flow_scope(%Issue{} = issue), do: Store.scope_for(team(issue), issue.project_slug)
+
+  @doc """
+  The factory definition the issue follows.
+  """
+  @spec definition(Issue.t()) :: map()
+  def definition(%Issue{} = issue), do: Store.get(flow_scope(issue))
+
   @spec warnings(Issue.t(), Schema.t() | nil) :: [String.t()]
   def warnings(issue, settings \\ nil)
 
   def warnings(%Issue{} = issue, settings) do
     settings = settings || Config.settings!()
-    definition = Store.get(team(issue))
+    definition = definition(issue)
 
     case labelled_stages(definition, issue, label_prefix(settings)) do
       stages when length(stages) > 1 ->
@@ -110,10 +124,11 @@ defmodule SymphonyElixir.IssueStage do
   def dispatch_paused?(_issue), do: false
 
   @doc """
-  The key dashboard controls and per-stage caps use: `{team, stage_id}`.
+  The key dashboard controls and per-stage caps use: `{scope, stage_id}`, where
+  scope is the flow the issue follows (see `flow_scope/1`).
   """
   @spec control_stage(Issue.t()) :: {String.t() | nil, String.t()}
-  def control_stage(%Issue{} = issue), do: {team(issue), stage(issue) || "todo"}
+  def control_stage(%Issue{} = issue), do: {flow_scope(issue), stage(issue) || "todo"}
 
   @spec active?(Issue.t(), Schema.t() | nil) :: boolean()
   def active?(issue, settings \\ nil)
@@ -138,13 +153,14 @@ defmodule SymphonyElixir.IssueStage do
 
   @doc """
   Linear states Symphony polls: `tracker.active_states` plus every state a
-  team's factory dispatches from, so adding a stage in a new state just works.
+  saved flow (team or project) dispatches from, so adding a stage in a new
+  state just works.
   """
   @spec active_state_names(Schema.t() | nil) :: [String.t()]
   def active_state_names(settings \\ nil) do
     settings = settings || Config.settings!()
 
-    Store.teams()
+    Store.scopes()
     |> Enum.flat_map(&Definition.active_states(Store.get(&1)))
     |> then(&(settings.tracker.active_states ++ &1))
     |> Enum.uniq_by(&normalize/1)

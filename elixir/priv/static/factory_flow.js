@@ -360,7 +360,12 @@
       return t.key;
     });
     if (!this.team || teams.indexOf(this.team) === -1) {
-      var hash = /team=([A-Za-z0-9_-]+)/.exec(window.location.hash || "");
+      var hash = /team=([^&]+)/.exec(window.location.hash || "");
+      if (hash) {
+        try {
+          hash[1] = decodeURIComponent(hash[1]);
+        } catch (_e) {}
+      }
       var saved = null;
       try {
         saved = window.localStorage.getItem("symphony.factory.team");
@@ -391,6 +396,30 @@
     return !!(this.data && this.data.can_edit && this.data.can_edit[this.team]);
   };
 
+  Flow.prototype.entry = function (key) {
+    key = key || this.team;
+    return ((this.data && this.data.teams) || []).filter(function (t) {
+      return t.key === key;
+    })[0] || null;
+  };
+
+  // How the flow a scope inherits is named: "default", "built-in", "PAY · Payments".
+  Flow.prototype.sourceLabel = function (source) {
+    if (source === "template") return "built-in";
+    var t = this.entry(source);
+    if (source === "DEFAULT" || (t && t.kind === "default")) return "default";
+    return this.scopeLabel(source);
+  };
+
+  // "PAY · Payments", "Checkout API", "Default flow".
+  Flow.prototype.scopeLabel = function (key) {
+    var t = this.entry(key);
+    if (!t) return key && key.indexOf("project:") === 0 ? key.slice(8) : key || "";
+    if (t.kind === "default") return "Default flow";
+    if (t.kind === "project") return t.name || t.slug;
+    return t.key + (t.name ? " · " + t.name : "");
+  };
+
   Flow.prototype.canControl = function () {
     return !!(this.data && this.data.can_control && this.data.can_control[this.team]);
   };
@@ -406,7 +435,7 @@
   Flow.prototype.syncHash = function () {
     try {
       var parts = [];
-      if (this.team) parts.push("team=" + this.team);
+      if (this.team) parts.push("team=" + encodeURIComponent(this.team));
       if (this.selected && this.selected.type === "stage") parts.push("stage=" + this.selected.id);
       var hash = parts.length ? "#" + parts.join("&") : "";
       if (window.location.hash !== hash) window.history.replaceState(null, "", window.location.pathname + window.location.search + hash);
@@ -423,14 +452,24 @@
     var teams = (this.data && this.data.teams) || [];
     if (teams.length > 1 || this.mode === "edit") {
       var select = el("select", "fx-team-select");
-      select.setAttribute("aria-label", "Team");
+      select.setAttribute("aria-label", "Flow for");
       select.disabled = this.mode === "edit";
+      var groups = { team: el("optgroup"), project: el("optgroup") };
+      groups.team.label = "Teams";
+      groups.project.label = "Projects";
+      var defs = (this.data && this.data.definitions) || {};
       teams.forEach(function (t) {
-        var option = el("option", null, t.key + (t.name ? " · " + t.name : "") + (t.custom ? "" : " (default flow)"));
+        var definition = defs[t.key];
+        var suffix = "";
+        if (!t.custom && definition && definition.source) suffix = " — uses " + self.sourceLabel(definition.source) + " flow";
+        var option = el("option", null, self.scopeLabel(t.key) + suffix);
         option.value = t.key;
         option.selected = t.key === self.team;
-        select.appendChild(option);
+        if (t.kind === "default") select.appendChild(option);
+        else groups[t.kind === "project" ? "project" : "team"].appendChild(option);
       });
+      if (groups.team.children.length) select.appendChild(groups.team);
+      if (groups.project.children.length) select.appendChild(groups.project);
       select.addEventListener("change", function () {
         self.team = select.value;
         self.selected = null;
@@ -442,14 +481,16 @@
       });
       bar.appendChild(select);
     } else if (teams.length === 1) {
-      bar.appendChild(el("span", "fx-team-name", teams[0].key + (teams[0].name ? " · " + teams[0].name : "")));
+      bar.appendChild(el("span", "fx-team-name", this.scopeLabel(teams[0].key)));
     }
 
     var definition = this.definition();
-    if (definition && definition.updated_by && this.mode === "view") {
+    var entry = this.entry();
+    if (definition && definition.inherited && this.mode === "view") {
+      var from = this.sourceLabel(definition.source);
+      bar.appendChild(el("span", "fx-flow-meta", "Using the " + from + " flow"));
+    } else if (definition && definition.updated_by && this.mode === "view") {
       bar.appendChild(el("span", "fx-flow-meta", "v" + definition.version + " · edited by " + definition.updated_by));
-    } else if (definition && definition.inherited && this.mode === "view") {
-      bar.appendChild(el("span", "fx-flow-meta", "Using the default flow"));
     }
 
     var spacer = el("span", "fx-flow-spacer");
@@ -459,7 +500,17 @@
       bar.appendChild(button("+ Stage", "fx-chip", function () {
         self.addStage();
       }));
+      if (this.opts.assistFlow) {
+        bar.appendChild(button("✦ Draft flow with AI", "fx-chip fx-assist-btn", function () {
+          self.openFlowAssist();
+        }));
+      }
       bar.appendChild(el("span", "fx-flow-hint", "Drag stages · drag ＋ to connect · Delete removes"));
+      if (entry && entry.custom && entry.kind !== "default") {
+        bar.appendChild(button(entry.kind === "project" ? "Use team flow" : "Use default flow", "fx-chip", function () {
+          self.resetScope();
+        }));
+      }
       bar.appendChild(button("Discard", "fx-chip", function () {
         self.exitEdit();
       }));
@@ -469,10 +520,50 @@
       save.disabled = !!this.saving;
       bar.appendChild(save);
     } else if (this.canEdit()) {
-      bar.appendChild(button("Edit flow", "fx-chip", function () {
+      var inherited = definition && definition.inherited;
+      var noun = entry && entry.kind === "project" ? "this project" : entry && entry.kind === "team" ? "this team" : "";
+      if (this.opts.assistFlow) {
+        bar.appendChild(button("✦ Design with AI", "fx-chip fx-assist-btn", function () {
+          self.enterEdit();
+          self.openFlowAssist();
+        }));
+      }
+      bar.appendChild(button(inherited && noun ? "Customize for " + noun : "Edit flow", "fx-chip", function () {
         self.enterEdit();
       }));
     }
+  };
+
+  Flow.prototype.openFlowAssist = function () {
+    var self = this;
+    this.opts.assistFlow(this.team, this.scopeLabel(), this.draft, function (suggestion) {
+      var version = self.draft.version;
+      var request = self.draft._flowRequest;
+      self.draft = clone(suggestion.definition);
+      self.draft.version = version;
+      self.draft._flowRequest = request;
+      self.selected = null;
+      self.errors = [];
+      self.lastKey = null;
+      self.render();
+      self.opts.toast("Draft applied. Review it, then Save.", "ok");
+    });
+  };
+
+  Flow.prototype.resetScope = function () {
+    var self = this;
+    var entry = this.entry();
+    var parent = entry.kind === "project" ? "its team's flow" : "the default flow";
+    if (!window.confirm("Remove " + this.scopeLabel() + "'s own flow? It will use " + parent + " again.")) return;
+    this.opts.push("factory_reset", { team: this.team }, function (reply) {
+      if (reply && reply.ok) {
+        self.opts.toast(self.scopeLabel() + " now uses " + parent, "ok");
+        self.exitEdit();
+      } else {
+        self.errors = [(reply && reply.error) || "Couldn't remove the flow"];
+        self.render();
+      }
+    });
   };
 
   Flow.prototype.renderErrors = function () {
@@ -896,6 +987,7 @@
   Flow.prototype.save = function () {
     var self = this;
     var definition = clone(this.draft);
+    delete definition._flowRequest;
     definition.stages.forEach(function (s) {
       delete s._new;
     });
@@ -905,7 +997,7 @@
       self.saving = false;
       if (reply && reply.ok) {
         self.data.definitions[self.team] = reply.definition;
-        self.opts.toast("Saved " + self.team + "'s flow (v" + reply.definition.version + ")", "ok");
+        self.opts.toast("Saved the " + self.scopeLabel() + " flow (v" + reply.definition.version + ")", "ok");
         self.exitEdit();
       } else if (reply && reply.conflict) {
         self.errors = [
@@ -984,8 +1076,9 @@
       return t.from === stage.id && t.by === "human";
     });
     var movable = this.data.movable_teams;
-    var canMove = function () {
-      return movable === "all" || (Array.isArray(movable) && movable.indexOf(self.team) !== -1);
+    // Project flows hold issues from several teams: moving needs the issue's team.
+    var canMove = function (issue) {
+      return movable === "all" || (Array.isArray(movable) && movable.indexOf(issue.team) !== -1);
     };
 
     var list = el("div", "fx-drawer-list");
@@ -1005,7 +1098,7 @@
       line.appendChild(el("span", "fx-issue-age", since(issue.since_ms)));
       row.appendChild(line);
 
-      if (moves.length && issue.id && canMove()) {
+      if (moves.length && issue.id && canMove(issue)) {
         var actions = el("div", "fx-issue-actions");
         if (self.pending[issue.issue]) {
           actions.appendChild(el("span", "fx-pending", "Moving to " + self.pending[issue.issue] + "…"));

@@ -74,8 +74,8 @@ defmodule SymphonyElixir.UsageLedger do
           :ok
 
         [{^identifier, previous, _since, _meta}] ->
-          # Counted per team: two teams' flows can share stage ids.
-          key = {team_key(identifier), previous, node}
+          # Counted per team and project: their flows can share stage ids.
+          key = {team_key(identifier), issue.project_slug, previous, node}
           :ets.update_counter(@edges_table, key, {2, 1}, {key, 0})
           :ets.insert(@issues_table, {identifier, node, now, issue_meta(issue)})
           mark_dirty()
@@ -107,6 +107,22 @@ defmodule SymphonyElixir.UsageLedger do
   end
 
   def factory_node(_issue), do: nil
+
+  @doc """
+  Projects seen in usage or flow, by slug, with their display name and the teams
+  whose issues they hold. Used to decide who may edit a project's flow.
+  """
+  @spec projects() :: %{String.t() => %{name: String.t() | nil, teams: [String.t()]}}
+  def projects do
+    if ready?() do
+      (Enum.map(:ets.tab2list(@usage_table), &project_row/1) ++ Enum.map(:ets.tab2list(@issues_table), &project_row/1))
+      |> Enum.filter(fn {project, _team, _issue, _name} -> is_binary(project) end)
+      |> Enum.group_by(&elem(&1, 0))
+      |> Map.new(fn {project, rows} -> {project, %{name: Enum.find_value(rows, &elem(&1, 3)), teams: teams_by_issue_count(rows)}} end)
+    else
+      %{}
+    end
+  end
 
   @spec snapshot() :: %{usage: [map()], flow: %{edges: [map()], issues: [map()]}}
   def snapshot do
@@ -255,10 +271,11 @@ defmodule SymphonyElixir.UsageLedger do
     :ets.insert(@usage_table, {key, row["input_tokens"] || 0, row["output_tokens"] || 0, meta})
   end
 
-  defp edge_row({{team, from, to}, count}), do: %{team: team, from: from, to: to, count: count}
+  defp edge_row({{team, project, from, to}, count}), do: %{team: team, project: project, from: from, to: to, count: count}
 
-  # Ledgers written before edges were per team have no team; keep them under nil.
-  defp load_edge(%{"from" => from, "to" => to, "count" => count} = row), do: :ets.insert(@edges_table, {{row["team"], from, to}, count})
+  # Older ledgers have no team or project on edges; keep them under nil.
+  defp load_edge(%{"from" => from, "to" => to, "count" => count} = row),
+    do: :ets.insert(@edges_table, {{row["team"], row["project"], from, to}, count})
 
   defp load_flow_issue(row) do
     meta = %{id: row["id"], title: row["title"], project: row["project"], team: row["team"], url: row["url"]}
@@ -291,6 +308,19 @@ defmodule SymphonyElixir.UsageLedger do
       team: meta[:team],
       url: meta[:url]
     }
+  end
+
+  defp project_row({{project, team, issue, _backend, _model}, _in, _out, meta}), do: {project, team, issue, meta[:project_name]}
+  defp project_row({issue, _node, _since, meta}), do: {meta[:project], meta[:team], issue, nil}
+
+  # Teams with the most issues in the project first.
+  defp teams_by_issue_count(rows) do
+    rows
+    |> Enum.filter(fn {_project, team, _issue, _name} -> is_binary(team) end)
+    |> Enum.uniq_by(fn {_project, team, issue, _name} -> {team, issue} end)
+    |> Enum.frequencies_by(&elem(&1, 1))
+    |> Enum.sort_by(fn {team, n} -> {-n, team} end)
+    |> Enum.map(&elem(&1, 0))
   end
 
   defp issue_meta(%Issue{} = issue) do

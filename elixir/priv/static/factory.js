@@ -121,7 +121,8 @@
               }) } : null;
         self.renderExplorer();
       },
-      assist: window.SymphonyAssist ? window.SymphonyAssist.forPanel(self) : null
+      assist: window.SymphonyAssist ? window.SymphonyAssist.forPanel(self) : null,
+      assistFlow: window.SymphonyAssist ? window.SymphonyAssist.flowForPanel(self) : null
     });
 
     var explorer = slot("explorer");
@@ -444,12 +445,18 @@
         priced = true;
       }
     });
-    // Across every team visible to this person.
+    // Across every team visible to this person. Project flows repeat issues
+    // their teams already count, so they're left out.
     var shipped = 0;
     var loops = 0;
     var running = 0;
     var data = this.data;
+    var projectKeys = {};
+    (data.teams || []).forEach(function (t) {
+      if (t.kind === "project") projectKeys[t.key] = true;
+    });
     Object.keys(data.flows || {}).forEach(function (team) {
+      if (projectKeys[team]) return;
       var flow = data.flows[team];
       var definition = (data.definitions || {})[team] || { stages: [] };
       var byId = {};

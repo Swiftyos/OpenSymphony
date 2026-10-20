@@ -62,16 +62,36 @@ defmodule SymphonyElixirWeb.Visibility do
   defp restrict_factory(nil, _visible?, _teams), do: nil
 
   defp restrict_factory(factory, visible?, teams) do
-    keep = Enum.filter(factory.teams, &MapSet.member?(teams, &1.key))
+    keep = Enum.filter(factory.teams, &visible_flow?(&1, teams))
+    keys = Enum.map(keep, & &1.key)
 
     %{
       factory
       | usage: Enum.filter(factory.usage, &visible?.(&1.issue)),
         teams: keep,
-        team: keep |> List.first() |> then(&(&1 && &1.key)),
-        definitions: Map.take(factory.definitions, Enum.map(keep, & &1.key)),
-        flows: Map.take(factory.flows, Enum.map(keep, & &1.key))
+        team: keep |> Enum.find(&(Map.get(&1, :kind) != "project")) |> then(&(&1 && &1.key)),
+        definitions: Map.take(factory.definitions, keys),
+        flows: factory.flows |> Map.take(keys) |> Map.new(fn {key, flow} -> {key, restrict_flow(flow, visible?)} end)
     }
+  end
+
+  # Projects can span teams: show one when any of its teams is the viewer's,
+  # with only the viewer's teams' issues on it.
+  defp visible_flow?(%{kind: "project", teams: project_teams}, teams), do: Enum.any?(project_teams, &MapSet.member?(teams, &1))
+  defp visible_flow?(entry, teams), do: MapSet.member?(teams, entry.key)
+
+  defp restrict_flow(flow, visible?) do
+    nodes =
+      Map.new(flow.nodes, fn {id, node} ->
+        if Enum.all?(node.issues, &visible?.(&1.issue)) do
+          {id, node}
+        else
+          issues = Enum.filter(node.issues, &visible?.(&1.issue))
+          {id, %{node | issues: issues, count: length(issues), running: Enum.count(issues, & &1.backend)}}
+        end
+      end)
+
+    %{flow | nodes: nodes}
   end
 
   defp drop_host_fields(entry) when is_map(entry), do: Map.drop(entry, @host_fields)

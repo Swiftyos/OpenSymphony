@@ -21,7 +21,7 @@ defmodule SymphonyElixir.Auth do
   use GenServer
   require Logger
 
-  alias SymphonyElixir.{Config, Users}
+  alias SymphonyElixir.{Config, UsageLedger, Users}
   alias SymphonyElixir.Linear.Client
 
   @table :symphony_auth_cache
@@ -219,14 +219,21 @@ defmodule SymphonyElixir.Auth do
   def can_control?(_user), do: false
 
   @doc """
-  Whether the user may edit a team's factory flow and its stage controls:
-  admins for any team (and the organisation default), members for their own
-  teams. Guests never.
+  Whether the user may edit a flow and its stage controls: admins any flow
+  (including the organisation default), members their own teams' flows and the
+  flows of projects their teams work in. Guests never.
   """
   @spec can_edit_factory?(User.t() | nil, String.t() | nil) :: boolean()
   def can_edit_factory?(%User{local: true}, _team), do: true
   def can_edit_factory?(%User{admin: true}, _team), do: true
   def can_edit_factory?(%User{guest: true}, _team), do: false
+
+  # A project's flow: members of any team whose issues are in the project.
+  def can_edit_factory?(%User{teams: teams}, "project:" <> slug) do
+    project_teams = get_in(UsageLedger.projects(), [slug, :teams]) || []
+    Enum.any?(teams, &(&1.key in project_teams))
+  end
+
   def can_edit_factory?(%User{teams: teams}, team) when is_binary(team), do: Enum.any?(teams, &(&1.key == team))
   def can_edit_factory?(_user, _team), do: false
 

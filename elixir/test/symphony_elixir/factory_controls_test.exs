@@ -134,7 +134,7 @@ defmodule SymphonyElixir.FactoryControlsTest do
 
     %{usage: [row], flow: flow} = UsageLedger.snapshot()
     assert {row.team, row.backend, row.input_tokens, row.output_tokens} == {"PAY", "claude", 1_500_000, 100_000}
-    assert %{team: "PAY", from: "review", to: "rework", count: 1} in flow.edges
+    assert %{team: "PAY", project: "project", from: "review", to: "rework", count: 1} in flow.edges
     assert [%{node: "rework"}] = flow.issues
 
     settings = %{Config.settings!() | pricing: %{"claude" => %{"input_per_mtok" => 3, "output_per_mtok" => 15}}}

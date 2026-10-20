@@ -1,14 +1,16 @@
 defmodule SymphonyElixir.Factory.Store do
   @moduledoc """
-  Per-team factory definitions, keyed by Linear team key (e.g. `PAY`).
+  Factory definitions per scope: the organisation-wide `DEFAULT`, a Linear team
+  (`PAY`), or a Linear project (`project:<slug>`).
 
-  Teams without a saved definition use `Definition.default_template/0`. Saves are
+  An issue uses the first flow that exists, most specific first: its project's,
+  then its team's, then `DEFAULT`, then `Definition.default_template/0`. Saves are
   optimistic: the caller passes the version it edited, and a save against a
   newer version is refused so two editors can't silently overwrite each other.
 
   Reads come from a public ETS table because the orchestrator resolves stages on
-  every dispatch decision. Each team is persisted to
-  `~/.symphony/factories/<TEAM>.json`.
+  every dispatch decision. Each scope is persisted to
+  `~/.symphony/factories/<TEAM>.json` or `project--<slug>.json`.
   """
 
   use GenServer
@@ -18,6 +20,9 @@ defmodule SymphonyElixir.Factory.Store do
 
   @table :symphony_factories
   @team_pattern ~r/^[A-Z0-9][A-Z0-9_-]{0,15}$/
+  @project_pattern ~r/^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/
+  @project_prefix "project:"
+  @project_file_prefix "project--"
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -27,18 +32,57 @@ defmodule SymphonyElixir.Factory.Store do
   @default_team "DEFAULT"
 
   @doc """
-  The definition for a team. Lookup order: the team's own definition, then the
-  organisation-wide `DEFAULT` definition, then the built-in template. `nil`
-  means the organisation default.
-  """
-  @spec get(String.t() | nil) :: Definition.t()
-  def get(team) do
-    key = normalize_team(team) || @default_team
+  The flow for a scope (`nil` means `DEFAULT`). A scope without its own flow
+  inherits: a project from `fallback_team` (the team its issues belong to), a
+  team from `DEFAULT`, and `DEFAULT` from the built-in template.
 
-    (lookup(key) || lookup(@default_team) || Definition.default_template())
+  `"team"` is the scope asked for, `"source"` the scope the flow came from
+  (`"template"` for the built-in one), and `"inherited"` whether they differ.
+  """
+  @spec get(String.t() | nil, String.t() | nil) :: Definition.t()
+  def get(scope, fallback_team \\ nil) do
+    key = normalize_scope(scope) || @default_team
+
+    chain =
+      if project_scope?(key), do: [key, normalize_scope(fallback_team), @default_team], else: [key, @default_team]
+
+    {source, definition} =
+      chain
+      |> Enum.filter(&is_binary/1)
+      |> Enum.find_value({"template", Definition.default_template()}, fn candidate ->
+        if definition = lookup(candidate), do: {candidate, definition}
+      end)
+
+    definition
     |> Map.put("team", key)
-    |> Map.put("inherited", is_nil(lookup(key)))
+    |> Map.put("source", source)
+    |> Map.put("inherited", source != key)
   end
+
+  @doc """
+  The scope whose flow an issue follows: its project's when the project has its
+  own flow, otherwise its team (which may itself inherit `DEFAULT`).
+  """
+  @spec scope_for(String.t() | nil, String.t() | nil) :: String.t() | nil
+  def scope_for(team, project_slug) do
+    project = project_scope(project_slug)
+    if project && custom?(project), do: project, else: team
+  end
+
+  @doc """
+  The scope key for a Linear project slug, or nil when the slug isn't usable.
+  """
+  @spec project_scope(String.t() | nil) :: String.t() | nil
+  def project_scope(slug) when is_binary(slug) do
+    slug = String.trim(slug)
+    if Regex.match?(@project_pattern, slug), do: @project_prefix <> slug
+  end
+
+  def project_scope(_slug), do: nil
+
+  @spec project_scope?(String.t() | nil) :: boolean()
+  def project_scope?(@project_prefix <> _slug), do: true
+  def project_scope?(_scope), do: false
 
   @spec default_team() :: String.t()
   def default_team, do: @default_team
@@ -53,18 +97,33 @@ defmodule SymphonyElixir.Factory.Store do
   end
 
   @spec custom?(String.t() | nil) :: boolean()
-  def custom?(team) do
-    key = normalize_team(team)
+  def custom?(scope) do
+    key = normalize_scope(scope)
     is_binary(key) and :ets.whereis(@table) != :undefined and :ets.member(@table, key)
   end
 
-  @spec teams() :: [String.t()]
-  def teams do
+  @doc """
+  Every scope with its own saved flow (teams, projects, and `DEFAULT`).
+  """
+  @spec scopes() :: [String.t()]
+  def scopes do
     if :ets.whereis(@table) != :undefined, do: @table |> :ets.tab2list() |> Enum.map(&elem(&1, 0)) |> Enum.sort(), else: []
   end
 
   @doc """
-  Saves a whole definition for a team. `base_version` must equal the stored
+  Teams (and `DEFAULT`) with their own saved flow.
+  """
+  @spec teams() :: [String.t()]
+  def teams, do: Enum.reject(scopes(), &project_scope?/1)
+
+  @doc """
+  Slugs of the projects with their own saved flow.
+  """
+  @spec projects() :: [String.t()]
+  def projects, do: for(@project_prefix <> slug <- scopes(), do: slug)
+
+  @doc """
+  Saves a whole definition for a scope. `base_version` must equal the stored
   version, or the save is refused with `{:error, {:conflict, current}}`.
   """
   @spec put(String.t(), map(), integer(), String.t()) ::
@@ -87,7 +146,8 @@ defmodule SymphonyElixir.Factory.Store do
   def put_stage_field(_team, _stage_id, field, _value, _by), do: {:error, {:unknown_field, field}}
 
   @doc """
-  Drops a team's custom definition so it falls back to the default template.
+  Drops a scope's own definition so it inherits again (a project its team's
+  flow, a team the `DEFAULT` flow, `DEFAULT` the built-in template).
   """
   @spec reset_team(String.t()) :: :ok
   def reset_team(team), do: GenServer.call(__MODULE__, {:reset_team, team})
@@ -142,7 +202,7 @@ defmodule SymphonyElixir.Factory.Store do
     case team_key(team) do
       {:ok, key} ->
         :ets.delete(@table, key)
-        if state.dir, do: File.rm(Path.join(state.dir, key <> ".json"))
+        if state.dir, do: File.rm(Path.join(state.dir, file_name(key)))
         {:reply, :ok, state}
 
       error ->
@@ -155,7 +215,7 @@ defmodule SymphonyElixir.Factory.Store do
     {:reply, :ok, state}
   end
 
-  # A team that inherits starts its own copy from what it inherits, at version 0.
+  # A scope that inherits starts its own copy from what it inherits, at version 0.
   defp own_or_new(key), do: lookup(key) || get(key) |> Map.put("version", 0)
 
   defp check_version(%{"version" => version}, version), do: :ok
@@ -174,15 +234,26 @@ defmodule SymphonyElixir.Factory.Store do
     |> Map.put("updated_at", DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601())
   end
 
-  defp team_key(team) do
-    case normalize_team(team) do
+  defp team_key(scope) do
+    case normalize_scope(scope) do
+      @project_prefix <> slug = key -> if Regex.match?(@project_pattern, slug), do: {:ok, key}, else: {:error, :invalid_team}
       key when is_binary(key) -> if Regex.match?(@team_pattern, key), do: {:ok, key}, else: {:error, :invalid_team}
       _ -> {:error, :invalid_team}
     end
   end
 
-  defp normalize_team(team) when is_binary(team), do: team |> String.trim() |> String.upcase()
-  defp normalize_team(_team), do: nil
+  # Team keys are upper-cased; project slugs keep their case.
+  defp normalize_scope(scope) when is_binary(scope) do
+    case String.trim(scope) do
+      @project_prefix <> slug -> @project_prefix <> String.trim(slug)
+      team -> String.upcase(team)
+    end
+  end
+
+  defp normalize_scope(_scope), do: nil
+
+  defp file_name(@project_prefix <> slug), do: @project_file_prefix <> slug <> ".json"
+  defp file_name(team), do: team <> ".json"
 
   defp default_dir do
     case Application.get_env(:symphony_elixir, :factories_dir, :default) do
@@ -194,7 +265,7 @@ defmodule SymphonyElixir.Factory.Store do
   defp persist(nil, _key, _definition), do: :ok
 
   defp persist(dir, key, definition) do
-    path = Path.join(dir, key <> ".json")
+    path = Path.join(dir, file_name(key))
 
     case SymphonyElixir.PrivateFile.write(path, Jason.encode!(definition, pretty: true)) do
       :ok -> :ok
@@ -212,9 +283,13 @@ defmodule SymphonyElixir.Factory.Store do
   end
 
   defp load_file(path) do
-    key = path |> Path.basename(".json") |> String.upcase()
+    key =
+      case Path.basename(path, ".json") do
+        @project_file_prefix <> slug -> @project_prefix <> slug
+        team -> String.upcase(team)
+      end
 
-    with true <- Regex.match?(@team_pattern, key),
+    with {:ok, ^key} <- team_key(key),
          {:ok, body} <- File.read(path),
          {:ok, raw} <- Jason.decode(body),
          {:ok, valid} <- Definition.validate(raw) do

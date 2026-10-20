@@ -18,6 +18,11 @@ defmodule SymphonyElixirWeb.FactoryPresenter do
   @doc """
   `opts[:teams]` adds teams to show even before they have any issues (e.g. the
   viewer's own Linear teams).
+
+  `teams` lists every flow the viewer can pick: teams (or `DEFAULT`) and then
+  projects (`project:<slug>`). `definitions` and `flows` are keyed the same way.
+  A project without its own flow shows the flow of the team most of its issues
+  belong to.
   """
   @spec payload([map()], map(), keyword()) :: map()
   def payload(running, settings, opts \\ []) do
@@ -25,7 +30,15 @@ defmodule SymphonyElixirWeb.FactoryPresenter do
     pricing = Map.get(settings, :pricing) || %{}
     running_by_issue = Map.new(running, &{&1.issue_identifier, &1})
     teams = team_keys(ledger.flow.issues, Keyword.get(opts, :teams, []))
-    definitions = Map.new(teams, &{&1, Store.get(&1)})
+    projects = project_entries(settings)
+    own_flow = MapSet.new(Store.projects())
+
+    definitions =
+      Map.new(teams, &{&1, Store.get(&1)})
+      |> Map.merge(Map.new(projects, &{&1.key, Store.get(&1.key, List.first(&1.teams))}))
+
+    team_flows = Map.new(teams, &{&1, team_flow(&1, definitions[&1], ledger.flow, running_by_issue, own_flow)})
+    project_flows = Map.new(projects, &{&1.key, project_flow(&1.slug, definitions[&1.key], ledger.flow, running_by_issue)})
 
     %{
       harnesses: @harnesses,
@@ -34,9 +47,11 @@ defmodule SymphonyElixirWeb.FactoryPresenter do
       priced: map_size(pricing) > 0,
       usage: Enum.map(ledger.usage, &(&1 |> price_row(pricing) |> Map.update(:url, nil, fn url -> https_url(url) end))),
       team: List.first(teams),
-      teams: Enum.map(teams, &%{key: &1, name: if(&1 == Store.default_team(), do: "Default flow"), custom: Store.custom?(&1)}),
+      teams:
+        Enum.map(teams, &%{key: &1, kind: team_kind(&1), name: if(&1 == Store.default_team(), do: "Default flow"), custom: Store.custom?(&1)}) ++
+          Enum.map(projects, &Map.take(&1, [:key, :kind, :name, :slug, :teams, :custom])),
       definitions: definitions,
-      flows: Map.new(teams, &{&1, team_flow(&1, definitions[&1], ledger.flow, running_by_issue)}),
+      flows: Map.merge(team_flows, project_flows),
       linear_states: linear_states(settings, definitions),
       label_prefix: IssueStage.label_prefix(settings)
     }
@@ -58,9 +73,44 @@ defmodule SymphonyElixirWeb.FactoryPresenter do
     end
   end
 
-  defp team_flow(team, definition, flow, running_by_issue) do
+  defp team_kind(key), do: if(key == Store.default_team(), do: "default", else: "team")
+
+  # Configured projects, projects with work, and projects with their own flow.
+  defp project_entries(settings) do
+    seen = UsageLedger.projects()
+
+    settings.tracker.projects
+    |> List.wrap()
+    |> Enum.map(& &1.slug)
+    |> Kernel.++(Map.keys(seen))
+    |> Kernel.++(Store.projects())
+    |> Enum.filter(&(is_binary(&1) and is_binary(Store.project_scope(&1))))
+    |> Enum.uniq()
+    |> Enum.map(fn slug ->
+      info = Map.get(seen, slug, %{name: nil, teams: []})
+      key = Store.project_scope(slug)
+      %{key: key, kind: "project", slug: slug, name: info.name || slug, teams: info.teams, custom: Store.custom?(key)}
+    end)
+    |> Enum.sort_by(&String.downcase(&1.name))
+  end
+
+  # A team's diagram leaves out issues whose project follows its own flow.
+  defp team_flow(team, definition, flow, running_by_issue, own_flow) do
+    stage_flow(
+      definition,
+      Enum.filter(flow.issues, &(&1.team == team and not MapSet.member?(own_flow, &1.project))),
+      Enum.filter(flow.edges, &(&1.team == team and not MapSet.member?(own_flow, &1.project))),
+      running_by_issue
+    )
+  end
+
+  defp project_flow(slug, definition, flow, running_by_issue) do
+    stage_flow(definition, Enum.filter(flow.issues, &(&1.project == slug)), Enum.filter(flow.edges, &(&1.project == slug)), running_by_issue)
+  end
+
+  defp stage_flow(definition, issues, edges, running_by_issue) do
     ids = MapSet.new(definition["stages"], & &1["id"])
-    members = flow.issues |> Enum.filter(&(&1.team == team and MapSet.member?(ids, &1.node))) |> Enum.group_by(& &1.node)
+    members = issues |> Enum.filter(&MapSet.member?(ids, &1.node)) |> Enum.group_by(& &1.node)
 
     nodes =
       Map.new(ids, fn id ->
@@ -75,9 +125,9 @@ defmodule SymphonyElixirWeb.FactoryPresenter do
       end)
 
     edges =
-      flow.edges
-      |> Enum.filter(&(&1.team == team and MapSet.member?(ids, &1.from) and MapSet.member?(ids, &1.to)))
-      |> Map.new(&{"#{&1.from}>#{&1.to}", &1.count})
+      edges
+      |> Enum.filter(&(MapSet.member?(ids, &1.from) and MapSet.member?(ids, &1.to)))
+      |> Enum.reduce(%{}, fn edge, acc -> Map.update(acc, "#{edge.from}>#{edge.to}", edge.count, &(&1 + edge.count)) end)
 
     %{nodes: nodes, edges: edges}
   end

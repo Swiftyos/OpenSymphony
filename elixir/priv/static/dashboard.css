@@ -2033,6 +2033,140 @@ a.brand:hover {
   justify-self: start;
 }
 
+/* -- AI flow designer (modal) */
+
+.fx-assist-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: start center;
+  padding: 6vh 16px 16px;
+  background: rgba(8, 9, 12, 0.66);
+  backdrop-filter: blur(3px);
+  animation: fx-fade 120ms ease-out;
+}
+
+.fx-assist-flow {
+  width: min(720px, 100%);
+  max-height: 86vh;
+  overflow: auto;
+  padding: 18px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
+}
+
+.fx-assist-flow .is-working::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 8px;
+  border-radius: 50%;
+  background: var(--h-claude);
+  animation: fx-pulse 1.2s ease-in-out infinite;
+}
+
+.fx-assist-summary {
+  margin: 0 0 4px;
+  color: var(--ink);
+  line-height: 1.5;
+}
+
+.fx-assist-changes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 0;
+}
+
+.fx-change {
+  padding: 2px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  color: var(--ink-2);
+  font-size: 0.74rem;
+}
+
+.fx-change-added {
+  border-color: rgba(12, 163, 12, 0.5);
+  color: var(--good-ink);
+}
+
+.fx-change-removed {
+  border-color: rgba(208, 59, 59, 0.5);
+  color: var(--critical-ink);
+}
+
+.fx-assist-stages {
+  display: grid;
+  gap: 4px;
+}
+
+.fx-assist-stage {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--raised);
+}
+
+.fx-assist-stage > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.fx-assist-stage > summary::-webkit-details-marker {
+  display: none;
+}
+
+.fx-assist-stage[open] > summary {
+  border-bottom: 1px solid var(--line);
+}
+
+.fx-assist-stage > .fx-assist-text,
+.fx-assist-stage > .fx-assist-h {
+  margin: 8px 10px;
+}
+
+.fx-assist-where {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.fx-assist-skill {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--raised-2);
+  color: var(--ink-2);
+  font-size: 0.7rem;
+}
+
+.fx-kind {
+  min-width: 52px;
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.fx-kind-done {
+  color: var(--good-ink);
+}
+
+.fx-kind-parked {
+  color: var(--critical-ink);
+}
+
+@keyframes fx-fade {
+  from {
+    opacity: 0;
+  }
+}
+
 /* -- AI assistant */
 
 .fx-assist {

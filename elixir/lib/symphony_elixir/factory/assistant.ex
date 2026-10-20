@@ -1,10 +1,12 @@
 defmodule SymphonyElixir.Factory.Assistant do
   @moduledoc """
-  Drafts a factory stage with the team's own agent harness.
+  Drafts factory stages and whole flows with the configured agent harness.
 
-  Given a plain-language request ("before review, run e2e against the preview
-  deploy"), it asks the configured harness CLI for the stage's agent
-  instructions, suggested connections, and optionally a skill file, as JSON.
+  `draft/4` takes a plain-language request for one stage ("before review, run
+  e2e against the preview deploy") and asks the harness CLI for the stage's
+  agent instructions, suggested connections, and optionally a skill file.
+  `draft_flow/3` designs a whole flow (stages, connections, instructions, and
+  skills) from a description, starting from the flow the scope uses today.
 
   The CLI runs one-shot in an empty scratch directory with file, shell, and web
   tools disallowed where the harness supports it, so it can only produce text.
@@ -14,14 +16,23 @@ defmodule SymphonyElixir.Factory.Assistant do
   require Logger
 
   alias SymphonyElixir.Config
+  alias SymphonyElixir.Factory.Definition
 
   @timeout_ms 180_000
+  @flow_timeout_ms 420_000
+  @runtime_fields ["harness", "effort", "max_agents", "paused"]
   @max_output_bytes 200_000
 
   @type suggestion :: %{
           instructions: String.t(),
           transitions: [map()],
           skill: %{path: String.t(), content: String.t()} | nil
+        }
+
+  @type flow_suggestion :: %{
+          summary: String.t(),
+          definition: Definition.t(),
+          changes: %{added: [String.t()], removed: [String.t()], changed: [String.t()]}
         }
 
   @spec draft(map(), String.t(), String.t(), keyword()) :: {:ok, suggestion()} | {:error, String.t()}
@@ -32,6 +43,281 @@ defmodule SymphonyElixir.Factory.Assistant do
          {:ok, output} <- run(prompt, Keyword.get(opts, :harness) || harness(), Keyword.get(opts, :timeout_ms, @timeout_ms)),
          {:ok, suggestion} <- parse(output) do
       {:ok, sanitize(suggestion, definition, stage_id)}
+    end
+  end
+
+  @doc """
+  Designs a whole flow from a description, starting from `base` (the flow the
+  scope uses now). Options: `:scope_label` ("project Checkout API"),
+  `:linear_states` (states the team's Linear workflow has), `:label_prefix`,
+  `:skills` (draft skill files for agent stages, default true), `:harness`,
+  `:timeout_ms`.
+
+  The draft is validated like a save. When it isn't a valid flow the harness
+  gets one chance to fix the listed problems. Runtime controls (harness,
+  thinking, caps, pause) carry over for stages that keep their id.
+  """
+  @spec draft_flow(map(), String.t(), keyword()) :: {:ok, flow_suggestion()} | {:error, String.t()}
+  def draft_flow(base, request, opts \\ []) do
+    harness = Keyword.get(opts, :harness) || harness()
+    timeout_ms = Keyword.get(opts, :timeout_ms, @flow_timeout_ms)
+
+    with {:ok, request} <- clean_request(request, "Describe the flow you want."),
+         {:ok, output} <- run(build_flow_prompt(base, request, opts), harness, timeout_ms),
+         {:ok, draft} <- parse(output, "stages") do
+      case flow_candidate(draft, base) do
+        {:ok, definition} ->
+          {:ok, flow_suggestion(draft, definition, base)}
+
+        {:error, errors} ->
+          repair_flow(draft, errors, base, harness, timeout_ms)
+      end
+    end
+  end
+
+  defp repair_flow(draft, errors, base, harness, timeout_ms) do
+    with {:ok, output} <- run(build_repair_prompt(draft, errors), harness, timeout_ms),
+         {:ok, repaired} <- parse(output, "stages") do
+      case flow_candidate(repaired, base) do
+        {:ok, definition} ->
+          {:ok, flow_suggestion(repaired, definition, base)}
+
+        {:error, errors} ->
+          {:error, "The assistant's flow still had problems: " <> Enum.join(Enum.take(errors, 3), "; ") <> ". Try again or rephrase."}
+      end
+    end
+  end
+
+  @doc false
+  @spec build_flow_prompt(map(), String.t(), keyword()) :: String.t()
+  def build_flow_prompt(base, request, opts) do
+    prefix = Keyword.get(opts, :label_prefix, "factory")
+    skills? = Keyword.get(opts, :skills, true)
+
+    states =
+      case Keyword.get(opts, :linear_states, []) do
+        [] -> "Use the standard Linear states: Backlog, Todo, In Progress, In Review, Done, Canceled."
+        states -> "Linear states known to exist: #{Enum.join(states, ", ")}. Stick to these; a stage in a state the team doesn't have is never reached."
+      end
+
+    """
+    You design the AI software factory for #{Keyword.get(opts, :scope_label, "a team")}. Coding agents work
+    Linear issues through a flow of stages. Symphony dispatches an agent for every issue in a
+    "queue" or "agent" stage and gives it that stage's instructions and the moves it may make.
+
+    How stages work:
+    - A stage is a Linear workflow state plus an optional stage label (Linear label `#{prefix}/<label>`).
+      Many stages can share one state by using different labels (e.g. implement, rework, and merge
+      all in "In Progress"). #{states}
+    - kind is one of: "queue" (waiting for an agent), "agent" (an agent works it), "human" (waiting on
+      a person), "parked" (on hold, never dispatched), "done" (finished).
+    - id and label: lowercase letters, digits, dashes; ids are unique. No two stages may share the same
+      state and label (or both have no label in the same state). Mark at most one stage per state
+      "default": true; it is used for issues in that state with no stage label.
+    - The flow needs at least one queue or agent stage and at least one done stage.
+    - Connections ("transitions") say who moves an issue ("agent" or "human") from one stage to another
+      and when ("criteria", one sentence). Include loops back for failures and a way out of blocked stages.
+
+    The flow it uses today:
+    #{flow_outline(base)}
+
+    What they want:
+    <request>
+    #{request}
+    </request>
+
+    Design the complete new flow (not a diff). Keep existing stage ids where a stage keeps its purpose.
+    For every agent and queue stage write "instructions": concrete steps an agent with the repo checked
+    out, git, `gh`, and a Linear tool should follow, and what done looks like (under 200 words).
+    #{if skills?, do: ~s(For agent stages that need a repeatable procedure, add "skill": Markdown with YAML front matter `name` and `description`, then steps and commands. Otherwise "skill": null.), else: ~s(Set every "skill" to null.)}
+
+    Reply with ONLY one JSON object, no prose and no code fences:
+    {"summary": "two sentences on the design",
+     "stages": [{"id", "name", "kind", "linear_state", "label" (or null), "default", "instructions", "skill"}],
+     "transitions": [{"from", "to", "by", "criteria"}]}
+    """
+  end
+
+  defp build_repair_prompt(draft, errors) do
+    """
+    This factory flow JSON has problems:
+    #{Enum.map_join(errors, "\n", &("- " <> &1))}
+
+    Fix them and reply with ONLY the corrected JSON object with the same keys ("summary", "stages",
+    "transitions"). No prose, no code fences.
+
+    #{Jason.encode!(Map.take(draft, ["summary", "stages", "transitions"]))}
+    """
+  end
+
+  defp flow_outline(base) do
+    stages =
+      Enum.map_join(base["stages"] || [], "\n", fn s ->
+        label = if s["label"], do: ", label #{s["label"]}", else: ""
+        instructions = s["instructions"] |> to_string() |> String.slice(0, 300)
+        "- #{s["id"]}: #{s["name"]} (#{s["kind"]}, state #{inspect(s["linear_state"])}#{label})#{if instructions != "", do: ": " <> instructions, else: ""}"
+      end)
+
+    transitions =
+      Enum.map_join(base["transitions"] || [], "\n", fn t -> "- #{t["from"]} -> #{t["to"]} (#{t["by"]}): #{t["criteria"]}" end)
+
+    "Stages:\n#{stages}\nConnections:\n#{transitions}"
+  end
+
+  # The drafted flow as a definition: base's runtime controls carried over,
+  # skills wrapped, validated like a save, then laid out on the grid.
+  defp flow_candidate(draft, base) do
+    base_stages = Map.new(base["stages"] || [], &{&1["id"], &1})
+
+    stages =
+      draft
+      |> Map.get("stages")
+      |> List.wrap()
+      |> Enum.filter(&is_map/1)
+      |> Enum.map(fn stage ->
+        id = stage |> Map.get("id") |> to_string() |> String.trim() |> String.downcase()
+        carried = base_stages |> Map.get(id, %{}) |> Map.take(@runtime_fields)
+
+        stage
+        |> Map.take(["id", "name", "kind", "linear_state", "label", "default", "instructions"])
+        |> Map.merge(carried)
+        |> Map.put("skill", draft_skill(stage["skill"]))
+      end)
+
+    transitions = draft |> Map.get("transitions") |> List.wrap() |> Enum.filter(&is_map/1)
+
+    with {:ok, definition} <- Definition.validate(%{"stages" => stages, "transitions" => transitions}) do
+      {:ok, definition |> Map.delete("version") |> layout(base)}
+    end
+  end
+
+  defp draft_skill(content) when is_binary(content) and content != "", do: %{"content" => content}
+  defp draft_skill(%{"content" => content}), do: draft_skill(content)
+  defp draft_skill(_skill), do: nil
+
+  defp flow_suggestion(draft, definition, base) do
+    before = Map.new(base["stages"] || [], &{&1["id"], &1})
+    after_ids = MapSet.new(definition["stages"], & &1["id"])
+
+    changed =
+      definition["stages"]
+      |> Enum.filter(fn stage ->
+        old = before[stage["id"]]
+        old && Map.take(old, ["name", "kind", "linear_state", "label", "instructions"]) != Map.take(stage, ["name", "kind", "linear_state", "label", "instructions"])
+      end)
+
+    %{
+      summary: draft |> Map.get("summary", "") |> to_string() |> String.slice(0, 1_000),
+      definition: definition,
+      changes: %{
+        added: for(stage <- definition["stages"], not Map.has_key?(before, stage["id"]), do: stage["name"]),
+        removed: for({id, stage} <- before, not MapSet.member?(after_ids, id), do: stage["name"]),
+        changed: Enum.map(changed, & &1["name"])
+      }
+    }
+  end
+
+  # ------------------------------------------------------------------ layout
+
+  @column_x 80
+  @column_gap 220
+  @main_row_y 160
+  @row_gap 120
+  @parked_row_y 40
+
+  @doc """
+  Lays a flow out left to right. Stages keep their positions when the draft has
+  exactly the stages `base` has. Otherwise each stage's column is its distance
+  from the start, the shortest path from start to done runs along one row, other
+  stages stack below it, and parked stages sit above it.
+  """
+  @spec layout(map(), map()) :: map()
+  def layout(definition, base \\ %{}) do
+    ids = Enum.map(definition["stages"], & &1["id"])
+    base_positions = Map.new(base["stages"] || [], &{&1["id"], &1["position"]})
+
+    if Enum.sort(ids) == Enum.sort(Map.keys(base_positions)) do
+      %{definition | "stages" => Enum.map(definition["stages"], &Map.put(&1, "position", base_positions[&1["id"]]))}
+    else
+      positions = grid_positions(definition)
+      %{definition | "stages" => Enum.map(definition["stages"], &Map.put(&1, "position", positions[&1["id"]]))}
+    end
+  end
+
+  defp grid_positions(definition) do
+    stages = definition["stages"]
+    next = Enum.group_by(definition["transitions"], & &1["from"], & &1["to"])
+    incoming = definition["transitions"] |> Enum.map(& &1["to"]) |> MapSet.new()
+
+    # Start from the queue stages, else stages nothing leads into, else the first.
+    roots =
+      [Enum.filter(stages, &(&1["kind"] == "queue")), Enum.reject(stages, &MapSet.member?(incoming, &1["id"])), [hd(stages)]]
+      |> Enum.find(&(&1 != []))
+      |> Enum.map(& &1["id"])
+
+    {ranks, parents} = bfs(roots, next, Map.new(roots, &{&1, 0}), %{})
+    done_ids = for %{"kind" => "done", "id" => id} <- stages, do: id
+    last = ranks |> Map.drop(done_ids) |> Map.values() |> Enum.max(fn -> 0 end)
+
+    # Stages nothing reaches go after the rest; done stages always come last.
+    ranks =
+      Enum.reduce(stages, ranks, fn stage, acc ->
+        cond do
+          stage["kind"] == "done" -> Map.put(acc, stage["id"], last + 1)
+          Map.has_key?(acc, stage["id"]) -> acc
+          true -> Map.put(acc, stage["id"], last + 1)
+        end
+      end)
+
+    main = main_path(done_ids, ranks, parents)
+
+    stages
+    |> Enum.group_by(&ranks[&1["id"]])
+    |> Enum.flat_map(fn {rank, column} ->
+      x = @column_x + rank * @column_gap
+      {parked, others} = Enum.split_with(column, &(&1["kind"] == "parked"))
+      {on_main, below} = Enum.split_with(others, &(&1["id"] in main))
+      rows = on_main ++ below
+
+      Enum.with_index(rows, fn stage, index -> {stage["id"], %{"x" => x, "y" => @main_row_y + index * @row_gap}} end) ++
+        Enum.with_index(parked, fn stage, index -> {stage["id"], %{"x" => x, "y" => @parked_row_y - index * @row_gap}} end)
+    end)
+    |> Map.new()
+    |> shift_down()
+  end
+
+  # Several parked stages in one column stack upward; keep everything on canvas.
+  defp shift_down(positions) do
+    top = positions |> Map.values() |> Enum.map(& &1["y"]) |> Enum.min(fn -> @parked_row_y end)
+    offset = max(@parked_row_y - top, 0)
+    Map.new(positions, fn {id, p} -> {id, %{p | "y" => p["y"] + offset}} end)
+  end
+
+  defp bfs([], _next, ranks, parents), do: {ranks, parents}
+
+  defp bfs([id | queue], next, ranks, parents) do
+    {queue, ranks, parents} =
+      next
+      |> Map.get(id, [])
+      |> Enum.reduce({queue, ranks, parents}, fn to, {q, r, p} ->
+        if Map.has_key?(r, to), do: {q, r, p}, else: {q ++ [to], Map.put(r, to, r[id] + 1), Map.put(p, to, id)}
+      end)
+
+    bfs(queue, next, ranks, parents)
+  end
+
+  # Stages on the shortest path to the first reachable done stage.
+  defp main_path(done_ids, ranks, parents) do
+    case done_ids |> Enum.filter(&Map.has_key?(parents, &1)) |> Enum.sort_by(&ranks[&1]) do
+      [done | _] -> walk_back(done, parents, [done])
+      [] -> []
+    end
+  end
+
+  defp walk_back(id, parents, acc) do
+    case Map.fetch(parents, id) do
+      {:ok, parent} -> walk_back(parent, parents, [parent | acc])
+      :error -> acc
     end
   end
 
@@ -76,17 +362,19 @@ defmodule SymphonyElixir.Factory.Assistant do
     """
   end
 
-  defp clean_request(request) when is_binary(request) do
+  defp clean_request(request, empty_message \\ "Describe what the stage should do.")
+
+  defp clean_request(request, empty_message) when is_binary(request) do
     request = String.trim(request)
 
     cond do
-      request == "" -> {:error, "Describe what the stage should do."}
-      String.length(request) > 2_000 -> {:error, "Keep the description under 2,000 characters."}
+      request == "" -> {:error, empty_message}
+      String.length(request) > 4_000 -> {:error, "Keep the description under 4,000 characters."}
       true -> {:ok, request}
     end
   end
 
-  defp clean_request(_request), do: {:error, "Describe what the stage should do."}
+  defp clean_request(_request, empty_message), do: {:error, empty_message}
 
   # The config schema only allows codex, claude, or opencode.
   defp harness, do: Config.settings!().agent.backend || "claude"
@@ -170,11 +458,11 @@ defmodule SymphonyElixir.Factory.Assistant do
   # ------------------------------------------------------------------ parsing
 
   @doc false
-  @spec parse(String.t()) :: {:ok, map()} | {:error, String.t()}
-  def parse(output) do
+  @spec parse(String.t(), String.t()) :: {:ok, map()} | {:error, String.t()}
+  def parse(output, required \\ "instructions") do
     with {:ok, json} <- first_json_object(output),
          {:ok, %{} = decoded} <- Jason.decode(json),
-         {:ok, draft} <- unwrap(decoded) do
+         {:ok, draft} <- unwrap(decoded, required) do
       {:ok, draft}
     else
       _ -> {:error, "The assistant didn't return a usable draft. Try again or rephrase."}
@@ -182,10 +470,12 @@ defmodule SymphonyElixir.Factory.Assistant do
   end
 
   # `claude --output-format json` wraps the model's text in "result"; CLIs may
-  # also print warnings around it. A draft must at least have instructions.
-  defp unwrap(%{"result" => result}) when is_binary(result), do: parse(result)
-  defp unwrap(%{"instructions" => instructions} = draft) when is_binary(instructions) and instructions != "", do: {:ok, draft}
-  defp unwrap(_decoded), do: :error
+  # also print warnings around it. A stage draft must at least have
+  # instructions, a flow draft at least one stage.
+  defp unwrap(%{"result" => result}, required) when is_binary(result), do: parse(result, required)
+  defp unwrap(%{"instructions" => instructions} = draft, "instructions") when is_binary(instructions) and instructions != "", do: {:ok, draft}
+  defp unwrap(%{"stages" => [_ | _]} = draft, "stages"), do: {:ok, draft}
+  defp unwrap(_decoded, _required), do: :error
 
   defp first_json_object(text) do
     text = text |> String.replace(~r/```(?:json)?/, "") |> String.trim()
