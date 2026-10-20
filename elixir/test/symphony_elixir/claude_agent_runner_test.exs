@@ -86,7 +86,7 @@ defmodule SymphonyElixir.ClaudeAgentRunnerTest do
 
       trace = File.read!(trace_file)
       assert trace =~ "\"content\":\"You are an agent for this repository."
-      assert trace =~ "\"content\":\"Continuation guidance:\\n\\n- The previous agent turn completed normally, but the Linear issue is still in an active state."
+      assert trace =~ "\"content\":\"Continuation guidance:\\n\\n- The previous agent turn completed normally, but the issue is still in this stage."
       assert trace =~ "continuation turn #2 of 3"
     after
       Process.delete(:claude_agent_turn_fetch_count)

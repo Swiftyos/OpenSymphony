@@ -18,7 +18,8 @@ defmodule SymphonyElixirWeb.Topbar do
     ~H"""
     <header class="topbar">
       <a class="brand" href="/">
-        <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+        <img :if={logo?()} class="brand-logo" src="/branding/logo" alt="" />
+        <svg :if={!logo?()} class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
           <path d="M6 22 L13 10 L19 18 L26 8" />
           <circle cx="6" cy="22" r="2.6" />
           <circle cx="13" cy="10" r="2.6" />
@@ -79,6 +80,8 @@ defmodule SymphonyElixirWeb.Topbar do
     </header>
     """
   end
+
+  defp logo?, do: is_binary(SymphonyElixir.Config.instance_logo())
 
   defp role(user) do
     teams = Enum.map_join(user.teams, ", ", & &1.key)

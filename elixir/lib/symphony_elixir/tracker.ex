@@ -13,7 +13,7 @@ defmodule SymphonyElixir.Tracker do
   @callback set_stage(String.t(), String.t(), String.t() | nil, keyword()) :: :ok | {:error, term()}
   @callback ensure_stage_labels(String.t(), [String.t()]) :: {:ok, [String.t()]} | {:error, term()}
   @callback ensure_labels(String.t(), [String.t()]) :: {:ok, [String.t()]} | {:error, term()}
-  @callback project_team_keys([String.t()]) :: {:ok, %{String.t() => [String.t()]}} | {:error, term()}
+  @callback project_info([String.t()]) :: {:ok, %{String.t() => map()}} | {:error, term()}
 
   @spec fetch_candidate_issues() :: {:ok, [term()]} | {:error, term()}
   def fetch_candidate_issues do
@@ -67,10 +67,10 @@ defmodule SymphonyElixir.Tracker do
   def ensure_labels(team_key, names), do: adapter().ensure_labels(team_key, names)
 
   @doc """
-  The team keys each project (by slug) belongs to.
+  Each project's (by slug) name and team keys: `%{name: ..., teams: [...]}`.
   """
-  @spec project_team_keys([String.t()]) :: {:ok, %{String.t() => [String.t()]}} | {:error, term()}
-  def project_team_keys(slugs), do: adapter().project_team_keys(slugs)
+  @spec project_info([String.t()]) :: {:ok, %{String.t() => map()}} | {:error, term()}
+  def project_info(slugs), do: adapter().project_info(slugs)
 
   @spec adapter() :: module()
   def adapter do

@@ -1635,6 +1635,15 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.codex_command("xhigh") == "codex app-server -c model_reasoning_effort=xhigh"
     assert Config.codex_command("high") == "codex app-server -c model_reasoning_effort=high"
 
+    # The override sits with the command's own settings: a -c after `app-server`
+    # discards every -c before it.
+    write_workflow_file!(Workflow.workflow_file_path(), codex_command: "codex --config a=1 app-server")
+    assert Config.codex_command("low") == "codex --config a=1 -c model_reasoning_effort=low app-server"
+    write_workflow_file!(Workflow.workflow_file_path(), codex_command: "codex app-server --config a=1")
+    assert Config.codex_command("low") == "codex app-server --config a=1 -c model_reasoning_effort=low"
+    write_workflow_file!(Workflow.workflow_file_path(), codex_command: "codex-wrapper")
+    assert Config.codex_command("low") == "codex-wrapper -c model_reasoning_effort=low"
+
     assert {:ok, opencode_runtime_settings} = Config.opencode_runtime_settings()
     assert opencode_runtime_settings.variant == nil
 

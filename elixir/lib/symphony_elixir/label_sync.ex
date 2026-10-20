@@ -12,6 +12,8 @@ defmodule SymphonyElixir.LabelSync do
 
   Labels that already exist in the team or workspace are left alone. It runs
   once at startup; saving a flow in the dashboard syncs that flow's labels too.
+  The project names Linear returns are kept (`project_names/0`) so the
+  dashboard can name projects before it has seen any of their issues.
   """
 
   require Logger
@@ -46,8 +48,11 @@ defmodule SymphonyElixir.LabelSync do
     slugs = settings |> Config.linear_project_routes() |> Enum.map(& &1.slug) |> Enum.filter(&is_binary/1)
     plain = Enum.filter([settings.tracker.require_label, settings.tracker.approval_label], &is_binary/1)
 
-    case Tracker.project_team_keys(slugs) do
-      {:ok, teams_by_project} ->
+    case Tracker.project_info(slugs) do
+      {:ok, info} ->
+        remember_names(info)
+        teams_by_project = Map.new(info, fn {slug, %{teams: teams}} -> {slug, teams} end)
+
         created =
           teams_by_project
           |> stage_labels_by_team()
@@ -60,6 +65,17 @@ defmodule SymphonyElixir.LabelSync do
         Logger.warning("Linear label sync skipped: couldn't look up project teams reason=#{inspect(reason)}")
         {:error, reason}
     end
+  end
+
+  @doc """
+  Project names by slug, as Linear reported them at the last sync.
+  """
+  @spec project_names() :: %{String.t() => String.t()}
+  def project_names, do: :persistent_term.get({__MODULE__, :project_names}, %{})
+
+  defp remember_names(info) do
+    names = for {slug, %{name: name}} <- info, is_binary(name), into: project_names(), do: {slug, name}
+    :persistent_term.put({__MODULE__, :project_names}, names)
   end
 
   # Each team needs the stage labels of every flow its issues can follow.

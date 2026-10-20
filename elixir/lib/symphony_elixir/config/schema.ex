@@ -436,6 +436,8 @@ defmodule SymphonyElixir.Config.Schema do
     @primary_key false
     embedded_schema do
       field(:command, :string, default: "codex app-server")
+      # Sent with every new thread, so it wins over the model in ~/.codex/config.toml.
+      field(:model, :string)
 
       field(:approval_policy, StringOrMap,
         default: %{
@@ -461,6 +463,7 @@ defmodule SymphonyElixir.Config.Schema do
         attrs,
         [
           :command,
+          :model,
           :approval_policy,
           :thread_sandbox,
           :turn_sandbox_policy,
@@ -500,7 +503,8 @@ defmodule SymphonyElixir.Config.Schema do
       field(:model, :string)
       field(:permission_mode, :string, default: "bypassPermissions")
       field(:turn_timeout_ms, :integer, default: 3_600_000)
-      field(:read_timeout_ms, :integer, default: 5_000)
+      # Claude Code can take half a minute to start (plugins, MCP servers, hooks).
+      field(:read_timeout_ms, :integer, default: 120_000)
       field(:stall_timeout_ms, :integer, default: 300_000)
     end
 
@@ -676,13 +680,16 @@ defmodule SymphonyElixir.Config.Schema do
     @primary_key false
     embedded_schema do
       field(:name, :string)
+      # Optional brand logo (an SVG, PNG, JPEG, or WebP file) shown in the top bar.
+      field(:logo, :string)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:name], empty_values: [])
+      |> cast(attrs, [:name, :logo], empty_values: [])
       |> update_change(:name, &Schema.normalize_optional_string/1)
+      |> update_change(:logo, &Schema.normalize_optional_string/1)
     end
   end
 

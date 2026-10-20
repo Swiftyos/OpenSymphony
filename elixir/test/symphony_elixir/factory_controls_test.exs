@@ -180,7 +180,13 @@ defmodule SymphonyElixir.FactoryControlsTest do
             ]
           }
         },
-        "issueLabels" => %{"nodes" => [%{"id" => "lbl-other-team", "team" => %{"id" => "team-2"}}, %{"id" => "lbl-merge", "team" => %{"id" => "team-1"}}]}
+        "issueLabels" => %{
+          "nodes" => [
+            %{"id" => "lbl-blocked", "name" => "blocked", "parent" => %{"name" => "factory"}, "team" => %{"id" => "team-1"}},
+            %{"id" => "lbl-other-team", "name" => "merge", "parent" => %{"name" => "factory"}, "team" => %{"id" => "team-2"}},
+            %{"id" => "lbl-merge", "name" => "factory/merge", "team" => %{"id" => "team-1"}}
+          ]
+        }
       }
     }
 
@@ -192,6 +198,30 @@ defmodule SymphonyElixir.FactoryControlsTest do
 
     Process.put(:stage_results, [{:ok, put_in(lookup, ["data", "issueLabels", "nodes"], [])}])
     assert {:error, {:stage_label_not_found, "factory/rework"}} = Adapter.set_stage("issue-uuid", "In Progress", "rework")
+
+    # Plain labels to add: the team's own first, else the workspace's; every one must exist.
+    plain = %{
+      "data" => %{
+        "issueLabels" => %{
+          "nodes" => [
+            %{"id" => "appr-other", "name" => "needs-approval", "team" => %{"id" => "team-2"}},
+            %{"id" => "appr-team", "name" => "Needs-Approval", "team" => %{"id" => "team-1"}},
+            %{"id" => "ws-bug", "name" => "bug", "team" => nil}
+          ]
+        }
+      }
+    }
+
+    Process.put(:stage_results, [{:ok, lookup}, {:ok, plain}, {:ok, %{"data" => %{"issueUpdate" => %{"success" => true}}}}])
+    assert :ok = Adapter.set_stage("issue-uuid", "In Progress", "merge", add_labels: ["needs-approval", "bug"])
+    assert_receive {:graphql_called, _labels_query, %{names: ["needs-approval", "bug"]}}
+    assert_receive {:graphql_called, _mutation, %{labelIds: ["lbl-claude", "lbl-merge", "appr-team", "ws-bug"]}}
+
+    Process.put(:stage_results, [{:ok, lookup}, {:ok, plain}])
+    assert {:error, {:label_not_found, "auto-build"}} = Adapter.set_stage("issue-uuid", "In Progress", "merge", add_labels: ["auto-build"])
+
+    Process.put(:stage_results, [{:ok, lookup}, {:error, :down}])
+    assert {:error, :down} = Adapter.set_stage("issue-uuid", "In Progress", "merge", add_labels: ["bug"])
   end
 
   describe "dashboard controls" do

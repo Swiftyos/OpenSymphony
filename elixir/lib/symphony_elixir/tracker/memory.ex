@@ -56,7 +56,8 @@ defmodule SymphonyElixir.Tracker.Memory do
       Enum.map(configured_issues(), fn
         %Issue{id: ^issue_id, labels: labels} = issue ->
           labels = Enum.reject(labels || [], &(String.starts_with?(String.downcase(&1), prefix) or String.downcase(&1) in drop))
-          %{issue | state: state_name, labels: if(stage, do: labels ++ [prefix <> stage], else: labels)}
+          labels = if(stage, do: labels ++ [prefix <> stage], else: labels)
+          %{issue | state: state_name, labels: Enum.uniq(labels ++ Keyword.get(opts, :add_labels, []))}
 
         other ->
           other
@@ -84,14 +85,15 @@ defmodule SymphonyElixir.Tracker.Memory do
   end
 
   # Teams come from the configured issues' identifiers (`PAY-1` -> `PAY`).
-  @spec project_team_keys([String.t()]) :: {:ok, %{String.t() => [String.t()]}}
-  def project_team_keys(slugs) do
+  @spec project_info([String.t()]) :: {:ok, %{String.t() => map()}}
+  def project_info(slugs) do
     issues = configured_issues()
 
     {:ok,
      Map.new(slugs, fn slug ->
-       teams = for %Issue{project_slug: ^slug} = issue <- issues, team = SymphonyElixir.IssueStage.team(issue), uniq: true, do: team
-       {slug, teams}
+       mine = for %Issue{project_slug: ^slug} = issue <- issues, do: issue
+       teams = for issue <- mine, team = SymphonyElixir.IssueStage.team(issue), uniq: true, do: team
+       {slug, %{name: Enum.find_value(mine, & &1.project_name), teams: teams}}
      end)}
   end
 

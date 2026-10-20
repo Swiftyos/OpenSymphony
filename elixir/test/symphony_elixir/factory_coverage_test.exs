@@ -211,7 +211,7 @@ defmodule SymphonyElixir.FactoryCoverageTest do
 
       prompt = StagePrompt.render(issue("RAW-1", "Todo"))
       assert prompt =~ "Follow the workflow for this stage."
-      assert prompt =~ "- **Done** (you): when the work for this stage is done. Set state `Done` and remove any `factory/*` label."
+      assert prompt =~ "- `done` → **Done**: when the work for this stage is done."
     end
   end
 

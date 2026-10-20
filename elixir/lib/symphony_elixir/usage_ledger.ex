@@ -172,7 +172,7 @@ defmodule SymphonyElixir.UsageLedger do
 
     model =
       case backend do
-        "codex" -> codex_model(settings.codex.command)
+        "codex" -> settings.codex.model || codex_model(settings.codex.command)
         "claude" -> settings.claude.model
         "opencode" -> settings.opencode.model
         _ -> nil

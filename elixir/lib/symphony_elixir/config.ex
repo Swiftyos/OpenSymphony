@@ -188,14 +188,24 @@ defmodule SymphonyElixir.Config do
     command = settings!().codex.command
 
     case Schema.normalize_optional_effort(effort) do
-      nil ->
-        command
+      nil -> command
+      effort when effort in ["max", "xhigh"] -> with_codex_config(command, "model_reasoning_effort=xhigh")
+      normalized_effort -> with_codex_config(command, "model_reasoning_effort=" <> normalized_effort)
+    end
+  end
 
-      effort when effort in ["max", "xhigh"] ->
-        command <> " -c model_reasoning_effort=xhigh"
+  # A `-c` given after `app-server` discards every `-c` given before it, so the
+  # override goes where the command's own settings are: after `app-server` when
+  # they're there (or there are none), otherwise just before it.
+  defp with_codex_config(command, setting) do
+    case String.split(command, ~r/\sapp-server\b/, parts: 2) do
+      [before, rest] ->
+        if Regex.match?(~r/(^|\s)(-c|--config)(\s|=)/, before) and not Regex.match?(~r/(^|\s)(-c|--config)(\s|=)/, rest),
+          do: before <> " -c " <> setting <> " app-server" <> rest,
+          else: command <> " -c " <> setting
 
-      normalized_effort ->
-        command <> " -c model_reasoning_effort=" <> normalized_effort
+      [_whole] ->
+        command <> " -c " <> setting
     end
   end
 
@@ -240,6 +250,17 @@ defmodule SymphonyElixir.Config do
   @spec instance_name() :: String.t() | nil
   def instance_name do
     settings!().instance.name
+  end
+
+  @doc """
+  The configured brand logo's path (`instance.logo`, `~` expanded), or nil.
+  """
+  @spec instance_logo() :: Path.t() | nil
+  def instance_logo do
+    case settings() do
+      {:ok, %{instance: %{logo: logo}}} when is_binary(logo) -> Path.expand(logo)
+      _ -> nil
+    end
   end
 
   @spec log_dir() :: Path.t() | nil

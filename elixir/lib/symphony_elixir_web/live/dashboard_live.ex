@@ -567,7 +567,15 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <p class="empty-state">No agents are working right now.</p>
           <% else %>
             <div class="table-wrap">
-              <table class="data-table">
+              <table class="data-table sessions-table">
+                <colgroup>
+                  <col class="col-issue" />
+                  <col class="col-stage" />
+                  <col class="col-harness" />
+                  <col class="col-runtime" />
+                  <col class="col-update" />
+                  <col class="col-tokens" />
+                </colgroup>
                 <thead>
                   <tr>
                     <th>Issue</th>
@@ -808,7 +816,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp approvals(_payload, _now), do: []
 
   defp approval_item(issue, stage, definition, now) do
-    from = Definition.stage(definition, issue[:from])
+    # Held issues are listed under the stage they're leaving; `to` is the move.
+    {stage, from} =
+      case Definition.stage(definition, issue[:to]) do
+        %{} = target -> {target, stage}
+        nil -> {stage, Definition.stage(definition, issue[:from])}
+      end
 
     issue
     |> flow_item(now)

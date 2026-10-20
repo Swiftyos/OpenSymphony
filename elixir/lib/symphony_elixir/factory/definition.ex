@@ -191,6 +191,7 @@ defmodule SymphonyElixir.Factory.Definition do
       "paused" => false,
       "approval" => false,
       "approval_streak" => 0,
+      "checks" => [],
       "skill" => nil,
       "position" => %{"x" => x, "y" => y}
     }
@@ -216,6 +217,8 @@ defmodule SymphonyElixir.Factory.Definition do
       # A person approves before an issue leaves this stage.
       "approval" => Map.get(stage, "approval") == true,
       "approval_streak" => non_negative(Map.get(stage, "approval_streak")),
+      # Shell commands Symphony runs in the workspace before it moves an issue on.
+      "checks" => normalize_checks(Map.get(stage, "checks")),
       "position" => normalize_position(Map.get(stage, "position")),
       "skill" => normalize_skill(Map.get(stage, "skill"), stage |> Map.get("id") |> to_s() |> normalize())
     }
@@ -327,6 +330,17 @@ defmodule SymphonyElixir.Factory.Definition do
 
   defp autopilot_errors(%{"streak" => streak}) when is_integer(streak) and streak >= 1 and streak <= 100, do: []
   defp autopilot_errors(_autopilot), do: ["approvals in a row must be a whole number from 1 to 100"]
+
+  defp normalize_checks(checks) when is_list(checks) do
+    checks
+    |> Enum.filter(&is_binary/1)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.map(&String.slice(&1, 0, 500))
+    |> Enum.take(10)
+  end
+
+  defp normalize_checks(_checks), do: []
 
   defp non_negative(n) when is_integer(n) and n > 0, do: n
   defp non_negative(_n), do: 0

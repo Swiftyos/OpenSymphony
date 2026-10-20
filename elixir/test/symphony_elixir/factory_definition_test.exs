@@ -141,8 +141,10 @@ defmodule SymphonyElixir.FactoryDefinitionTest do
       assert prompt =~ "Work on PAY-1."
       assert prompt =~ "## Your current stage: Merge"
       assert prompt =~ "Run the land skill"
-      assert prompt =~ "- **Done** (you): The PR is merged. Set state `Done` and remove any `factory/*` label."
-      assert prompt =~ "- **Blocked** (you): Landing is blocked. Set state `In Progress` and label `factory/blocked`"
+      assert prompt =~ "- `done` → **Done**: The PR is merged."
+      assert prompt =~ "- `blocked` → **Blocked**: Landing is blocked."
+      assert prompt =~ ~s(write `.symphony/result.json`)
+      assert prompt =~ "Don't change the issue's state or labels"
     end
 
     test "a team's custom stage shapes its agents' prompts and only that team's" do
@@ -167,10 +169,10 @@ defmodule SymphonyElixir.FactoryDefinitionTest do
       prompt = PromptBuilder.build_prompt(issue("PAY-2", "In Progress", ["factory/qa"]))
       assert prompt =~ "## Your current stage: QA"
       assert prompt =~ "Run the e2e suite."
-      assert prompt =~ "- **In Review** (you): E2E suite is green."
+      assert prompt =~ "→ **In Review**: E2E suite is green."
 
       # Implement now offers the QA move for PAY, but not for WEB.
-      assert PromptBuilder.build_prompt(issue("PAY-3", "In Progress", [])) =~ "**QA** (you)"
+      assert PromptBuilder.build_prompt(issue("PAY-3", "In Progress", [])) =~ "→ **QA**"
       refute PromptBuilder.build_prompt(issue("WEB-3", "In Progress", [])) =~ "**QA**"
 
       # WEB has no `qa` stage, so the label doesn't match a stage there.

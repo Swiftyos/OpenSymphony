@@ -465,12 +465,14 @@ defmodule SymphonyElixir.Codex.AppServer do
     send_message(port, %{
       "method" => "thread/start",
       "id" => @thread_start_id,
-      "params" => %{
-        "approvalPolicy" => approval_policy,
-        "sandbox" => thread_sandbox,
-        "cwd" => workspace,
-        "dynamicTools" => DynamicTool.tool_specs()
-      }
+      "params" =>
+        %{
+          "approvalPolicy" => approval_policy,
+          "sandbox" => thread_sandbox,
+          "cwd" => workspace,
+          "dynamicTools" => DynamicTool.tool_specs()
+        }
+        |> put_model(Config.settings!().codex.model)
     })
 
     case await_response(port, @thread_start_id) do
@@ -484,6 +486,11 @@ defmodule SymphonyElixir.Codex.AppServer do
         other
     end
   end
+
+  # `codex.model` names the model explicitly: Codex otherwise uses the model
+  # from the host's ~/.codex/config.toml, whatever the command line says.
+  defp put_model(params, model) when is_binary(model) and model != "", do: Map.put(params, "model", model)
+  defp put_model(params, _model), do: params
 
   defp start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
     send_message(port, %{

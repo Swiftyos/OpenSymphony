@@ -30,17 +30,17 @@ defmodule SymphonyElixir.SecurityTest do
     def graphql(query, variables, _opts \\ []) do
       cond do
         query =~ "SymphonyMemberByEmail" -> member(String.downcase(variables[:email]))
-        query =~ "SymphonyStageLookup" -> {:ok, %{"data" => stage_lookup()}}
+        query =~ "SymphonyStageLookup" -> {:ok, %{"data" => stage_lookup(variables)}}
         query =~ "SymphonySetStage" -> {:ok, %{"data" => %{"issueUpdate" => %{"success" => true}}}}
         query =~ "SymphonyCreateComment" -> send_test({:comment, variables}) && {:ok, %{"data" => %{"commentCreate" => %{"success" => true}}}}
         true -> {:ok, %{"data" => %{}}}
       end
     end
 
-    defp stage_lookup do
+    defp stage_lookup(variables) do
       %{
         "issue" => %{"team" => %{"id" => "t-PAY", "states" => %{"nodes" => [%{"id" => "s"}]}}, "labels" => %{"nodes" => []}},
-        "issueLabels" => %{"nodes" => [%{"id" => "l", "team" => %{"id" => "t-PAY"}}]}
+        "issueLabels" => %{"nodes" => [%{"id" => "l", "name" => variables.stage, "parent" => %{"name" => "factory"}, "team" => %{"id" => "t-PAY"}}]}
       }
     end
 

@@ -27,7 +27,7 @@ defmodule SymphonyElixir.FactoryEditorTest do
           member(variables.email)
 
         query =~ "SymphonyStageLookup" ->
-          {:ok, %{"data" => stage_lookup()}}
+          {:ok, %{"data" => stage_lookup(variables)}}
 
         query =~ "SymphonySetStage" ->
           {:ok, %{"data" => %{"issueUpdate" => %{"success" => true}}}}
@@ -81,13 +81,13 @@ defmodule SymphonyElixir.FactoryEditorTest do
       {:ok, %{"data" => %{"users" => %{"nodes" => [user]}}}}
     end
 
-    defp stage_lookup do
+    defp stage_lookup(variables) do
       %{
         "issue" => %{
           "team" => %{"id" => "t-PAY", "states" => %{"nodes" => [%{"id" => "s"}]}},
           "labels" => %{"nodes" => [%{"id" => "keep", "name" => "bug"}, %{"id" => "appr", "name" => "Needs-Approval"}]}
         },
-        "issueLabels" => %{"nodes" => [%{"id" => "l", "team" => %{"id" => "t-PAY"}}]}
+        "issueLabels" => %{"nodes" => [%{"id" => "l", "name" => variables.stage, "parent" => %{"name" => "factory"}, "team" => %{"id" => "t-PAY"}}]}
       }
     end
   end
@@ -315,12 +315,12 @@ defmodule SymphonyElixir.FactoryEditorTest do
       prompt = StagePrompt.render(issue)
       assert prompt =~ "### Hand-off between stages"
       assert prompt =~ "Code travels on the branch `symphony/PAY-7`"
-      assert prompt =~ "add one new comment headed `## Implement`"
-      assert prompt =~ "A person approves your move from this stage"
-      assert prompt =~ "also add the `needs-approval` label"
+      assert prompt =~ "Your summary is the hand-off"
+      assert prompt =~ "posts your summary on the issue as `## Implement`"
+      assert prompt =~ "A person approves the move before the next stage starts"
 
       # A normal stage still makes its own moves.
-      assert StagePrompt.render(%{issue | labels: ["factory/merge"]}) =~ "Only make moves marked for agents"
+      refute StagePrompt.render(%{issue | labels: ["factory/merge"]}) =~ "A person approves the move"
 
       # The ledger notices the approval flag without counting a transition.
       UsageLedger.observe_issue(issue)
@@ -436,6 +436,11 @@ defmodule SymphonyElixir.FactoryEditorTest do
       UsageLedger.observe_issue(held)
       assert UsageLedger.previous_node("PAY-3") == "review"
       assert UsageLedger.previous_node("PAY-404") == nil
+
+      # On the diagram it waits in the stage it's leaving, pointing where it goes.
+      flow = FactoryPresenter.payload([], Config.settings!()).flows["PAY"]
+      assert [%{issue: "PAY-3", awaiting: true, to: "merge"}] = flow.nodes["review"].issues
+      assert flow.nodes["merge"].issues == []
 
       {:ok, view, html} = live(session_for(mia), "/")
       assert html =~ "Waiting for your approval"

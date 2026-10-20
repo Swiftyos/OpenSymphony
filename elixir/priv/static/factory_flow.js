@@ -315,7 +315,15 @@
     (data.teams || []).forEach(function (t) {
       if (t.kind === "project" && issueCount(flows[t.key]) > (best ? issueCount(flows[best]) : 0)) best = t.key;
     });
-    return best || data.team;
+    if (best) return best;
+    // Nothing has run yet: a project with its own flow says more than the default.
+    if (data.team === "DEFAULT") {
+      var own = (data.teams || []).filter(function (t) {
+        return t.kind === "project" && t.custom;
+      })[0];
+      if (own) return own.key;
+    }
+    return data.team;
   }
 
   function Flow(opts) {
@@ -351,6 +359,9 @@
     this.canvas.appendChild(this.buildZoomControls());
     slot.appendChild(this.canvas);
     this.view = null; // null = fit the whole flow; else {x, y, w, h} in diagram units
+    window.addEventListener("resize", function () {
+      if (document.documentElement.classList.contains("fx-cinema") && self.fit) self.applyView();
+    });
 
     // ⌘/Ctrl + wheel (and trackpad pinch, which arrives as ctrl+wheel) zooms at
     // the pointer. Once zoomed in, a plain wheel or two-finger scroll pans;
@@ -1130,6 +1141,9 @@
     var root = document.documentElement;
     on = on === undefined ? !root.classList.contains("fx-cinema") : on;
     root.classList.toggle("fx-cinema", on);
+    // The canvas changed shape: start again from the whole flow.
+    this.view = null;
+    if (this.canvas && this.fit) this.applyView();
     if (this.cinemaButton) {
       this.cinemaButton.textContent = on ? "⤡" : "⤢";
       this.cinemaButton.setAttribute("aria-label", on ? "Exit cinema mode (T)" : "Cinema mode (T)");
@@ -1142,14 +1156,31 @@
   };
 
   Flow.prototype.currentView = function () {
-    return this.view || this.fit || { x: 0, y: 0, w: 1000, h: 400 };
+    return this.view || this.fitView();
+  };
+
+  // The whole flow. In cinema mode the canvas has its own height, so the fit
+  // widens or heightens (centred) to the canvas's shape: the diagram fills it
+  // and every corner can be panned into.
+  Flow.prototype.fitView = function () {
+    var f = this.fit || { x: 0, y: 0, w: 1000, h: 400 };
+    if (!document.documentElement.classList.contains("fx-cinema")) return f;
+    var box = this.canvas.getBoundingClientRect();
+    if (!box.width || !box.height) return f;
+    var aspect = box.width / box.height;
+    if (f.w / f.h < aspect) {
+      var w = f.h * aspect;
+      return { x: f.x - (w - f.w) / 2, y: f.y, w: w, h: f.h };
+    }
+    var h = f.w / aspect;
+    return { x: f.x, y: f.y - (h - f.h) / 2, w: f.w, h: h };
   };
 
   // The view keeps the fit's aspect ratio, so the diagram's height never jumps.
   Flow.prototype.applyView = function () {
     var v = this.currentView();
     this.svg.setAttribute("viewBox", v.x + " " + v.y + " " + v.w + " " + v.h);
-    var zoom = this.fit ? Math.round((this.fit.w / v.w) * 100) : 100;
+    var zoom = this.fit ? Math.round((this.fitView().w / v.w) * 100) : 100;
     if (this.zoomLabel) this.zoomLabel.textContent = this.view ? zoom + "%" : "Fit";
     this.canvas.classList.toggle("is-zoomed", !!this.view);
   };
@@ -1158,7 +1189,8 @@
   Flow.prototype.zoomAt = function (at, factor) {
     if (!this.fit) return;
     var v = this.currentView();
-    var w = Math.min(Math.max(v.w * factor, this.fit.w / MAX_ZOOM), this.fit.w / MIN_ZOOM);
+    var base = this.fitView();
+    var w = Math.min(Math.max(v.w * factor, base.w / MAX_ZOOM), base.w / MIN_ZOOM);
     var k = w / v.w;
     var p = at || { x: v.x + v.w / 2, y: v.y + v.h / 2 };
     this.view = { x: p.x - (p.x - v.x) * k, y: p.y - (p.y - v.y) * k, w: w, h: v.h * k };
@@ -1477,7 +1509,10 @@
       line.appendChild(idEl);
       if (issue.backend) line.appendChild(el("span", "fx-dot h-" + issue.backend));
       line.appendChild(el("span", "fx-issue-title", issue.title || ""));
-      if (issue.awaiting) line.appendChild(el("span", "fx-awaiting", "✋ approve"));
+      if (issue.awaiting) {
+        var next = issue.to && self.stageById(issue.to);
+        line.appendChild(el("span", "fx-awaiting", "✋ approve" + (next ? " → " + next.name : "")));
+      }
       line.appendChild(el("span", "fx-issue-age", since(issue.since_ms)));
       row.appendChild(line);
 
@@ -1490,7 +1525,7 @@
         }));
         if (issue.from) {
           var origin = self.stageById(issue.from);
-          verdict.appendChild(button("↩ Send back to " + (origin ? origin.name : issue.from), "fx-action", function () {
+          verdict.appendChild(button("↩ Keep in " + (origin ? origin.name : issue.from), "fx-action", function () {
             self.opts.push("send_back_issue", { id: issue.id }, function () {});
             self.opts.toast("Sent " + issue.issue + " back", "ok");
           }));
@@ -1689,6 +1724,24 @@
       );
     }
     form.appendChild(instructionsField);
+
+    if (DISPATCHABLE[stage.kind]) {
+      var checks = el("textarea", "fx-textarea fx-mono");
+      checks.rows = 3;
+      checks.value = (stage.checks || []).join("\n");
+      checks.placeholder = "services/test.sh -new-from origin/main";
+      checks.addEventListener("input", function () {
+        stage.checks = checks.value
+          .split("\n")
+          .map(function (line) {
+            return line.trim();
+          })
+          .filter(Boolean);
+      });
+      form.appendChild(
+        field("Checks before moving on", checks, "One shell command per line. Symphony runs them in the issue's workspace when the agent finishes; if any fails, the agent is told why and keeps working.")
+      );
+    }
 
     if (stage.skill && stage.skill.content) {
       var skillField = el("div", "fx-field");

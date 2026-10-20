@@ -197,7 +197,7 @@ defmodule SymphonyElixirWeb.UsersLive do
       |> Kernel.++(Map.keys(seen) ++ Store.projects())
       |> Enum.filter(&is_binary/1)
       |> Enum.uniq()
-      |> Enum.map(&%{slug: &1, name: get_in(seen, [&1, :name]) || &1})
+      |> Enum.map(&%{slug: &1, name: get_in(seen, [&1, :name]) || SymphonyElixir.LabelSync.project_names()[&1] || &1})
       |> Enum.sort_by(&String.downcase(&1.name))
 
     {teams, projects}

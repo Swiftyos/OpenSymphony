@@ -23,6 +23,7 @@ defmodule SymphonyElixir.LabelSyncTest do
 
     on_exit(fn ->
       Store.reset()
+      :persistent_term.erase({LabelSync, :project_names})
 
       Enum.each(saved, fn
         {key, nil} -> Application.delete_env(:symphony_elixir, key)
@@ -43,7 +44,7 @@ defmodule SymphonyElixir.LabelSyncTest do
 
   defp linear(opts) do
     existing_plain = Keyword.get(opts, :plain, [])
-    project_reply = Keyword.get(opts, :projects, {:ok, %{"data" => %{"projects" => %{"nodes" => [%{"slugId" => "checkout", "teams" => %{"nodes" => [%{"key" => "OPS"}]}}]}}}})
+    project_reply = Keyword.get(opts, :projects, {:ok, %{"data" => %{"projects" => %{"nodes" => [%{"slugId" => "checkout", "name" => "Checkout API", "teams" => %{"nodes" => [%{"key" => "OPS"}]}}]}}}})
 
     reply(fn query, variables ->
       cond do
@@ -67,6 +68,8 @@ defmodule SymphonyElixir.LabelSyncTest do
     assert "needs-approval" in created
     assert_receive {:graphql, _, %{slugs: ["checkout"]}}
     assert_receive {:graphql, _, %{input: %{name: "needs-approval", teamId: "t1"}}}
+    # The project's Linear name is remembered for the dashboard.
+    assert LabelSync.project_names()["checkout"] == "Checkout API"
   end
 
   test "a flow without stage labels only needs the plain labels" do
@@ -97,10 +100,10 @@ defmodule SymphonyElixir.LabelSyncTest do
     assert capture_log(fn -> assert {:error, :down} = LabelSync.sync() end) =~ "couldn't look up project teams"
 
     linear(projects: {:ok, %{"data" => nil}})
-    assert {:error, {:unexpected_response, _}} = Adapter.project_team_keys(["checkout"])
-    assert {:ok, %{}} = Adapter.project_team_keys([])
+    assert {:error, {:unexpected_response, _}} = Adapter.project_info(["checkout"])
+    assert {:ok, %{}} = Adapter.project_info([])
 
-    projects = {:ok, %{"data" => %{"projects" => %{"nodes" => [%{"slugId" => "checkout", "teams" => %{"nodes" => [%{"key" => "OPS"}]}}]}}}}
+    projects = {:ok, %{"data" => %{"projects" => %{"nodes" => [%{"slugId" => "checkout", "name" => "Checkout API", "teams" => %{"nodes" => [%{"key" => "OPS"}]}}]}}}}
 
     reply(fn query, _variables ->
       if query =~ "SymphonyProjectTeams", do: projects, else: {:ok, %{"data" => %{"teams" => %{"nodes" => []}}}}
@@ -129,8 +132,9 @@ defmodule SymphonyElixir.LabelSyncTest do
 
   test "the memory tracker answers from its issues" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
-    Application.put_env(:symphony_elixir, :memory_tracker_issues, [%Issue{id: "1", identifier: "PAY-1", project_slug: "checkout"}])
-    assert Tracker.project_team_keys(["checkout", "none"]) == {:ok, %{"checkout" => ["PAY"], "none" => []}}
+    issue = %Issue{id: "1", identifier: "PAY-1", project_slug: "checkout", project_name: "Checkout"}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    assert Tracker.project_info(["checkout", "none"]) == {:ok, %{"checkout" => %{name: "Checkout", teams: ["PAY"]}, "none" => %{name: nil, teams: []}}}
     assert Tracker.ensure_labels("PAY", ["auto-build"]) == {:ok, []}
   after
     Application.delete_env(:symphony_elixir, :memory_tracker_issues)

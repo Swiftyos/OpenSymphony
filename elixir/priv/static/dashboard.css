@@ -133,6 +133,19 @@ pre {
   min-width: 0;
 }
 
+.brand-logo {
+  height: 28px;
+  width: auto;
+  max-width: 140px;
+  flex: none;
+  object-fit: contain;
+}
+
+.login-logo {
+  height: 34px;
+  margin-bottom: 8px;
+}
+
 .brand-mark {
   width: 32px;
   height: 32px;
@@ -316,8 +329,13 @@ pre {
   grid-template-columns: minmax(0, 1fr);
 }
 
-.fx-cinema .flow-panel .fx-diagram-slot {
-  min-height: 60vh;
+/* The canvas takes the screen height and the diagram fills all of it. */
+.fx-cinema .fx-canvas {
+  height: max(360px, calc((100vh - 230px) * 0.67));
+}
+
+.fx-cinema .fx-canvas .fx-diagram {
+  height: 100%;
 }
 
 .fx-cinema .attention-panel {
@@ -1194,6 +1212,40 @@ pre {
   padding: 10px 16px;
   border-bottom: 1px solid var(--line);
   vertical-align: top;
+}
+
+/* Live sessions: fixed columns so live updates wrap instead of reflowing. */
+.sessions-table {
+  table-layout: fixed;
+}
+
+.sessions-table td {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.sessions-table .col-issue {
+  width: 24%;
+}
+
+.sessions-table .col-stage {
+  width: 12%;
+}
+
+.sessions-table .col-harness {
+  width: 14%;
+}
+
+.sessions-table .col-runtime {
+  width: 11%;
+}
+
+.sessions-table .col-update {
+  width: 27%;
+}
+
+.sessions-table .col-tokens {
+  width: 12%;
 }
 
 .data-table tbody tr:last-child td {
@@ -2331,6 +2383,11 @@ a.brand:hover {
   border-radius: 10px;
   background: var(--raised);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+}
+
+.fx-mono {
+  font-family: var(--mono);
+  font-size: 0.78rem;
 }
 
 .fx-input-narrow {

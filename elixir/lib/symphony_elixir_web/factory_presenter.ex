@@ -81,6 +81,7 @@ defmodule SymphonyElixirWeb.FactoryPresenter do
   # Configured projects, projects with work, and projects with their own flow.
   defp project_entries(settings) do
     seen = UsageLedger.projects()
+    linear_names = SymphonyElixir.LabelSync.project_names()
 
     settings.tracker.projects
     |> List.wrap()
@@ -92,7 +93,8 @@ defmodule SymphonyElixirWeb.FactoryPresenter do
     |> Enum.map(fn slug ->
       info = Map.get(seen, slug, %{name: nil, teams: []})
       key = Store.project_scope(slug)
-      %{key: key, kind: "project", slug: slug, name: info.name || slug, teams: info.teams, custom: Store.custom?(key)}
+      name = info.name || linear_names[slug] || slug
+      %{key: key, kind: "project", slug: slug, name: name, teams: info.teams, custom: Store.custom?(key)}
     end)
     |> Enum.sort_by(&String.downcase(&1.name))
   end
@@ -113,7 +115,18 @@ defmodule SymphonyElixirWeb.FactoryPresenter do
 
   defp stage_flow(definition, issues, edges, running_by_issue) do
     ids = MapSet.new(definition["stages"], & &1["id"])
-    members = issues |> Enum.filter(&MapSet.member?(ids, &1.node)) |> Enum.group_by(& &1.node)
+
+    # An issue held for approval is shown in the stage it's waiting to leave,
+    # with `to` naming where it goes once approved.
+    members =
+      issues
+      |> Enum.map(fn issue ->
+        if issue[:awaiting_approval] && MapSet.member?(ids, issue[:from]),
+          do: issue |> Map.put(:to, issue.node) |> Map.put(:node, issue[:from]),
+          else: issue
+      end)
+      |> Enum.filter(&MapSet.member?(ids, &1.node))
+      |> Enum.group_by(& &1.node)
 
     nodes =
       Map.new(ids, fn id ->
@@ -148,7 +161,8 @@ defmodule SymphonyElixirWeb.FactoryPresenter do
       since_ms: issue.since_ms,
       backend: agent && agent.backend,
       awaiting: issue[:awaiting_approval] == true,
-      from: issue[:from]
+      from: issue[:from],
+      to: issue[:to]
     }
   end
 

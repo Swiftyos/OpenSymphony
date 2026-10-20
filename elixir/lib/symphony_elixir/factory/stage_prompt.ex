@@ -5,8 +5,13 @@ defmodule SymphonyElixir.Factory.StagePrompt do
   move allowed from it, with the exact Linear state and stage label for each.
 
   Stages hand off through two channels: the Linear issue (each stage reads the
-  earlier stages' comments and posts its own, headed with its name) and the
-  issue's git branch (`symphony/<ID>`), which carries the code.
+  earlier stages' comments) and the issue's git branch (`symphony/<ID>`),
+  which carries the code.
+
+  Agents never change the issue's state or labels. They finish by writing
+  `.symphony/result.json` with their move and summary, and Symphony checks it,
+  posts the summary as the stage's comment, and moves the issue
+  (`SymphonyElixir.StageResult`).
   """
 
   alias SymphonyElixir.Factory.Definition
@@ -59,7 +64,7 @@ defmodule SymphonyElixir.Factory.StagePrompt do
     |> Enum.join("\n")
   end
 
-  defp handoff_section(issue, stage) do
+  defp handoff_section(issue, _stage) do
     branch = "symphony/#{issue.identifier}"
 
     """
@@ -69,53 +74,62 @@ defmodule SymphonyElixir.Factory.StagePrompt do
       `## <stage name>` (the newest one wins when a stage ran more than once). Read them all before you
       start, and build on them instead of redoing their work.
     - **Code travels on the branch `#{branch}`.** If it exists on `origin`, check it out and start from it.
-      Commit and push your changes to it before you move the issue.
-    - **Post your output.** When your work is done, add one new comment headed `## #{stage["name"]}`: what
-      you did, what you found or decided, and what the next stage needs (file paths, commands, results,
-      open questions). The next stage reads only the issue and the branch, so put everything it needs there.
+      Commit and push your changes to it before you finish.
+    - **Your summary is the hand-off.** It becomes this stage's comment on the issue: what you did, what
+      you found or decided, and what the next stage needs (file paths, commands, results, open
+      questions). The next stage reads only the issue and the branch, so put everything it needs there.
     """
   end
 
-  defp move_rule(definition, stage, prefix) do
-    base =
-      "Move the issue by setting its Linear state and `#{prefix}/*` stage label exactly as listed. " <>
-        "Only make moves marked for agents; moves marked for humans are theirs to make. " <>
-        "If none of these fit, record why in your stage comment and stop."
+  defp move_rule(definition, stage, _prefix) do
+    checks =
+      case stage["checks"] || [] do
+        [] -> ""
+        list -> "\n\nBefore it moves the issue, Symphony runs these checks in your workspace; all must pass:\n" <> Enum.map_join(list, "\n", &("- `" <> &1 <> "`"))
+      end
 
-    if Definition.requires_approval?(definition, stage) do
-      base <>
-        "\n\n**A person approves your move from this stage.** Make the move as usual, then also add the " <>
-        "`#{IssueStage.approval_label()}` label to the issue. Say in your stage comment which move you made and why. " <>
-        "The issue waits there until a person approves it or sends it back to this stage."
-    else
-      base
-    end
+    approval =
+      if Definition.requires_approval?(definition, stage),
+        do: "\n\nA person approves the move before the next stage starts; say clearly in your summary why you chose it.",
+        else: ""
+
+    """
+    ### Finishing this stage
+
+    Don't change the issue's state or labels, and don't post the stage comment yourself: Symphony does both.
+    When your work is done, write `.symphony/result.json` in the workspace root:
+
+        {"move": "<one of the stage ids above that you can move to>", "summary": "<markdown hand-off>"}
+
+    Symphony checks the move is allowed, posts your summary on the issue as `## #{stage["name"]}`, and moves the
+    issue. If it can't, it tells you why and you fix it.#{checks}#{approval}
+    """
   end
 
-  defp moves(definition, stage, prefix) do
+  defp moves(definition, stage, _prefix) do
     case Definition.transitions_from(definition, stage["id"]) do
       [] ->
         "- None. This stage ends the flow."
 
       transitions ->
-        Enum.map_join(transitions, "\n", &move_line(definition, &1, prefix))
+        Enum.map_join(transitions, "\n", &move_line(definition, &1))
     end
   end
 
-  defp move_line(definition, transition, prefix) do
+  defp move_line(definition, transition) do
     target = Definition.stage(definition, transition["to"])
-    who = if transition["by"] == "agent", do: "you", else: "a human"
     criteria = blank_or(transition["criteria"], "when the work for this stage is done")
-    "- **#{target["name"]}** (#{who}): #{criteria}. Set state `#{target["linear_state"]}`#{label_text(target, prefix)}."
+
+    case transition["by"] do
+      "agent" -> "- `#{target["id"]}` → **#{target["name"]}**: #{criteria}."
+      _ -> "- **#{target["name"]}** (a person moves it, not you): #{criteria}."
+    end
   end
 
   defp skill_section(%{"skill" => %{"path" => path, "content" => content}}),
     do: "### Skill for this stage (#{path})\n\n#{String.trim(content)}\n"
 
   defp skill_section(_stage), do: ""
-
-  defp label_text(%{"label" => label}, prefix) when is_binary(label), do: " and label `#{prefix}/#{label}` (remove other `#{prefix}/*` labels)"
-  defp label_text(_target, prefix), do: " and remove any `#{prefix}/*` label"
 
   defp blank_or(value, fallback) when is_binary(value), do: if(String.trim(value) == "", do: fallback, else: String.trim(value))
   defp blank_or(_value, fallback), do: fallback

@@ -9,12 +9,14 @@ defmodule SymphonyElixir.AgentRunner do
   alias SymphonyElixir.AppServer
   alias SymphonyElixir.ClaudeCode.Tooling, as: ClaudeCodeTooling
   alias SymphonyElixir.Codex.AppServer, as: CodexAppServer
+  alias SymphonyElixir.Factory.Definition
   alias SymphonyElixir.IssueConfig
   alias SymphonyElixir.IssueStage
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.OpenCode.Tooling
   alias SymphonyElixir.PromptBuilder
   alias SymphonyElixir.Sandbox
+  alias SymphonyElixir.StageResult
   alias SymphonyElixir.Tracker
   alias SymphonyElixir.Workspace
 
@@ -132,6 +134,8 @@ defmodule SymphonyElixir.AgentRunner do
     issue_config = Keyword.fetch!(opts, :issue_config)
     max_turns = Keyword.get(opts, :max_turns, issue_config.settings.agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
+    StageResult.exclude_from_git(workspace)
+    issue = pick_up(issue)
 
     with {:ok, session} <-
            CodexAppServer.start_session(workspace,
@@ -161,7 +165,15 @@ defmodule SymphonyElixir.AgentRunner do
            ) do
       Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
 
-      case continue_with_issue?(issue, issue_state_fetcher) do
+      case after_turn(issue, workspace, issue_state_fetcher) do
+        {:retry, feedback} when turn_number < max_turns ->
+          next_opts = Keyword.put(opts, :result_feedback, feedback)
+          {recipient, fetcher} = {codex_update_recipient, issue_state_fetcher}
+          do_run_codex_turns(app_session, workspace, issue, recipient, next_opts, fetcher, turn_number + 1, max_turns)
+
+        {:retry, _feedback} ->
+          :ok
+
         {:continue, refreshed_issue} when turn_number < max_turns ->
           Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
 
@@ -170,7 +182,7 @@ defmodule SymphonyElixir.AgentRunner do
             workspace,
             refreshed_issue,
             codex_update_recipient,
-            opts,
+            Keyword.delete(opts, :result_feedback),
             issue_state_fetcher,
             turn_number + 1,
             max_turns
@@ -204,6 +216,9 @@ defmodule SymphonyElixir.AgentRunner do
       account: Keyword.get(opts, :account)
     ]
 
+    StageResult.exclude_from_git(workspace)
+    issue = pick_up(issue)
+
     with {:ok, session} <- AppServer.start_session(workspace, session_opts) do
       try do
         do_run_agent_turns(
@@ -235,7 +250,15 @@ defmodule SymphonyElixir.AgentRunner do
            ) do
       Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
 
-      case continue_with_issue?(issue, issue_state_fetcher) do
+      case after_turn(issue, workspace, issue_state_fetcher) do
+        {:retry, feedback} when turn_number < max_turns ->
+          next_opts = Keyword.put(opts, :result_feedback, feedback)
+          {recipient, fetcher} = {agent_update_recipient, issue_state_fetcher}
+          do_run_agent_turns(app_session, workspace, issue, recipient, next_opts, fetcher, turn_number + 1, max_turns)
+
+        {:retry, _feedback} ->
+          :ok
+
         {:continue, refreshed_issue} when turn_number < max_turns ->
           Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
 
@@ -244,7 +267,7 @@ defmodule SymphonyElixir.AgentRunner do
             workspace,
             refreshed_issue,
             agent_update_recipient,
-            opts,
+            Keyword.delete(opts, :result_feedback),
             issue_state_fetcher,
             turn_number + 1,
             max_turns
@@ -264,35 +287,77 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp build_codex_turn_prompt(issue, opts, 1, _max_turns), do: PromptBuilder.build_prompt(issue, opts)
+  defp build_codex_turn_prompt(issue, opts, turn_number, max_turns), do: build_agent_turn_prompt(issue, opts, turn_number, max_turns)
 
-  defp build_codex_turn_prompt(issue, _opts, turn_number, max_turns) do
-    """
-    Continuation guidance:
+  # Symphony moves the issue: a result file the agent wrote decides the move;
+  # without one, the agent keeps working while the issue stays in its stage.
+  defp after_turn(issue, workspace, issue_state_fetcher) do
+    case StageResult.process(issue, workspace) do
+      {:moved, _target} -> {:done, issue}
+      {:rejected, feedback} -> {:retry, feedback}
+      :none -> issue |> continue_with_issue?(issue_state_fetcher) |> hold_unapproved_move(issue)
+    end
+  end
 
-    - The previous agent turn completed normally, but the Linear issue is still in an active state.
-    - This is continuation turn ##{turn_number} of #{max_turns} for the current agent run.
-    - Current Linear state: #{issue.state}; factory stage: #{IssueStage.stage(issue) || "none"}.
-    - Your allowed moves are in the "Your current stage" section; re-read it if you are unsure what comes next.
-    - Resume from the current workspace and workpad state instead of restarting from scratch.
-    - The original task instructions and prior turn context are already present in this thread, so do not restate them before acting.
-    - Focus on the remaining ticket work and do not end the turn while the issue stays active unless you are truly blocked.
-    """
+  # Agents are told not to move issues, but if one does, a move out of a stage
+  # that needs approval is still held for a person.
+  defp hold_unapproved_move({:done, %Issue{} = moved} = outcome, issue) do
+    definition = IssueStage.definition(issue)
+    from = IssueStage.stage_definition(issue)
+    to = IssueStage.stage_definition(moved)
+
+    moved_out? = from && to && from["id"] != to["id"]
+
+    if moved_out? && Definition.requires_approval?(definition, from) && not IssueStage.awaiting_approval?(moved) do
+      Logger.warning("Agent moved #{issue_context(moved)} from=#{from["id"]} to=#{to["id"]} itself; holding it for approval")
+      Tracker.set_stage(moved.id, moved.state, to["label"], add_labels: [IssueStage.approval_label()])
+      note = "_Symphony: the agent moved this from #{from["name"]} to #{to["name"]} itself. Held for a person to approve._"
+      Tracker.create_comment(moved.id, note)
+    end
+
+    outcome
+  end
+
+  defp hold_unapproved_move(outcome, _issue), do: outcome
+
+  # An issue waiting in a queue stage with one agent connection out (Todo ->
+  # Research) is picked up by Symphony itself, so no agent turn is spent on it.
+  defp pick_up(%Issue{} = issue) do
+    definition = IssueStage.definition(issue)
+
+    with %{"kind" => "queue", "id" => from} <- IssueStage.stage_definition(issue),
+         [%{"to" => to}] <- for(t <- Definition.transitions_from(definition, from), t["by"] == "agent", do: t),
+         %{} = target <- Definition.stage(definition, to),
+         :ok <- Tracker.set_stage(issue.id, target["linear_state"], target["label"]) do
+      Logger.info("Symphony picked up #{issue_context(issue)} from=#{from} to=#{to}")
+      prefix = IssueStage.label_prefix() <> "/"
+      labels = Enum.reject(issue.labels, &String.starts_with?(String.downcase(&1), prefix))
+      %{issue | state: target["linear_state"], labels: if(target["label"], do: labels ++ [prefix <> target["label"]], else: labels)}
+    else
+      _ -> issue
+    end
   end
 
   defp build_agent_turn_prompt(issue, opts, 1, _max_turns), do: PromptBuilder.build_prompt(issue, opts)
 
-  defp build_agent_turn_prompt(issue, _opts, turn_number, max_turns) do
+  defp build_agent_turn_prompt(issue, opts, turn_number, max_turns) do
+    case Keyword.get(opts, :result_feedback) do
+      nil -> continuation_prompt(issue, turn_number, max_turns)
+      feedback -> "Symphony didn't accept your stage result:\n\n#{feedback}\n\nFix this, then write `.symphony/result.json` again."
+    end
+  end
+
+  defp continuation_prompt(issue, turn_number, max_turns) do
     """
     Continuation guidance:
 
-    - The previous agent turn completed normally, but the Linear issue is still in an active state.
+    - The previous agent turn completed normally, but the issue is still in this stage.
     - This is continuation turn ##{turn_number} of #{max_turns} for the current agent run.
     - Current Linear state: #{issue.state}; factory stage: #{IssueStage.stage(issue) || "none"}.
-    - Your allowed moves are in the "Your current stage" section; re-read it if you are unsure what comes next.
-    - Resume from the current workspace and workpad state instead of restarting from scratch.
+    - When this stage's work is done, write `.symphony/result.json` with your move and summary (see "Your current stage"); Symphony moves the issue.
+    - Resume from the current workspace state instead of restarting from scratch.
     - The original task instructions and prior turn context are already present in this thread, so do not restate them before acting.
-    - Focus on the remaining ticket work and do not end the turn while the issue stays active unless you are truly blocked.
+    - Focus on the remaining work and do not end the turn while the issue stays in this stage unless you are truly blocked.
     """
   end
 

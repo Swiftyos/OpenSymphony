@@ -204,7 +204,8 @@ defmodule SymphonyElixirWeb.AuthController do
       <body>
         <main class="login-shell">
           <div class="login-card">
-            <svg class="brand-mark login-mark" viewBox="0 0 32 32" aria-hidden="true">
+            <img :if={is_binary(SymphonyElixir.Config.instance_logo())} class="brand-logo login-logo" src="/branding/logo" alt="" />
+            <svg :if={!is_binary(SymphonyElixir.Config.instance_logo())} class="brand-mark login-mark" viewBox="0 0 32 32" aria-hidden="true">
               <path d="M6 22 L13 10 L19 18 L26 8" />
               <circle cx="6" cy="22" r="2.6" />
               <circle cx="13" cy="10" r="2.6" />

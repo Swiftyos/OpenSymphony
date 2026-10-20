@@ -61,6 +61,10 @@ defmodule SymphonyElixir.Linear.Adapter do
     issueLabels(first: 50, filter: {or: [{name: {eqIgnoreCase: $flat}}, {name: {eqIgnoreCase: $stage}, parent: {name: {eqIgnoreCase: $prefix}}}]}) {
       nodes {
         id
+        name
+        parent {
+          name
+        }
         team {
           id
         }
@@ -129,6 +133,8 @@ defmodule SymphonyElixir.Linear.Adapter do
     with {:ok, response} <- client_module().graphql(@stage_lookup_query, variables, graphql_opts),
          {:ok, state_id} <- stage_state_id(response),
          {:ok, label_ids} <- stage_label_ids(response, prefix, stage, Keyword.get(opts, :drop_labels, [])),
+         {:ok, extra_ids} <- labels_by_name(Keyword.get(opts, :add_labels, []), get_in(response, ["data", "issue", "team", "id"]), graphql_opts),
+         label_ids = Enum.uniq(label_ids ++ extra_ids),
          {:ok, update} <-
            client_module().graphql(
              @set_stage_mutation,
@@ -162,7 +168,11 @@ defmodule SymphonyElixir.Linear.Adapter do
 
       _stage ->
         team_id = get_in(response, ["data", "issue", "team", "id"])
-        candidates = get_in(response, ["data", "issueLabels", "nodes"]) || []
+        # Never trust the filter alone: keep only labels that really are this
+        # stage (`<prefix>/<stage>` flat, or `<stage>` inside the group).
+        candidates =
+          (get_in(response, ["data", "issueLabels", "nodes"]) || [])
+          |> Enum.filter(&stage_label_named?(&1, prefix, stage))
 
         label =
           Enum.find(candidates, &(get_in(&1, ["team", "id"]) == team_id)) ||
@@ -173,6 +183,48 @@ defmodule SymphonyElixir.Linear.Adapter do
           _ -> {:error, {:stage_label_not_found, "#{prefix}/#{stage}"}}
         end
     end
+  end
+
+  @labels_by_name_query """
+  query SymphonyLabelsByName($names: [String!]!) {
+    issueLabels(first: 50, filter: {name: {in: $names}}) {
+      nodes {
+        id
+        name
+        team {
+          id
+        }
+      }
+    }
+  }
+  """
+
+  # Plain labels to add (e.g. the approval label): the team's own, else the
+  # workspace's. Every name must exist.
+  defp labels_by_name([], _team_id, _opts), do: {:ok, []}
+
+  defp labels_by_name(names, team_id, opts) do
+    with {:ok, response} <- client_module().graphql(@labels_by_name_query, %{names: names}, opts) do
+      nodes = get_in(response, ["data", "issueLabels", "nodes"]) || []
+
+      Enum.reduce_while(names, {:ok, []}, &add_label_id(&1, &2, nodes, team_id))
+    end
+  end
+
+  defp add_label_id(name, {:ok, ids}, nodes, team_id) do
+    matching = Enum.filter(nodes, &(String.downcase(&1["name"] || "") == String.downcase(name)))
+
+    case Enum.find(matching, &(get_in(&1, ["team", "id"]) == team_id)) || Enum.find(matching, &is_nil(&1["team"])) do
+      %{"id" => id} -> {:cont, {:ok, ids ++ [id]}}
+      nil -> {:halt, {:error, {:label_not_found, name}}}
+    end
+  end
+
+  defp stage_label_named?(label, prefix, stage) do
+    name = String.downcase(label["name"] || "")
+    parent = String.downcase(get_in(label, ["parent", "name"]) || "")
+    stage = String.downcase(stage)
+    name == prefix <> "/" <> stage or (name == stage and parent == prefix)
   end
 
   defp kept_label_ids(labels, prefix, drop) do
@@ -295,6 +347,7 @@ defmodule SymphonyElixir.Linear.Adapter do
     projects(filter: {slugId: {in: $slugs}}, first: 50) {
       nodes {
         slugId
+        name
         teams(first: 50) {
           nodes {
             key
@@ -306,15 +359,16 @@ defmodule SymphonyElixir.Linear.Adapter do
   """
 
   @doc """
-  The keys of the teams each project (by slug) belongs to.
+  Each project's (by slug) name and the keys of the teams it belongs to.
   """
-  @spec project_team_keys([String.t()]) :: {:ok, %{String.t() => [String.t()]}} | {:error, term()}
-  def project_team_keys([]), do: {:ok, %{}}
+  @spec project_info([String.t()]) ::
+          {:ok, %{String.t() => %{name: String.t() | nil, teams: [String.t()]}}} | {:error, term()}
+  def project_info([]), do: {:ok, %{}}
 
-  def project_team_keys(slugs) when is_list(slugs) do
+  def project_info(slugs) when is_list(slugs) do
     case client_module().graphql(@project_teams_query, %{slugs: slugs}) do
       {:ok, %{"data" => %{"projects" => %{"nodes" => nodes}}}} when is_list(nodes) ->
-        {:ok, Map.new(nodes, &{&1["slugId"], for(%{"key" => key} <- get_in(&1, ["teams", "nodes"]) || [], do: key)})}
+        {:ok, Map.new(nodes, &{&1["slugId"], %{name: &1["name"], teams: for(%{"key" => key} <- get_in(&1, ["teams", "nodes"]) || [], do: key)}})}
 
       {:ok, response} ->
         {:error, {:unexpected_response, response}}

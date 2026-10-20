@@ -16,7 +16,7 @@ defmodule SymphonyElixir.AuthTest do
     def graphql(query, variables, _opts \\ []) do
       cond do
         query =~ "SymphonyMemberByEmail" -> member(variables[:email] |> String.downcase())
-        query =~ "SymphonyStageLookup" -> notify({:stage_lookup, variables}) && stage_lookup()
+        query =~ "SymphonyStageLookup" -> notify({:stage_lookup, variables}) && stage_lookup(variables)
         query =~ "SymphonySetStage" -> notify({:set_stage, variables}) && ok(%{"issueUpdate" => %{"success" => true}})
         query =~ "SymphonyCreateComment" -> notify({:comment, variables}) && ok(%{"commentCreate" => %{"success" => true}})
         query =~ "SymphonyOrganization" -> ok(%{"organization" => @org})
@@ -52,13 +52,13 @@ defmodule SymphonyElixir.AuthTest do
     defp member("gone@acme.test"), do: users([Map.put(user("u-4", "Gone", false, []), "active", false)])
     defp member(_email), do: users([])
 
-    defp stage_lookup do
+    defp stage_lookup(variables) do
       ok(%{
         "issue" => %{
           "team" => %{"id" => "team-PAY", "states" => %{"nodes" => [%{"id" => "state-ip"}]}},
           "labels" => %{"nodes" => []}
         },
-        "issueLabels" => %{"nodes" => [%{"id" => "lbl-merge", "team" => %{"id" => "team-PAY"}}]}
+        "issueLabels" => %{"nodes" => [%{"id" => "lbl-merge", "name" => variables.stage, "parent" => %{"name" => "factory"}, "team" => %{"id" => "team-PAY"}}]}
       })
     end
 
