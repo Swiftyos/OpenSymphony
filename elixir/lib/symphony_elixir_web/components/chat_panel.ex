@@ -67,10 +67,6 @@ defmodule SymphonyElixirWeb.ChatPanel do
       </div>
 
       <footer class="cx-footer">
-        <div :if={@queued != []} class="cx-queued">
-          <span class="cx-queued-label">Queued for the agent's next turn</span>
-          <p :for={msg <- @queued} class="cx-queued-item">{msg.text}</p>
-        </div>
         <p :if={@error} class="cx-error" role="alert">{@error}</p>
         <%= if @can_message do %>
           <form id={"chat-compose-#{@issue}"} class="cx-compose" phx-submit="send_message" phx-hook="ChatComposer">

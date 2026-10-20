@@ -841,23 +841,17 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp chat_session(_payload, _identifier), do: nil
 
-  # Messaging an agent is a change to its work, so it takes the same right as
-  # moving the issue.
-  defp can_message?(user, payload, identifier) do
-    project =
-      case chat_session(payload, identifier),
-        do: (
-          %{project_slug: slug} -> slug
-          _ -> nil
-        )
-
-    Auth.can_move_issue?(user, identifier, project)
+  # Messaging an agent is a change to its work: the viewer must see the issue
+  # and hold the right to move it (Auth.can_message_agent?/2).
+  defp can_message?(user, _payload, identifier) do
+    Visibility.filter_issue(%{}, user, identifier) != :hidden and Auth.can_message_agent?(user, identifier)
   end
 
   defp author_name(user), do: user.name || user.username || user.email || "someone"
 
-  defp message_error(:empty), do: "Write a message first."
-  defp message_error(:too_long), do: "That message is too long (8,000 characters at most)."
+  defp message_error(:empty_message), do: "Write a message first."
+  defp message_error(:message_too_long), do: "That message is too long (8,000 characters at most)."
+  defp message_error(:unavailable), do: "Messaging isn't available right now."
   defp message_error(reason), do: "Couldn't send: #{inspect(reason)}"
 
   defp team_choices(%{factory: %{teams: entries}}, user) do
