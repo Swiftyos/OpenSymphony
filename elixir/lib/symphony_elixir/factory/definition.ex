@@ -17,6 +17,11 @@ defmodule SymphonyElixir.Factory.Definition do
   Transitions say who moves an issue from one stage to the next (`agent` or
   `human`) and when (`criteria`), and are given to agents as their allowed moves.
 
+  A stage with `approval` always needs a person to approve the move an agent
+  makes out of it. A flow's `autopilot` (earned autonomy) makes every agent
+  stage need approval until it has `streak` approvals in a row
+  (`approval_streak` on the stage); a send-back resets the count.
+
   Definitions are plain, JSON-serialisable maps with string keys.
   """
 
@@ -26,6 +31,7 @@ defmodule SymphonyElixir.Factory.Definition do
   @backends ["codex", "claude", "opencode"]
   @efforts ["low", "medium", "high", "xhigh", "max"]
   @id_pattern ~r/^[a-z][a-z0-9-]{0,31}$/
+  @default_streak 10
 
   @type stage :: map()
   @type t :: map()
@@ -81,17 +87,20 @@ defmodule SymphonyElixir.Factory.Definition do
     transitions = definition |> Map.get("transitions", []) |> List.wrap() |> Enum.map(&normalize_transition/1)
     ids = Enum.map(stages, & &1["id"])
 
+    autopilot = normalize_autopilot(Map.get(definition, "autopilot"))
+
     errors =
       stage_errors(stages) ++
         identity_errors(stages) ++
         transition_errors(transitions, MapSet.new(ids)) ++
-        structure_errors(stages)
+        structure_errors(stages) ++
+        autopilot_errors(autopilot)
 
     if errors == [] do
       {:ok,
        definition
-       |> Map.merge(%{"stages" => stages, "transitions" => transitions, "version" => Map.get(definition, "version", 0)})
-       |> Map.take(["version", "stages", "transitions", "updated_at", "updated_by"])}
+       |> Map.merge(%{"stages" => stages, "transitions" => transitions, "autopilot" => autopilot, "version" => Map.get(definition, "version", 0)})
+       |> Map.take(["version", "stages", "transitions", "autopilot", "updated_at", "updated_by"])}
     else
       {:error, Enum.uniq(errors)}
     end
@@ -130,6 +139,29 @@ defmodule SymphonyElixir.Factory.Definition do
   def dispatchable?(%{"kind" => kind, "paused" => paused}), do: kind in @dispatchable and paused != true
   def dispatchable?(_stage), do: false
 
+  @doc """
+  Whether a person must approve the move an agent makes out of `stage`: always
+  when the stage says so, and under earned autonomy until the stage has enough
+  approvals in a row.
+  """
+  @spec requires_approval?(t(), stage() | nil) :: boolean()
+  def requires_approval?(_definition, %{"approval" => true}), do: true
+
+  def requires_approval?(definition, %{"kind" => kind} = stage) when kind in @dispatchable do
+    case autopilot(definition) do
+      %{"enabled" => true, "streak" => needed} -> (stage["approval_streak"] || 0) < needed
+      _ -> false
+    end
+  end
+
+  def requires_approval?(_definition, _stage), do: false
+
+  @spec autopilot(t()) :: %{String.t() => term()}
+  def autopilot(definition), do: normalize_autopilot(definition["autopilot"])
+
+  @spec default_streak() :: pos_integer()
+  def default_streak, do: @default_streak
+
   @spec transitions_from(t(), String.t()) :: [map()]
   def transitions_from(definition, stage_id), do: Enum.filter(definition["transitions"], &(&1["from"] == stage_id))
 
@@ -157,6 +189,7 @@ defmodule SymphonyElixir.Factory.Definition do
       "max_agents" => nil,
       "paused" => false,
       "approval" => false,
+      "approval_streak" => 0,
       "skill" => nil,
       "position" => %{"x" => x, "y" => y}
     }
@@ -181,6 +214,7 @@ defmodule SymphonyElixir.Factory.Definition do
       "paused" => Map.get(stage, "paused") == true,
       # A person approves before an issue leaves this stage.
       "approval" => Map.get(stage, "approval") == true,
+      "approval_streak" => non_negative(Map.get(stage, "approval_streak")),
       "position" => normalize_position(Map.get(stage, "position")),
       "skill" => normalize_skill(Map.get(stage, "skill"), stage |> Map.get("id") |> to_s() |> normalize())
     }
@@ -283,6 +317,18 @@ defmodule SymphonyElixir.Factory.Definition do
     ]
     |> Enum.filter(&is_binary/1)
   end
+
+  defp normalize_autopilot(%{} = autopilot) do
+    %{"enabled" => Map.get(autopilot, "enabled") == true, "streak" => Map.get(autopilot, "streak", @default_streak)}
+  end
+
+  defp normalize_autopilot(_autopilot), do: %{"enabled" => false, "streak" => @default_streak}
+
+  defp autopilot_errors(%{"streak" => streak}) when is_integer(streak) and streak >= 1 and streak <= 100, do: []
+  defp autopilot_errors(_autopilot), do: ["approvals in a row must be a whole number from 1 to 100"]
+
+  defp non_negative(n) when is_integer(n) and n > 0, do: n
+  defp non_negative(_n), do: 0
 
   defp valid_max_agents?(nil), do: true
   defp valid_max_agents?(n) when is_integer(n) and n >= 1 and n <= 100, do: true

@@ -147,6 +147,26 @@ defmodule SymphonyElixir.Factory.Store do
   def put_stage_field(_team, _stage_id, field, _value, _by), do: {:error, {:unknown_field, field}}
 
   @doc """
+  Turns earned autonomy on or off for a scope and sets how many approvals in a
+  row a stage needs before it stops asking. Changing it starts every stage's
+  count again.
+  """
+  @spec put_autopilot(String.t(), boolean(), integer(), String.t()) :: {:ok, Definition.t()} | {:error, term()}
+  def put_autopilot(scope, enabled, streak, updated_by) do
+    GenServer.call(__MODULE__, {:put_autopilot, scope, enabled == true, streak, updated_by})
+  end
+
+  @doc """
+  Records a person's verdict on a move an agent made out of `stage_id`:
+  `:approved` adds one to the stage's streak, `:sent_back` resets it.
+  """
+  @spec record_review(String.t(), String.t(), :approved | :sent_back, String.t()) ::
+          {:ok, Definition.t()} | {:error, term()}
+  def record_review(scope, stage_id, verdict, updated_by) when verdict in [:approved, :sent_back] do
+    GenServer.call(__MODULE__, {:record_review, scope, stage_id, verdict, updated_by})
+  end
+
+  @doc """
   Drops a scope's own definition so it inherits again (a project its team's
   flow, a team the `DEFAULT` flow, `DEFAULT` the built-in template).
   """
@@ -199,6 +219,17 @@ defmodule SymphonyElixir.Factory.Store do
     end
   end
 
+  def handle_call({:put_autopilot, scope, enabled, streak, updated_by}, _from, state) do
+    update(state, scope, updated_by, fn current ->
+      stages = Enum.map(current["stages"], &Map.put(&1, "approval_streak", 0))
+      {:ok, %{current | "stages" => stages} |> Map.put("autopilot", %{"enabled" => enabled, "streak" => streak})}
+    end)
+  end
+
+  def handle_call({:record_review, scope, stage_id, verdict, updated_by}, _from, state) do
+    update(state, scope, updated_by, &review_streak(&1, stage_id, verdict))
+  end
+
   def handle_call({:reset_team, team}, _from, state) do
     case team_key(team) do
       {:ok, key} ->
@@ -214,6 +245,31 @@ defmodule SymphonyElixir.Factory.Store do
   def handle_call(:reset_all, _from, state) do
     :ets.delete_all_objects(@table)
     {:reply, :ok, state}
+  end
+
+  defp review_streak(current, stage_id, verdict) do
+    case Definition.stage(current, stage_id) do
+      nil ->
+        {:error, {:unknown_stage, stage_id}}
+
+      stage ->
+        streak = if verdict == :approved, do: (stage["approval_streak"] || 0) + 1, else: 0
+        {:ok, update_stage(current, stage_id, "approval_streak", streak)}
+    end
+  end
+
+  defp update(state, scope, updated_by, change) do
+    with {:ok, key} <- team_key(scope),
+         current = own_or_new(key),
+         {:ok, changed} <- change.(current),
+         {:ok, valid} <- Definition.validate(changed) do
+      saved = stamp(valid, key, current["version"] + 1, updated_by)
+      :ets.insert(@table, {key, saved})
+      persist(state.dir, key, saved)
+      {:reply, {:ok, saved}, state}
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
   end
 
   # A scope that inherits starts its own copy from what it inherits, at version 0.

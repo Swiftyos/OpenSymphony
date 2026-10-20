@@ -54,7 +54,7 @@ defmodule SymphonyElixir.Factory.StagePrompt do
       "",
       moves(definition, stage, prefix),
       "",
-      move_rule(stage, prefix)
+      move_rule(definition, stage, prefix)
     ]
     |> Enum.join("\n")
   end
@@ -76,18 +76,20 @@ defmodule SymphonyElixir.Factory.StagePrompt do
     """
   end
 
-  defp move_rule(%{"approval" => true}, _prefix) do
-    label = IssueStage.approval_label()
+  defp move_rule(definition, stage, prefix) do
+    base =
+      "Move the issue by setting its Linear state and `#{prefix}/*` stage label exactly as listed. " <>
+        "Only make moves marked for agents; moves marked for humans are theirs to make. " <>
+        "If none of these fit, record why in your stage comment and stop."
 
-    "**This stage needs a person's approval before the issue moves on.** When your work is done, don't " <>
-      "change the state or stage label. End your stage comment with `Recommended move: <stage name>` and why, " <>
-      "add the `#{label}` label to the issue, and stop. A person reviews the issue and makes the move."
-  end
-
-  defp move_rule(_stage, prefix) do
-    "Move the issue by setting its Linear state and `#{prefix}/*` stage label exactly as listed. " <>
-      "Only make moves marked for agents; moves marked for humans are theirs to make. " <>
-      "If none of these fit, record why in the workpad and stop."
+    if Definition.requires_approval?(definition, stage) do
+      base <>
+        "\n\n**A person approves your move from this stage.** Make the move as usual, then also add the " <>
+        "`#{IssueStage.approval_label()}` label to the issue. Say in your stage comment which move you made and why. " <>
+        "The issue waits there until a person approves it or sends it back to this stage."
+    else
+      base
+    end
   end
 
   defp moves(definition, stage, prefix) do

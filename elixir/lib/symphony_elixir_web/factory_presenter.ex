@@ -147,7 +147,8 @@ defmodule SymphonyElixirWeb.FactoryPresenter do
       team: issue.team,
       since_ms: issue.since_ms,
       backend: agent && agent.backend,
-      awaiting: issue[:awaiting_approval] == true
+      awaiting: issue[:awaiting_approval] == true,
+      from: issue[:from]
     }
   end
 

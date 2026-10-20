@@ -72,23 +72,20 @@ defmodule SymphonyElixir.UsageLedger do
       meta = issue_meta(issue)
 
       case :ets.lookup(@issues_table, identifier) do
-        [{^identifier, ^node, _since, ^meta}] ->
-          :ok
-
-        # Same stage, but its title or approval flag changed.
-        [{^identifier, ^node, since, _meta}] ->
-          :ets.insert(@issues_table, {identifier, node, since, meta})
-          mark_dirty()
+        # Same stage: keep where it came from, and save only if the title or
+        # approval flag changed.
+        [{^identifier, ^node, since, old}] ->
+          refresh_meta(identifier, node, since, old, Map.put(meta, :from, old[:from]))
 
         [{^identifier, previous, _since, _meta}] ->
           # Counted per team and project: their flows can share stage ids.
           key = {team_key(identifier), issue.project_slug, previous, node}
           :ets.update_counter(@edges_table, key, {2, 1}, {key, 0})
-          :ets.insert(@issues_table, {identifier, node, now, meta})
+          :ets.insert(@issues_table, {identifier, node, now, Map.put(meta, :from, previous)})
           mark_dirty()
 
         [] ->
-          :ets.insert(@issues_table, {identifier, node, now, meta})
+          :ets.insert(@issues_table, {identifier, node, now, Map.put(meta, :from, nil)})
           mark_dirty()
       end
     end
@@ -97,6 +94,13 @@ defmodule SymphonyElixir.UsageLedger do
   end
 
   def observe_issue(_issue), do: :ok
+
+  defp refresh_meta(_identifier, _node, _since, meta, meta), do: :ok
+
+  defp refresh_meta(identifier, node, since, _old, meta) do
+    :ets.insert(@issues_table, {identifier, node, since, meta})
+    mark_dirty()
+  end
 
   @doc """
   Maps an issue to its node in its team's factory diagram: the stage id from
@@ -128,6 +132,19 @@ defmodule SymphonyElixir.UsageLedger do
       |> Map.new(fn {project, rows} -> {project, %{name: Enum.find_value(rows, &elem(&1, 3)), teams: teams_by_issue_count(rows)}} end)
     else
       %{}
+    end
+  end
+
+  @doc """
+  The stage an issue was in before its current one, or nil.
+  """
+  @spec previous_node(String.t()) :: node_name() | nil
+  def previous_node(identifier) do
+    with true <- ready?(),
+         [{^identifier, _node, _since, meta}] <- :ets.lookup(@issues_table, identifier) do
+      meta[:from]
+    else
+      _ -> nil
     end
   end
 
@@ -291,7 +308,8 @@ defmodule SymphonyElixir.UsageLedger do
       project: row["project"],
       team: row["team"],
       url: row["url"],
-      awaiting_approval: row["awaiting_approval"] == true
+      awaiting_approval: row["awaiting_approval"] == true,
+      from: row["from"]
     }
 
     :ets.insert(@issues_table, {row["issue"], row["node"], row["since_ms"], meta})
@@ -322,7 +340,8 @@ defmodule SymphonyElixir.UsageLedger do
       project: meta[:project],
       team: meta[:team],
       url: meta[:url],
-      awaiting_approval: meta[:awaiting_approval] == true
+      awaiting_approval: meta[:awaiting_approval] == true,
+      from: meta[:from]
     }
   end
 

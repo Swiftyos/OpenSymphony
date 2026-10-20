@@ -115,8 +115,9 @@ defmodule SymphonyElixir.Factory.Assistant do
       state and label (or both have no label in the same state). Mark at most one stage per state
       "default": true; it is used for issues in that state with no stage label.
     - The flow needs at least one queue or agent stage and at least one done stage.
-    - "approval": true on an agent stage makes a person approve before the issue leaves it (the agent
-      recommends a move and waits). Use it where the request asks for sign-off, e.g. on a plan.
+    - "approval": true on an agent stage makes a person approve every move out of it (the agent moves
+      the issue, and it waits there until approved or sent back). Use it where the request asks for
+      sign-off, e.g. on a plan.
     - Connections ("transitions") say who moves an issue ("agent" or "human") from one stage to another
       and when ("criteria", one sentence). Include loops back for failures and a way out of blocked stages.
 

@@ -2271,11 +2271,47 @@ a.brand:hover {
   white-space: nowrap;
 }
 
+.fx-flow-toolbar {
+  position: relative;
+}
+
+.fx-autopilot.is-on {
+  border-color: rgba(250, 178, 25, 0.55);
+  color: var(--warning);
+}
+
+.fx-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 25;
+  display: grid;
+  gap: 8px;
+  width: min(340px, 100%);
+  padding: 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--raised);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+}
+
+.fx-input-narrow {
+  width: 70px;
+  margin-left: 6px;
+}
+
 /* -- approvals in Needs you */
 
 .approval-item {
   padding-bottom: 8px;
   border-bottom: 1px solid var(--line);
+}
+
+.approval-move {
+  grid-column: 1 / -1;
+  margin: 2px 0 0;
+  color: var(--ink-2);
+  font-size: 0.78rem;
 }
 
 .approval-actions {

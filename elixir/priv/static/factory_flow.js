@@ -580,6 +580,65 @@
         self.enterEdit();
       }));
     }
+
+    if (this.mode === "view" && definition) {
+      var auto = autopilotOf(definition);
+      var chip = button(auto.enabled ? "✋ Earned autonomy · " + auto.streak + " in a row" : "✋ Earned autonomy: off", "fx-chip fx-autopilot" + (auto.enabled ? " is-on" : ""), function () {
+        self.openAutopilot(chip);
+      });
+      chip.title = "Every agent stage needs a person's approval until it gets enough approvals in a row";
+      chip.disabled = !this.canEdit();
+      bar.appendChild(chip);
+    }
+  };
+
+  Flow.prototype.openAutopilot = function (anchor) {
+    var self = this;
+    var existing = this.toolbar.querySelector(".fx-popover");
+    if (existing) return void existing.remove();
+    var auto = autopilotOf(this.definition());
+    var pop = el("div", "fx-popover");
+    pop.appendChild(el("strong", null, "Earned autonomy"));
+    pop.appendChild(
+      el("p", "fx-field-hint", "Every agent stage in this flow needs a person to approve its moves until it gets this many approvals in a row. A send-back starts the count again. Stages marked ✋ always need approval.")
+    );
+    var on = el("label", "fx-check");
+    var box = el("input");
+    box.type = "checkbox";
+    box.checked = auto.enabled;
+    on.appendChild(box);
+    on.appendChild(document.createTextNode(" Require approval until a stage has earned it"));
+    pop.appendChild(on);
+    var countRow = el("label", "fx-check");
+    countRow.appendChild(document.createTextNode("Approvals in a row: "));
+    var count = el("input", "fx-input fx-input-narrow");
+    count.type = "number";
+    count.min = 1;
+    count.max = 100;
+    count.value = auto.streak;
+    countRow.appendChild(count);
+    pop.appendChild(countRow);
+    var actions = el("div", "fx-issue-actions");
+    actions.appendChild(button("Save", "fx-action is-primary", function () {
+      var streak = parseInt(count.value, 10);
+      self.opts.push("factory_autopilot", { team: self.team, enabled: box.checked, streak: isNaN(streak) ? 0 : streak }, function (reply) {
+        if (reply && reply.ok) {
+          self.data.definitions[self.team] = reply.definition;
+          pop.remove();
+          self.lastKey = null;
+          self.render();
+          self.opts.toast(box.checked ? "Earned autonomy on: " + streak + " approvals in a row" : "Earned autonomy off", "ok");
+        } else {
+          self.opts.toast((reply && reply.error) || "Couldn't save", "error");
+        }
+      });
+    }));
+    actions.appendChild(button("Cancel", "fx-action", function () {
+      pop.remove();
+    }));
+    pop.appendChild(actions);
+    this.toolbar.appendChild(pop);
+    count.focus();
   };
 
   Flow.prototype.openFlowAssist = function () {
@@ -800,7 +859,8 @@
 
     var config = [];
     if (stage.paused) config.push("paused");
-    if (stage.approval) config.push("✋ approval");
+    var gate = approvalState(this.definition(), stage);
+    if (gate) config.push(gate);
     if (stage.harness) config.push(HARNESS_LABELS[stage.harness] || stage.harness);
     if (stage.effort) config.push(stage.effort);
     if (stage.max_agents) config.push("≤" + stage.max_agents);
@@ -1318,17 +1378,16 @@
     );
     drawer.appendChild(listHead);
 
-    // Moves come from the flow: every human-moved connection out of here, and
-    // for an issue waiting for approval, every connection (the person approves
-    // the agent's move).
+    // Moves come from the flow: every human-moved connection out of here. An
+    // issue held for approval gets Approve / Send back instead.
     var out = this.definition().transitions.filter(function (t) {
       return t.from === stage.id;
     });
     var humanMoves = out.filter(function (t) {
       return t.by === "human";
     });
-    var movesFor = function (issue) {
-      return issue.awaiting ? out : humanMoves;
+    var movesFor = function () {
+      return humanMoves;
     };
     var movable = this.data.movable_teams;
     var movableProjects = this.data.movable_projects || [];
@@ -1357,7 +1416,24 @@
       line.appendChild(el("span", "fx-issue-age", since(issue.since_ms)));
       row.appendChild(line);
 
-      var moves = movesFor(issue);
+      // Held for approval: the agent already moved it here.
+      if (issue.awaiting && issue.id && canMove(issue)) {
+        var verdict = el("div", "fx-issue-actions");
+        verdict.appendChild(button("✓ Approve", "fx-action is-primary", function () {
+          self.opts.push("approve_issue", { id: issue.id }, function () {});
+          self.opts.toast("Approved " + issue.issue, "ok");
+        }));
+        if (issue.from) {
+          var origin = self.stageById(issue.from);
+          verdict.appendChild(button("↩ Send back to " + (origin ? origin.name : issue.from), "fx-action", function () {
+            self.opts.push("send_back_issue", { id: issue.id }, function () {});
+            self.opts.toast("Sent " + issue.issue + " back", "ok");
+          }));
+        }
+        row.appendChild(verdict);
+      }
+
+      var moves = issue.awaiting ? [] : movesFor(issue);
       if (moves.length && issue.id && canMove(issue)) {
         var actions = el("div", "fx-issue-actions");
         if (self.pending[issue.issue]) {
@@ -1713,6 +1789,22 @@
       wrap.appendChild(b);
     });
     return wrap;
+  }
+
+  // Mirrors Definition.requires_approval?: "✋ approval" (always), "✋ 3/10"
+  // (earning autonomy), "✓ trusted" (earned it), or "" when no approval applies.
+  function autopilotOf(definition) {
+    var a = (definition && definition.autopilot) || {};
+    return { enabled: a.enabled === true, streak: a.streak || 10 };
+  }
+
+  function approvalState(definition, stage) {
+    if (stage.approval) return "✋ approval";
+    if (!DISPATCHABLE[stage.kind]) return "";
+    var a = autopilotOf(definition);
+    if (!a.enabled) return "";
+    var n = stage.approval_streak || 0;
+    return n >= a.streak ? "✓ trusted" : "✋ " + n + "/" + a.streak;
   }
 
   function harnessOptions(harnesses) {

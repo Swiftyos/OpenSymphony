@@ -316,8 +316,8 @@ defmodule SymphonyElixir.FactoryEditorTest do
       assert prompt =~ "### Hand-off between stages"
       assert prompt =~ "Code travels on the branch `symphony/PAY-7`"
       assert prompt =~ "add one new comment headed `## Implement`"
-      assert prompt =~ "needs a person's approval before the issue moves on"
-      assert prompt =~ "add the `needs-approval` label"
+      assert prompt =~ "A person approves your move from this stage"
+      assert prompt =~ "also add the `needs-approval` label"
 
       # A normal stage still makes its own moves.
       assert StagePrompt.render(%{issue | labels: ["factory/merge"]}) =~ "Only make moves marked for agents"
@@ -422,27 +422,69 @@ defmodule SymphonyElixir.FactoryEditorTest do
       assert_reply(admin_view, %{ok: true})
     end
 
-    test "people approve a held issue's move from Needs you, which drops the approval label", %{mia: mia} do
-      template = Definition.default_template()
-      stages = Enum.map(template["stages"], &if(&1["id"] == "merge", do: Map.put(&1, "approval", true), else: &1))
-      {:ok, _} = Store.put("PAY", %{template | "stages" => stages}, 0, "mia")
+    test "people approve or send back a held issue, and stages earn autonomy", %{mia: mia} do
+      {:ok, _} = Store.put("PAY", Definition.default_template(), 0, "mia")
+      {:ok, _} = Store.put_autopilot("PAY", true, 2, "mia")
+      review = fn -> Definition.stage(Store.get("PAY"), "review") end
+      # Agent stages need approval until they earn it; person stages never do.
+      assert Definition.requires_approval?(Store.get("PAY"), Definition.stage(Store.get("PAY"), "merge"))
+      refute Definition.requires_approval?(Store.get("PAY"), review.())
+
+      # The agent moved PAY-3 from review to merge and asked for approval.
       held = %Issue{id: "id-PAY-3", identifier: "PAY-3", title: "Held", state: "In Progress", labels: ["factory/merge", "needs-approval"], url: "https://linear.app/acme/issue/PAY-3"}
+      UsageLedger.observe_issue(%{held | state: "In Review", labels: []})
       UsageLedger.observe_issue(held)
+      assert UsageLedger.previous_node("PAY-3") == "review"
+      assert UsageLedger.previous_node("PAY-404") == nil
 
       {:ok, view, html} = live(session_for(mia), "/")
       assert html =~ "Waiting for your approval"
-      assert html =~ "Read the ticket ↗"
+      assert html =~ "In Review → <strong>Merge</strong>"
       assert html =~ ~s(href="https://linear.app/acme/issue/PAY-3")
-      assert html =~ ~s(phx-value-to="done")
 
-      # merge -> done is an agent move, but a person may approve it for a held issue.
-      view |> element(~s(button[phx-click="approve_move"][phx-value-to="done"])) |> render_click()
+      view |> element(~s(button[phx-click="approve_issue"])) |> render_click()
       assert_receive {:graphql, query, %{labelIds: label_ids}} when is_binary(query), 1_000
       assert "keep" in label_ids
       refute "appr" in label_ids
+      assert review.()["approval_streak"] == 1
 
-      render_hook(view, "approve_move", %{"id" => "not-an-issue", "to" => "done"})
-      assert render(view) =~ "That issue isn&#39;t in a project this Symphony manages."
+      render_hook(view, "send_back_issue", %{"id" => "id-PAY-3"})
+      assert review.()["approval_streak"] == 0
+
+      # The agent moves it to merge again; two approvals in a row and the stage stops asking.
+      UsageLedger.observe_issue(held)
+      render_hook(view, "approve_issue", %{"id" => "id-PAY-3"})
+      render_hook(view, "approve_issue", %{"id" => "id-PAY-3"})
+      assert review.()["approval_streak"] == 2
+
+      # Errors: not held, unknown origin, unknown issue.
+      render_hook(view, "approve_issue", %{"id" => "id-PAY-2"})
+      assert render(view) =~ "isn&#39;t waiting for approval any more"
+      UsageLedger.reset()
+      render_hook(view, "send_back_issue", %{"id" => "id-PAY-3"})
+      assert render(view) =~ "doesn&#39;t know which stage that came from"
+      render_hook(view, "approve_issue", %{"id" => "not-an-issue"})
+      assert render(view) =~ "isn&#39;t in a project this Symphony manages"
+    end
+
+    test "teams turn earned autonomy on and set the streak", %{mia: mia} do
+      {:ok, view, _html} = live(session_for(mia), "/")
+      render_hook(view, "factory_autopilot", %{"team" => "PAY", "enabled" => true, "streak" => 5})
+      assert_reply(view, %{ok: true, definition: %{"autopilot" => %{"enabled" => true, "streak" => 5}}})
+
+      render_hook(view, "factory_autopilot", %{"team" => "PAY", "enabled" => true, "streak" => 0})
+      assert_reply(view, %{ok: false, error: "approvals in a row must be a whole number from 1 to 100"})
+
+      render_hook(view, "factory_autopilot", %{"team" => "WEB", "enabled" => true, "streak" => 5})
+      assert_reply(view, %{ok: false, error: "Only this team's members" <> _})
+
+      assert {:error, {:unknown_stage, "nope"}} = Store.record_review("PAY", "nope", :approved, "mia")
+      assert {:error, :invalid_team} = Store.put_autopilot("bad team!", true, 3, "mia")
+      # Stages marked for approval always ask.
+      definition = Store.get("PAY")
+      assert Definition.requires_approval?(definition, %{"approval" => true})
+      refute Definition.requires_approval?(definition, nil)
+      assert Definition.autopilot(%{}) == %{"enabled" => false, "streak" => Definition.default_streak()}
     end
 
     test "members change their own team's stage controls", %{mia: mia} do

@@ -569,16 +569,26 @@ channels that every agent is told about:
 - **The issue's branch, `symphony/<ID>`.** Code travels here. A stage starts from the branch if it
   exists, and commits and pushes before it moves the issue.
 
-#### Approval gates
+#### Approval gates and earned autonomy
 
-Tick **✋ A person approves before the issue moves on** on an agent stage to put a person between it
-and the next stage. When the agent is done it posts its stage comment ending with
-`Recommended move: <stage>`, adds the `needs-approval` label (`tracker.approval_label`), and stops.
-Symphony holds the issue, and **Needs you** lists it under **Waiting for your approval** with a link
-to the Linear ticket, where the stage comments show everything that happened, and a button for every
-connection out of the stage. Approving makes that move and removes the label. Team members can
-approve their team's issues (and anyone given the issue's project); the stage panel offers the same
-buttons.
+A stage can make a person approve the moves an agent makes out of it. The agent makes its move as
+usual, says why in its stage comment, and adds the `needs-approval` label (`tracker.approval_label`).
+Symphony holds the issue where the agent moved it, and **Needs you** lists it under **Waiting for
+your approval** ("In Review → Merge") with a link to the Linear ticket, where the stage comments show
+everything that happened. **✓ Approve** keeps the move and removes the label; **↩ Send back**
+returns the issue to the stage it came from. Team members can approve their team's issues (and
+anyone given the issue's project); the stage panel has the same buttons.
+
+- **Always:** tick ✋ on a stage (in the editor, or right-click it on the diagram) and every move out
+  of it needs approval.
+- **Earned autonomy:** the **✋ Earned autonomy** setting above a flow makes every agent stage need
+  approval until it gets N approvals in a row (10 by default, 1 to 100). Each stage shows its
+  progress (`✋ 3/10`), and once it has earned it, `✓ trusted`. A send-back starts that stage's count
+  again. Changing the setting restarts every count.
+
+Right-click any stage for quick controls: approval, pause, harness (each shows the model it runs),
+and thinking level. Zoom with ⌘/Ctrl + scroll or a pinch, pan by dragging the background, and use
+the − / + / Fit buttons in the corner.
 
 Agents get a **"Your current stage"** section in their prompt. It has the stage's instructions,
 the stage's skill if it has one, and each allowed move with the exact Linear state and label to
