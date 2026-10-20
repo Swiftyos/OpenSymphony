@@ -70,6 +70,12 @@ defmodule SymphonyElixir.Tracker.Memory do
     Application.get_env(:symphony_elixir, :memory_tracker_issues, [])
   end
 
+  @spec ensure_stage_labels(String.t(), [String.t()]) :: {:ok, [String.t()]}
+  def ensure_stage_labels(team_key, labels) do
+    send_event({:memory_tracker_ensure_labels, team_key, labels})
+    {:ok, []}
+  end
+
   defp issue_entries do
     Enum.filter(configured_issues(), &match?(%Issue{}, &1))
   end

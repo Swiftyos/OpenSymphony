@@ -74,7 +74,9 @@ defmodule SymphonyElixir.UsageLedger do
           :ok
 
         [{^identifier, previous, _since, _meta}] ->
-          :ets.update_counter(@edges_table, {previous, node}, {2, 1}, {{previous, node}, 0})
+          # Counted per team: two teams' flows can share stage ids.
+          key = {team_key(identifier), previous, node}
+          :ets.update_counter(@edges_table, key, {2, 1}, {key, 0})
           :ets.insert(@issues_table, {identifier, node, now, issue_meta(issue)})
           mark_dirty()
 
@@ -90,20 +92,17 @@ defmodule SymphonyElixir.UsageLedger do
   def observe_issue(_issue), do: :ok
 
   @doc """
-  Maps an issue to its node in the factory diagram.
+  Maps an issue to its node in its team's factory diagram: the stage id from
+  the team's definition, or `canceled` / `backlog` for states outside the flow.
   """
   @spec factory_node(Issue.t()) :: node_name() | nil
   def factory_node(%Issue{state: state_name} = issue) when is_binary(state_name) do
     normalized = state_name |> String.trim() |> String.downcase()
 
     cond do
-      normalized == "todo" -> "todo"
-      normalized == "backlog" -> "backlog"
-      normalized in ["in review", "human review"] -> "review"
-      normalized == "done" -> "done"
       normalized in ["canceled", "cancelled", "duplicate", "closed"] -> "canceled"
-      IssueStage.active_state?(state_name) -> IssueStage.stage(issue) || "implement"
-      true -> nil
+      normalized == "backlog" -> "backlog"
+      true -> IssueStage.stage(issue)
     end
   end
 
@@ -115,7 +114,7 @@ defmodule SymphonyElixir.UsageLedger do
       %{
         usage: Enum.map(:ets.tab2list(@usage_table), &usage_row/1),
         flow: %{
-          edges: Enum.map(:ets.tab2list(@edges_table), fn {{from, to}, count} -> %{from: from, to: to, count: count} end),
+          edges: Enum.map(:ets.tab2list(@edges_table), &edge_row/1),
           issues: Enum.map(:ets.tab2list(@issues_table), &flow_issue_row/1)
         }
       }
@@ -240,7 +239,7 @@ defmodule SymphonyElixir.UsageLedger do
     with {:ok, body} <- File.read(path),
          {:ok, %{"usage" => usage, "flow" => flow}} <- Jason.decode(body) do
       Enum.each(usage, &load_usage_row/1)
-      Enum.each(Map.get(flow, "edges", []), fn %{"from" => from, "to" => to, "count" => count} -> :ets.insert(@edges_table, {{from, to}, count}) end)
+      Enum.each(Map.get(flow, "edges", []), &load_edge/1)
       Enum.each(Map.get(flow, "issues", []), &load_flow_issue/1)
     else
       {:error, :enoent} -> :ok
@@ -255,6 +254,11 @@ defmodule SymphonyElixir.UsageLedger do
     meta = %{title: row["title"], project_name: row["project_name"], url: row["url"]}
     :ets.insert(@usage_table, {key, row["input_tokens"] || 0, row["output_tokens"] || 0, meta})
   end
+
+  defp edge_row({{team, from, to}, count}), do: %{team: team, from: from, to: to, count: count}
+
+  # Ledgers written before edges were per team have no team; keep them under nil.
+  defp load_edge(%{"from" => from, "to" => to, "count" => count} = row), do: :ets.insert(@edges_table, {{row["team"], from, to}, count})
 
   defp load_flow_issue(row) do
     meta = %{id: row["id"], title: row["title"], project: row["project"], team: row["team"], url: row["url"]}

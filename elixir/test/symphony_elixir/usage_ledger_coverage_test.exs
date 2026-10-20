@@ -98,7 +98,7 @@ defmodule SymphonyElixir.UsageLedgerCoverageTest do
              %{"issue" => "nohyphen", "team" => nil, "model" => "gpt-5.1", "input_tokens" => 3, "output_tokens" => 4}
            ] = rows
 
-    assert %{"from" => "implement", "to" => "done", "count" => 1} in persisted["flow"]["edges"]
+    assert Enum.any?(persisted["flow"]["edges"], &match?(%{"from" => "implement", "to" => "done", "count" => 1}, &1))
 
     # the periodic flush message is handled without a dirty flag and keeps the file intact
     send(pid, :flush)

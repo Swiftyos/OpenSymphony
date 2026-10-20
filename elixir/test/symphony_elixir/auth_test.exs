@@ -304,26 +304,27 @@ defmodule SymphonyElixir.AuthTest do
 
       {:ok, view, _html} = live(session_for(mia), "/")
 
-      render_hook(view, "factory_move", %{"id" => "id-WEB-1", "issue" => "WEB-1", "action" => "approve"})
+      render_hook(view, "factory_move", %{"id" => "id-WEB-1", "issue" => "WEB-1", "to" => "merge"})
       assert_reply(view, %{ok: false, error: "You can only move issues from teams you belong to" <> _})
 
       # Lying about the identifier doesn't help: the team comes from the tracker.
-      render_hook(view, "factory_move", %{"id" => "id-WEB-1", "issue" => "PAY-1", "action" => "approve"})
+      render_hook(view, "factory_move", %{"id" => "id-WEB-1", "issue" => "PAY-1", "to" => "merge"})
       assert_reply(view, %{ok: false, error: "You can only move issues from teams you belong to" <> _})
       refute_received {:set_stage, %{issueId: "id-WEB-1"}}
 
-      render_hook(view, "factory_move", %{"id" => "id-NOPE-9", "action" => "approve"})
+      render_hook(view, "factory_move", %{"id" => "id-NOPE-9", "to" => "merge"})
       assert_reply(view, %{ok: false})
 
-      render_hook(view, "factory_move", %{"id" => "id-PAY-1", "issue" => "PAY-1", "action" => "approve"})
+      render_hook(view, "factory_move", %{"id" => "id-PAY-1", "issue" => "PAY-1", "to" => "merge"})
       assert_reply(view, %{ok: true})
       assert_receive {:set_stage, %{issueId: "id-PAY-1", labelIds: ["lbl-merge"]}}
       assert_receive {:comment, %{issueId: "id-PAY-1", body: body}}
-      assert body =~ "Mia Member (@mia) moved this to **In Progress · factory/merge**"
+      assert body =~ ~S"Mia Member (@mia) moved this to **Merge \(In Progress · factory/merge\)**"
 
-      render_hook(view, "factory_control", %{"stage" => "merge", "field" => "paused", "value" => true})
-      assert_reply(view, %{ok: false, error: "Only Linear admins" <> _})
-      refute FactoryControls.paused?("merge")
+      # Mia is in PAY, not WEB: she can't change WEB's flow.
+      render_hook(view, "factory_control", %{"team" => "WEB", "stage" => "merge", "field" => "paused", "value" => true})
+      assert_reply(view, %{ok: false, error: "Only this team's members and Linear admins" <> _})
+      refute FactoryControls.paused?({"WEB", "merge"})
     end
   end
 

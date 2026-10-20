@@ -44,6 +44,7 @@ defmodule SymphonyElixir.Factory.StagePrompt do
       "",
       blank_or(stage["instructions"], "Follow the workflow for this stage."),
       "",
+      skill_section(stage),
       "### Allowed moves from here",
       "",
       moves(definition, stage, prefix),
@@ -71,6 +72,11 @@ defmodule SymphonyElixir.Factory.StagePrompt do
     criteria = blank_or(transition["criteria"], "when the work for this stage is done")
     "- **#{target["name"]}** (#{who}): #{criteria}. Set state `#{target["linear_state"]}`#{label_text(target, prefix)}."
   end
+
+  defp skill_section(%{"skill" => %{"path" => path, "content" => content}}),
+    do: "### Skill for this stage (#{path})\n\n#{String.trim(content)}\n"
+
+  defp skill_section(_stage), do: ""
 
   defp label_text(%{"label" => label}, prefix) when is_binary(label), do: " and label `#{prefix}/#{label}` (remove other `#{prefix}/*` labels)"
   defp label_text(_target, prefix), do: " and remove any `#{prefix}/*` label"

@@ -11,6 +11,7 @@ defmodule SymphonyElixir.Tracker do
   @callback create_comment(String.t(), String.t()) :: :ok | {:error, term()}
   @callback update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
   @callback set_stage(String.t(), String.t(), String.t() | nil, keyword()) :: :ok | {:error, term()}
+  @callback ensure_stage_labels(String.t(), [String.t()]) :: {:ok, [String.t()]} | {:error, term()}
 
   @spec fetch_candidate_issues() :: {:ok, [term()]} | {:error, term()}
   def fetch_candidate_issues do
@@ -45,6 +46,15 @@ defmodule SymphonyElixir.Tracker do
   @spec set_stage(String.t(), String.t(), String.t() | nil, keyword()) :: :ok | {:error, term()}
   def set_stage(issue_id, state_name, stage, opts \\ []) do
     adapter().set_stage(issue_id, state_name, stage, opts)
+  end
+
+  @doc """
+  Makes sure a team has a `<prefix>` label group with a child label for every
+  stage label, creating what's missing. Returns the labels it created.
+  """
+  @spec ensure_stage_labels(String.t(), [String.t()]) :: {:ok, [String.t()]} | {:error, term()}
+  def ensure_stage_labels(team_key, labels) do
+    adapter().ensure_stage_labels(team_key, labels)
   end
 
   @spec adapter() :: module()

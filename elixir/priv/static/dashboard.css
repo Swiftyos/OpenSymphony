@@ -476,6 +476,8 @@ pre {
 }
 
 .fx-node-halo {
+  fill: rgba(57, 135, 229, 0.1);
+  stroke: rgba(57, 135, 229, 0.22);
   animation: fx-breathe 2.6s ease-in-out infinite;
 }
 
@@ -1799,6 +1801,278 @@ a.brand:hover {
 .user-menu-signout:hover {
   background: rgba(255, 255, 255, 0.06);
   color: var(--ink);
+}
+
+/* -- flow toolbar + editor */
+
+.fx-flow-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.fx-flow-spacer {
+  flex: 1;
+}
+
+.fx-team-select {
+  padding: 5px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--raised);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.fx-team-name {
+  font-size: 0.85rem;
+  font-weight: 650;
+}
+
+.fx-flow-meta,
+.fx-flow-hint {
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.fx-flow-errors {
+  margin-bottom: 8px;
+  padding: 8px 12px;
+  border: 1px solid rgba(208, 59, 59, 0.55);
+  border-radius: 10px;
+  color: var(--ink-2);
+  font-size: 0.8rem;
+}
+
+.fx-flow-errors strong {
+  color: var(--critical-ink);
+}
+
+.fx-flow-errors ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+
+.fx-diagram.is-editing .fx-node {
+  cursor: grab;
+}
+
+.fx-diagram.is-editing .fx-node:active {
+  cursor: grabbing;
+}
+
+.fx-grid-dot {
+  fill: rgba(255, 255, 255, 0.08);
+}
+
+.fx-edge-by-human.fx-edge-human,
+.fx-edge-by-human.fx-edge-idle {
+  stroke-dasharray: 1 6;
+  stroke-linecap: round;
+}
+
+.fx-edge-human {
+  stroke: var(--ink-2);
+  opacity: 0.65;
+}
+
+.fx-edge-agent {
+  stroke: var(--flow);
+  opacity: 0.55;
+}
+
+.fx-edge-selected {
+  stroke: var(--ink);
+  opacity: 1;
+}
+
+.fx-arrow-agent {
+  fill: var(--flow);
+}
+
+.fx-arrow-human {
+  fill: var(--ink-2);
+}
+
+.fx-arrow-selected {
+  fill: var(--ink);
+}
+
+.fx-edge-chip-human text {
+  fill: var(--ink-2);
+}
+
+.fx-node-kind {
+  font-size: 13px;
+  font-weight: 700;
+  fill: var(--muted);
+}
+
+.fx-node-kind-done {
+  fill: var(--good);
+}
+
+.fx-node-kind-parked {
+  fill: var(--critical);
+}
+
+.fx-node-kind-human .fx-node-box {
+  stroke-dasharray: 2 4;
+}
+
+.fx-node-kind-done .fx-node-box {
+  stroke: rgba(12, 163, 12, 0.45);
+}
+
+.fx-node-kind-parked .fx-node-box {
+  stroke: rgba(208, 59, 59, 0.5);
+}
+
+.fx-port {
+  cursor: crosshair;
+}
+
+.fx-port circle {
+  fill: var(--raised-2);
+  stroke: var(--ink-2);
+}
+
+.fx-port text {
+  fill: var(--ink);
+  font-size: 13px;
+  font-weight: 700;
+  pointer-events: none;
+}
+
+.fx-port:hover circle {
+  fill: var(--ink);
+}
+
+.fx-port:hover text {
+  fill: var(--page);
+}
+
+.fx-connector {
+  fill: none;
+  stroke: var(--ink);
+  stroke-width: 2;
+  stroke-dasharray: 5 4;
+  pointer-events: none;
+}
+
+.fx-form-edit {
+  gap: 12px;
+}
+
+.fx-field {
+  display: grid;
+  gap: 5px;
+}
+
+.fx-field-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.fx-field-hint {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.fx-input,
+.fx-textarea {
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.3);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.84rem;
+}
+
+.fx-textarea {
+  resize: vertical;
+  line-height: 1.45;
+}
+
+.fx-input:focus,
+.fx-textarea:focus {
+  outline: none;
+  border-color: var(--ink-2);
+}
+
+.fx-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-2);
+  font-size: 0.78rem;
+}
+
+.fx-instructions {
+  white-space: pre-wrap;
+}
+
+.fx-danger {
+  align-self: flex-start;
+  border-color: rgba(208, 59, 59, 0.5);
+  color: var(--critical-ink);
+}
+
+.fx-danger:hover {
+  border-color: var(--critical);
+  color: var(--critical-ink);
+}
+
+.fx-assist-btn {
+  justify-self: start;
+}
+
+/* -- AI assistant */
+
+.fx-assist {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--ink-2);
+  border-radius: 12px;
+  background: var(--raised-2);
+}
+
+.fx-assist-h {
+  margin: 8px 0 4px;
+  color: var(--ink-2);
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.fx-assist-text {
+  max-height: 220px;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.3);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  white-space: pre-wrap;
+}
+
+.fx-skill-preview {
+  max-height: 140px;
+}
+
+.fx-assist-list {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--ink-2);
+  font-size: 0.8rem;
 }
 
 /* ------------------------------------------------------------------ motion & a11y */

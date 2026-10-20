@@ -6,8 +6,8 @@ defmodule SymphonyElixirWeb.Presenter do
   alias SymphonyElixir.{Accounts, Config, Orchestrator, StatusDashboard}
   alias SymphonyElixirWeb.FactoryPresenter
 
-  @spec state_payload(GenServer.name(), timeout()) :: map()
-  def state_payload(orchestrator, snapshot_timeout_ms) do
+  @spec state_payload(GenServer.name(), timeout(), keyword()) :: map()
+  def state_payload(orchestrator, snapshot_timeout_ms, opts \\ []) do
     generated_at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
 
     case Orchestrator.snapshot(orchestrator, snapshot_timeout_ms) do
@@ -31,7 +31,7 @@ defmodule SymphonyElixirWeb.Presenter do
           projects: project_usage_payload(running, retrying, settings),
           telemetry: telemetry_payload(settings),
           capacity: capacity_payload(settings),
-          factory: FactoryPresenter.payload(running, settings)
+          factory: FactoryPresenter.payload(running, settings, teams: Keyword.get(opts, :teams, []))
         }
 
       :timeout ->

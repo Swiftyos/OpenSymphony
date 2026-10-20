@@ -8,55 +8,102 @@ defmodule SymphonyElixirWeb.FactoryPresenter do
   round-trip.
   """
 
-  alias SymphonyElixir.{FactoryControls, UsageLedger}
+  alias SymphonyElixir.Factory.Store
+  alias SymphonyElixir.{IssueStage, UsageLedger}
 
   # Fixed harness order: color follows the harness, never its rank.
   @harnesses ["codex", "claude", "opencode"]
+  @issues_per_stage 40
 
-  @nodes [
-    %{id: "todo", label: "Todo", state: "Todo"},
-    %{id: "implement", label: "Implement", state: "In Progress"},
-    %{id: "review", label: "In Review", state: "In Review"},
-    %{id: "rework", label: "Rework", state: "In Progress"},
-    %{id: "merge", label: "Merge", state: "In Progress"},
-    %{id: "blocked", label: "Blocked", state: "In Progress"},
-    %{id: "done", label: "Done", state: "Done"}
-  ]
-
-  # The designed paths of the factory. Observed transitions outside this list
-  # are still reported (as `expected: false`) so surprises are visible.
-  @expected_edges [
-    {"todo", "implement"},
-    {"implement", "review"},
-    {"review", "merge"},
-    {"review", "rework"},
-    {"review", "implement"},
-    {"rework", "implement"},
-    {"rework", "review"},
-    {"merge", "done"},
-    {"implement", "blocked"},
-    {"blocked", "implement"},
-    {"merge", "blocked"},
-    {"blocked", "review"},
-    {"merge", "review"}
-  ]
-
-  @spec payload([map()], map()) :: map()
-  def payload(running, settings) do
+  @doc """
+  `opts[:teams]` adds teams to show even before they have any issues (e.g. the
+  viewer's own Linear teams).
+  """
+  @spec payload([map()], map(), keyword()) :: map()
+  def payload(running, settings, opts \\ []) do
     ledger = UsageLedger.snapshot()
     pricing = Map.get(settings, :pricing) || %{}
     running_by_issue = Map.new(running, &{&1.issue_identifier, &1})
+    teams = team_keys(ledger.flow.issues, Keyword.get(opts, :teams, []))
+    definitions = Map.new(teams, &{&1, Store.get(&1)})
 
     %{
       harnesses: @harnesses,
       capacity: settings.agent.max_concurrent_agents,
-      controls: FactoryControls.all(),
       controls_enabled: controls_enabled?(settings),
-      defaults: %{backend: settings.agent.backend, effort: settings.agent.default_effort},
       priced: map_size(pricing) > 0,
       usage: Enum.map(ledger.usage, &(&1 |> price_row(pricing) |> Map.update(:url, nil, fn url -> https_url(url) end))),
-      flow: flow_payload(ledger.flow, running_by_issue)
+      team: List.first(teams),
+      teams: Enum.map(teams, &%{key: &1, name: if(&1 == Store.default_team(), do: "Default flow"), custom: Store.custom?(&1)}),
+      definitions: definitions,
+      flows: Map.new(teams, &{&1, team_flow(&1, definitions[&1], ledger.flow, running_by_issue)}),
+      linear_states: linear_states(settings, definitions),
+      label_prefix: IssueStage.label_prefix(settings)
     }
+  end
+
+  # Teams with work, teams with their own flow, and any extra (viewer's) teams.
+  # With none at all, show the organisation's default flow.
+  defp team_keys(issues, extra) do
+    issues
+    |> Enum.map(& &1.team)
+    |> Kernel.++(Store.teams())
+    |> Kernel.++(extra)
+    |> Enum.filter(&(is_binary(&1) and &1 != Store.default_team()))
+    |> Enum.uniq()
+    |> Enum.sort()
+    |> case do
+      [] -> [Store.default_team()]
+      teams -> teams
+    end
+  end
+
+  defp team_flow(team, definition, flow, running_by_issue) do
+    ids = MapSet.new(definition["stages"], & &1["id"])
+    members = flow.issues |> Enum.filter(&(&1.team == team and MapSet.member?(ids, &1.node))) |> Enum.group_by(& &1.node)
+
+    nodes =
+      Map.new(ids, fn id ->
+        issues = Map.get(members, id, [])
+
+        {id,
+         %{
+           issues: issues |> Enum.sort_by(& &1.since_ms, :desc) |> Enum.take(@issues_per_stage) |> Enum.map(&issue_row(&1, running_by_issue)),
+           count: length(issues),
+           running: Enum.count(issues, &Map.has_key?(running_by_issue, &1.issue))
+         }}
+      end)
+
+    edges =
+      flow.edges
+      |> Enum.filter(&(&1.team == team and MapSet.member?(ids, &1.from) and MapSet.member?(ids, &1.to)))
+      |> Map.new(&{"#{&1.from}>#{&1.to}", &1.count})
+
+    %{nodes: nodes, edges: edges}
+  end
+
+  defp issue_row(issue, running_by_issue) do
+    agent = Map.get(running_by_issue, issue.issue)
+
+    %{
+      id: issue[:id],
+      issue: issue.issue,
+      title: issue.title,
+      url: https_url(issue.url),
+      project: issue.project,
+      team: issue.team,
+      since_ms: issue.since_ms,
+      backend: agent && agent.backend
+    }
+  end
+
+  # Offered as suggestions in the editor's Linear state field.
+  defp linear_states(settings, definitions) do
+    definitions
+    |> Map.values()
+    |> Enum.flat_map(fn d -> Enum.map(d["stages"], & &1["linear_state"]) end)
+    |> Kernel.++(settings.tracker.active_states ++ ["In Review"] ++ settings.tracker.terminal_states)
+    |> Enum.uniq()
   end
 
   @doc """
@@ -90,57 +137,5 @@ defmodule SymphonyElixirWeb.FactoryPresenter do
       value when is_number(value) -> value
       _ -> 0
     end
-  end
-
-  defp flow_payload(%{edges: edges, issues: issues}, running_by_issue) do
-    node_ids = MapSet.new(@nodes, & &1.id)
-
-    issues_by_node =
-      issues
-      |> Enum.filter(&MapSet.member?(node_ids, &1.node))
-      |> Enum.group_by(& &1.node)
-
-    nodes =
-      Enum.map(@nodes, fn node ->
-        members = Map.get(issues_by_node, node.id, [])
-
-        Map.merge(node, %{
-          issues:
-            members
-            |> Enum.sort_by(& &1.since_ms, :desc)
-            |> Enum.take(40)
-            |> Enum.map(fn issue ->
-              agent = Map.get(running_by_issue, issue.issue)
-
-              %{
-                id: issue[:id],
-                issue: issue.issue,
-                title: issue.title,
-                url: https_url(issue.url),
-                project: issue.project,
-                team: issue.team,
-                since_ms: issue.since_ms,
-                backend: agent && agent.backend
-              }
-            end),
-          count: length(members),
-          running: Enum.count(members, &Map.has_key?(running_by_issue, &1.issue))
-        })
-      end)
-
-    observed = Map.new(edges, &{{&1.from, &1.to}, &1.count})
-
-    expected =
-      Enum.map(@expected_edges, fn {from, to} = key ->
-        %{from: from, to: to, count: Map.get(observed, key, 0), expected: true}
-      end)
-
-    unexpected =
-      edges
-      |> Enum.reject(&({&1.from, &1.to} in @expected_edges))
-      |> Enum.filter(&(MapSet.member?(node_ids, &1.from) and MapSet.member?(node_ids, &1.to)))
-      |> Enum.map(&Map.put(&1, :expected, false))
-
-    %{nodes: nodes, edges: expected ++ unexpected}
   end
 end

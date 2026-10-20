@@ -13,18 +13,10 @@ defmodule SymphonyElixirWeb.DashboardLive do
   require Logger
 
   alias SymphonyElixir.{Auth, Config, FactoryControls, IssueStage, Orchestrator, Tracker, UsageLedger, Users}
+  alias SymphonyElixir.Factory.{Assistant, Definition, Store}
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixirWeb.{Endpoint, FactoryPresenter, ObservabilityPubSub, Presenter, UserAuth, Visibility}
   @runtime_tick_ms 1_000
-
-  # Issue moves offered from the flow diagram: action => {Linear state, stage label}.
-  @moves %{
-    "approve" => {"In Progress", "merge"},
-    "rework" => {"In Progress", "rework"},
-    "block" => {"In Progress", "blocked"},
-    "unblock" => {"In Progress", "implement"},
-    "to_review" => {"In Review", nil}
-  }
 
   @impl true
   def mount(_params, _session, socket) do
@@ -57,10 +49,10 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   @impl true
-  def handle_event("factory_control", %{"stage" => stage, "field" => field} = params, socket) do
+  def handle_event("factory_control", %{"team" => team, "stage" => stage, "field" => field} = params, socket) do
     reply =
-      with :ok <- authorize(socket, &Auth.can_control?/1, :not_admin),
-           {:ok, controls} <- FactoryControls.put(stage, field, Map.get(params, "value")) do
+      with :ok <- authorize(socket, &Auth.can_edit_factory?(&1, team), :not_team_editor),
+           {:ok, controls} <- FactoryControls.put({team, stage}, field, Map.get(params, "value"), actor(socket)) do
         ObservabilityPubSub.broadcast_update()
         %{ok: true, controls: controls}
       else
@@ -70,18 +62,18 @@ defmodule SymphonyElixirWeb.DashboardLive do
     {:reply, reply, socket}
   end
 
-  # Only the issue id comes from the browser. Everything else (team, title, url,
-  # project) is read back from the tracker, so a client can't pass one issue's
-  # identifier for the permission check and mutate another.
-  def handle_event("factory_move", %{"id" => id, "action" => action}, socket) when is_binary(id) do
+  # Only the issue id and target stage come from the browser. The issue (team,
+  # title, url, project, current stage) is read back from the tracker, and the
+  # move must be a connection in that team's flow.
+  def handle_event("factory_move", %{"id" => id, "to" => to}, socket) when is_binary(id) and is_binary(to) do
     reply =
-      with {:ok, {state_name, stage}} <- Map.fetch(@moves, action) |> move_or_error(action),
-           :ok <- authorize(socket, fn _user -> true end, :signed_out),
+      with :ok <- authorize(socket, fn _user -> true end, :signed_out),
            {:ok, %Issue{} = issue} <- fetch_movable_issue(id),
            :ok <- authorize(socket, &Auth.can_move?(&1, issue.identifier), :not_team_member),
-           :ok <- Tracker.set_stage(issue.id, state_name, stage) do
-        record_move(issue.id, socket.assigns.current_user, state_name, stage)
-        UsageLedger.observe_issue(%{issue | state: state_name, labels: replace_stage_label(issue.labels, stage)})
+           {:ok, target} <- allowed_move(socket, issue, to),
+           :ok <- Tracker.set_stage(issue.id, target["linear_state"], target["label"]) do
+        record_move(issue.id, socket.assigns.current_user, target)
+        UsageLedger.observe_issue(%{issue | state: target["linear_state"], labels: replace_stage_label(issue.labels, target["label"])})
 
         Orchestrator.request_refresh()
         ObservabilityPubSub.broadcast_update()
@@ -91,6 +83,43 @@ defmodule SymphonyElixirWeb.DashboardLive do
       end
 
     {:reply, reply, socket}
+  end
+
+  def handle_event("factory_save", %{"team" => team, "version" => version, "definition" => definition}, socket)
+      when is_binary(team) and is_integer(version) and is_map(definition) do
+    reply =
+      with :ok <- authorize(socket, &Auth.can_edit_factory?(&1, team), :not_team_editor),
+           {:ok, saved} <- Store.put(team, definition, version, actor(socket)) do
+        sync_stage_labels(team, saved)
+        ObservabilityPubSub.broadcast_update()
+        %{ok: true, definition: saved}
+      else
+        {:error, {:conflict, current}} -> %{ok: false, conflict: current}
+        {:error, [_ | _] = errors} -> %{ok: false, errors: errors}
+        {:error, reason} -> %{ok: false, errors: [describe_error(reason)]}
+      end
+
+    {:reply, reply, socket}
+  end
+
+  # Drafting runs the harness CLI (up to a few minutes), so it runs off the
+  # LiveView process and the result is pushed back when it's ready.
+  def handle_event("factory_assist", %{"team" => team, "stage" => stage, "request" => request} = params, socket)
+      when is_binary(team) and is_binary(stage) do
+    case authorize(socket, &Auth.can_edit_factory?(&1, team), :not_team_editor) do
+      :ok ->
+        ref = Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
+        definition = assist_definition(params["definition"], team)
+        skill? = params["skill"] != false
+
+        socket =
+          start_async(socket, {:assist, ref}, fn -> Assistant.draft(definition, stage, request, skill: skill?) end)
+
+        {:reply, %{ok: true, pending: true, ref: ref}, socket}
+
+      {:error, reason} ->
+        {:reply, %{ok: false, error: describe_error(reason)}, socket}
+    end
   end
 
   def handle_event("approve_account", %{"id" => id}, socket) do
@@ -111,11 +140,64 @@ defmodule SymphonyElixirWeb.DashboardLive do
     {:noreply, socket}
   end
 
-  # Moves are made with Symphony's Linear key, so leave a note saying who did it.
-  defp record_move(_issue_id, %Auth.User{local: true}, _state_name, _stage), do: :ok
+  @impl true
+  def handle_async({:assist, ref}, {:ok, {:ok, suggestion}}, socket) do
+    {:noreply, push_event(socket, "factory_assist_result", %{ref: ref, ok: true, suggestion: suggestion})}
+  end
 
-  defp record_move(issue_id, user, state_name, stage) do
-    where = if stage, do: "#{state_name} · #{IssueStage.label_prefix()}/#{stage}", else: state_name
+  def handle_async({:assist, ref}, {:ok, {:error, message}}, socket) do
+    {:noreply, push_event(socket, "factory_assist_result", %{ref: ref, ok: false, error: message})}
+  end
+
+  def handle_async({:assist, ref}, {:exit, _reason}, socket) do
+    {:noreply, push_event(socket, "factory_assist_result", %{ref: ref, ok: false, error: "The assistant stopped unexpectedly."})}
+  end
+
+  # The unsaved draft the editor is working on, if it's a valid definition;
+  # otherwise the team's saved flow.
+  defp assist_definition(%{} = draft, team) do
+    case Definition.validate(draft) do
+      {:ok, definition} -> definition
+      {:error, _errors} -> Store.get(team)
+    end
+  end
+
+  defp assist_definition(_draft, team), do: Store.get(team)
+
+  # Members make the person-moved connections of their team's flow; admins can
+  # make any connection the flow defines.
+  defp allowed_move(socket, issue, to) do
+    definition = Store.get(IssueStage.team(issue))
+    from = IssueStage.stage(issue)
+
+    with %{} = target <- Definition.stage(definition, to) || {:error, :unknown_target},
+         %{} = transition <- Enum.find(definition["transitions"], &(&1["from"] == from and &1["to"] == to)) || {:error, :not_a_move} do
+      {:ok, user} = UserAuth.refresh_user(socket)
+      if transition["by"] == "human" or Auth.can_control?(user), do: {:ok, target}, else: {:error, :agent_move}
+    end
+  end
+
+  defp sync_stage_labels(team, definition) do
+    labels = definition["stages"] |> Enum.map(& &1["label"]) |> Enum.filter(&is_binary/1)
+
+    if team != Store.default_team() and labels != [] do
+      Task.start(fn -> log_label_sync(team, Tracker.ensure_stage_labels(team, labels)) end)
+    end
+
+    :ok
+  end
+
+  defp log_label_sync(_team, {:ok, []}), do: :ok
+  defp log_label_sync(team, {:ok, created}), do: Logger.info("Created Linear labels team=#{team} labels=#{Enum.join(created, ",")}")
+  defp log_label_sync(team, {:error, reason}), do: Logger.warning("Linear label sync failed team=#{team} reason=#{inspect(reason)}")
+
+  defp actor(socket), do: socket.assigns.current_user.username || "local"
+
+  # Moves are made with Symphony's Linear key, so leave a note saying who did it.
+  defp record_move(_issue_id, %Auth.User{local: true}, _target), do: :ok
+
+  defp record_move(issue_id, user, target) do
+    where = if target["label"], do: "#{target["name"]} (#{target["linear_state"]} · #{IssueStage.label_prefix()}/#{target["label"]})", else: "#{target["name"]} (#{target["linear_state"]})"
 
     body = "**Symphony:** #{escape_markdown(user.name)} (@#{escape_markdown(user.username)}) moved this to **#{escape_markdown(where)}** from the dashboard."
 
@@ -141,13 +223,19 @@ defmodule SymphonyElixirWeb.DashboardLive do
     end
   end
 
-  # Per-user view of the factory payload: what this person may change.
+  # Per-user view of the factory payload: what this person may change, and
+  # team names from their Linear memberships.
   defp factory_json(factory, user) do
     enabled? = FactoryPresenter.controls_enabled?(Config.settings!())
+    names = Map.new(user.teams, &{&1.key, &1.name})
+    editable = Map.new(factory.teams, &{&1.key, enabled? and Auth.can_edit_factory?(user, &1.key)})
 
     factory
+    |> Map.update!(:teams, fn teams -> Enum.map(teams, &Map.put(&1, :name, &1.name || names[&1.key])) end)
     |> Map.put(:controls_enabled, enabled? and Auth.can_control?(user))
     |> Map.put(:movable_teams, if(enabled?, do: Auth.movable_teams(user), else: []))
+    |> Map.put(:can_edit, editable)
+    |> Map.put(:can_control, editable)
     |> Jason.encode!()
   end
 
@@ -173,16 +261,19 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   defp replace_stage_label(labels, stage) do
+    stage = stage && String.downcase(stage)
     prefix = IssueStage.label_prefix() <> "/"
-    kept = Enum.reject(labels || [], &String.starts_with?(String.downcase(&1), prefix))
+    kept = Enum.reject(labels, &String.starts_with?(String.downcase(&1), prefix))
     if stage, do: kept ++ [prefix <> stage], else: kept
   end
 
-  defp move_or_error({:ok, move}, _action), do: {:ok, move}
-  defp move_or_error(:error, action), do: {:error, {:unknown_action, action}}
-
   defp describe_error(:controls_disabled), do: "This dashboard is read-only (server.controls: false)."
-  defp describe_error(:not_admin), do: "Only Linear admins can change stage controls."
+  defp describe_error(:not_admin), do: "Only Linear admins can do that."
+  defp describe_error(:not_team_editor), do: "Only this team's members and Linear admins can change its flow."
+  defp describe_error(:unknown_target), do: "That stage isn't in this team's flow."
+  defp describe_error(:not_a_move), do: "That move isn't a connection in this team's flow."
+  defp describe_error(:agent_move), do: "Agents make that move. Only admins can force it."
+  defp describe_error(:invalid_team), do: "That isn't a valid team."
   defp describe_error(:not_team_member), do: "You can only move issues from teams you belong to in Linear."
   defp describe_error({:stage_label_not_found, label}), do: "Create the Linear label #{label} first."
   defp describe_error(:signed_out), do: "Your session ended. Sign in again."
@@ -444,8 +535,10 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   defp load_payload(user) do
+    teams = if user, do: Enum.map(user.teams, & &1.key), else: []
+
     orchestrator()
-    |> Presenter.state_payload(snapshot_timeout_ms())
+    |> Presenter.state_payload(snapshot_timeout_ms(), teams: teams)
     |> Visibility.filter_payload(user)
   end
 
@@ -460,20 +553,18 @@ defmodule SymphonyElixirWeb.DashboardLive do
   # ------------------------------------------------------------- needs you
 
   defp attention_groups(payload, now) do
-    nodes = factory_nodes(payload)
-
     [
       %{
-        title: "Waiting for review",
+        title: "Waiting on people",
         tone: "review",
         icon: "◐",
-        items: nodes |> Map.get("review", []) |> Enum.sort_by(& &1.since_ms) |> Enum.map(&flow_item(&1, now))
+        items: payload |> issues_in_kind("human") |> Enum.sort_by(& &1.since_ms) |> Enum.map(&flow_item(&1, now))
       },
       %{
-        title: "Blocked",
+        title: "Parked",
         tone: "critical",
         icon: "⏸",
-        items: nodes |> Map.get("blocked", []) |> Enum.sort_by(& &1.since_ms) |> Enum.map(&flow_item(&1, now))
+        items: payload |> issues_in_kind("parked") |> Enum.sort_by(& &1.since_ms) |> Enum.map(&flow_item(&1, now))
       },
       %{
         title: "Retrying",
@@ -504,11 +595,16 @@ defmodule SymphonyElixirWeb.DashboardLive do
     if Auth.mode() == :accounts and Auth.can_control?(user), do: Users.list("pending"), else: []
   end
 
-  defp factory_nodes(%{factory: %{flow: %{nodes: nodes}}}) do
-    Map.new(nodes, &{&1.id, &1.issues})
+  # Issues sitting in stages of a kind (human, parked) across every visible team.
+  defp issues_in_kind(%{factory: %{definitions: definitions, flows: flows}}, kind) do
+    Enum.flat_map(definitions, fn {team, definition} ->
+      definition["stages"]
+      |> Enum.filter(&(&1["kind"] == kind))
+      |> Enum.flat_map(&get_in(flows, [team, :nodes, &1["id"], :issues]))
+    end)
   end
 
-  defp factory_nodes(_payload), do: %{}
+  defp issues_in_kind(_payload, _kind), do: []
 
   defp flow_item(issue, now) do
     %{

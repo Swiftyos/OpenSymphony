@@ -14,6 +14,12 @@ defmodule SymphonyElixirWeb.StaticAssetController do
   @spec factory_js(Conn.t(), map()) :: Conn.t()
   def factory_js(conn, _params), do: serve(conn, "/factory.js")
 
+  @spec factory_flow_js(Conn.t(), map()) :: Conn.t()
+  def factory_flow_js(conn, _params), do: serve(conn, "/factory_flow.js")
+
+  @spec factory_assist_js(Conn.t(), map()) :: Conn.t()
+  def factory_assist_js(conn, _params), do: serve(conn, "/factory_assist.js")
+
   @spec phoenix_html_js(Conn.t(), map()) :: Conn.t()
   def phoenix_html_js(conn, _params), do: serve(conn, "/vendor/phoenix_html/phoenix_html.js")
 

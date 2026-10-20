@@ -219,6 +219,18 @@ defmodule SymphonyElixir.Auth do
   def can_control?(_user), do: false
 
   @doc """
+  Whether the user may edit a team's factory flow and its stage controls:
+  admins for any team (and the organisation default), members for their own
+  teams. Guests never.
+  """
+  @spec can_edit_factory?(User.t() | nil, String.t() | nil) :: boolean()
+  def can_edit_factory?(%User{local: true}, _team), do: true
+  def can_edit_factory?(%User{admin: true}, _team), do: true
+  def can_edit_factory?(%User{guest: true}, _team), do: false
+  def can_edit_factory?(%User{teams: teams}, team) when is_binary(team), do: Enum.any?(teams, &(&1.key == team))
+  def can_edit_factory?(_user, _team), do: false
+
+  @doc """
   Team keys whose issues the user may move; `:all` for admins and local operators.
   """
   @spec movable_teams(User.t() | nil) :: :all | [String.t()]

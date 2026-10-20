@@ -51,7 +51,7 @@ defmodule SymphonyElixirWeb.Visibility do
     |> Map.update(:retrying, [], &(&1 |> Enum.filter(fn e -> visible?.(e.issue_identifier) end) |> Enum.map(fn e -> drop_host_fields(e) end)))
     |> Map.update(:projects, [], fn projects -> Enum.map(projects, &restrict_project_issues(&1, visible?)) end)
     |> Map.put(:accounts, [])
-    |> Map.update(:factory, nil, &restrict_factory(&1, visible?))
+    |> Map.update(:factory, nil, &restrict_factory(&1, visible?, teams))
     |> then(fn p -> Map.put(p, :counts, %{running: length(p.running), retrying: length(p.retrying)}) end)
   end
 
@@ -59,16 +59,19 @@ defmodule SymphonyElixirWeb.Visibility do
     Map.update(project, :issues, [], fn issues -> Enum.filter(issues, fn i -> visible?.(i[:issue_identifier]) end) end)
   end
 
-  defp restrict_factory(nil, _visible?), do: nil
+  defp restrict_factory(nil, _visible?, _teams), do: nil
 
-  defp restrict_factory(factory, visible?) do
-    nodes =
-      Enum.map(factory.flow.nodes, fn node ->
-        issues = Enum.filter(node.issues, &visible?.(&1.issue))
-        %{node | issues: issues, count: length(issues), running: Enum.count(issues, & &1.backend)}
-      end)
+  defp restrict_factory(factory, visible?, teams) do
+    keep = Enum.filter(factory.teams, &MapSet.member?(teams, &1.key))
 
-    %{factory | usage: Enum.filter(factory.usage, &visible?.(&1.issue)), flow: %{factory.flow | nodes: nodes}}
+    %{
+      factory
+      | usage: Enum.filter(factory.usage, &visible?.(&1.issue)),
+        teams: keep,
+        team: keep |> List.first() |> then(&(&1 && &1.key)),
+        definitions: Map.take(factory.definitions, Enum.map(keep, & &1.key)),
+        flows: Map.take(factory.flows, Enum.map(keep, & &1.key))
+    }
   end
 
   defp drop_host_fields(entry) when is_map(entry), do: Map.drop(entry, @host_fields)

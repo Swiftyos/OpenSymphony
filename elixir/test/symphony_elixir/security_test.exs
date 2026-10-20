@@ -204,7 +204,7 @@ defmodule SymphonyElixir.SecurityTest do
       {:ok, _} = Users.disable(mia.id, "ada")
 
       # The already-open page re-checks the account before acting.
-      render_hook(mia_view, "factory_move", %{"id" => "id-PAY-1", "action" => "approve"})
+      render_hook(mia_view, "factory_move", %{"id" => "id-PAY-1", "to" => "merge"})
       assert_reply(mia_view, %{ok: false, error: "Your session ended" <> _})
 
       # And the old session can't mount a new page.
@@ -213,7 +213,7 @@ defmodule SymphonyElixir.SecurityTest do
 
     test "attribution comments escape names so they can't add links", %{mia: mia} do
       {:ok, view, _html} = live(session_for(mia), "/")
-      render_hook(view, "factory_move", %{"id" => "id-PAY-2", "action" => "approve"})
+      render_hook(view, "factory_move", %{"id" => "id-PAY-2", "to" => "merge"})
       assert_reply(view, %{ok: true})
       assert_receive {:comment, %{issueId: "id-PAY-2", body: body}}
       refute body =~ "[click](https://evil.test)"

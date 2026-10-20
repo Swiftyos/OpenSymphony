@@ -399,8 +399,9 @@ defmodule SymphonyElixir.FactoryCoverageTest do
       costs = Map.new(payload.usage, &{&1.backend, &1.cost_usd})
       assert costs == %{"claude" => 4.0, "codex" => nil}
 
-      unexpected = payload.flow.edges |> Enum.reject(& &1.expected) |> Enum.map(&Map.take(&1, [:from, :to, :count]))
-      assert unexpected == [%{from: "todo", to: "done", count: 1}]
+      # Transitions are reported per team, keyed "from>to", even ones the flow doesn't define.
+      assert payload.flows["PAY"].edges == %{"todo>done" => 1}
+      assert payload.flows["PAY"].nodes["done"].count == 1
     end
   end
 end

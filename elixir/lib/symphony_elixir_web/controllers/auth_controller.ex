@@ -199,7 +199,7 @@ defmodule SymphonyElixirWeb.AuthController do
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>{page_title(@page)} · {@instance}</title>
-        <link rel="stylesheet" href="/dashboard.css" />
+        <link rel="stylesheet" href={SymphonyElixirWeb.StaticAssets.url("/dashboard.css")} />
       </head>
       <body>
         <main class="login-shell">

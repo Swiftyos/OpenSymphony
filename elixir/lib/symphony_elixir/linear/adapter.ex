@@ -185,6 +185,96 @@ defmodule SymphonyElixir.Linear.Adapter do
     parent == prefix or String.starts_with?(name, prefix <> "/")
   end
 
+  @label_inventory_query """
+  query SymphonyStageLabels($teamKey: String!, $prefix: String!) {
+    teams(filter: {key: {eq: $teamKey}}, first: 1) {
+      nodes {
+        id
+      }
+    }
+    issueLabels(first: 250, filter: {or: [{name: {eqIgnoreCase: $prefix}}, {parent: {name: {eqIgnoreCase: $prefix}}}]}) {
+      nodes {
+        id
+        name
+        isGroup
+        team {
+          id
+        }
+        parent {
+          id
+        }
+      }
+    }
+  }
+  """
+
+  @label_create_mutation """
+  mutation SymphonyCreateLabel($input: IssueLabelCreateInput!) {
+    issueLabelCreate(input: $input) {
+      success
+      issueLabel {
+        id
+      }
+    }
+  }
+  """
+
+  @spec ensure_stage_labels(String.t(), [String.t()]) :: {:ok, [String.t()]} | {:error, term()}
+  def ensure_stage_labels(team_key, labels) when is_binary(team_key) and is_list(labels) do
+    prefix = SymphonyElixir.IssueStage.label_prefix()
+
+    with {:ok, response} <- client_module().graphql(@label_inventory_query, %{teamKey: team_key, prefix: prefix}),
+         {:ok, team_id} <- inventory_team_id(response),
+         nodes = get_in(response, ["data", "issueLabels", "nodes"]) || [],
+         {:ok, group_id, created_group} <- ensure_label_group(nodes, team_id, prefix) do
+      existing =
+        nodes
+        |> Enum.filter(&(get_in(&1, ["parent", "id"]) == group_id))
+        |> MapSet.new(&String.downcase(&1["name"] || ""))
+
+      labels
+      |> Enum.map(&String.downcase/1)
+      |> Enum.uniq()
+      |> Enum.reject(&MapSet.member?(existing, &1))
+      |> Enum.reduce_while({:ok, created_group}, &create_stage_label(&1, &2, group_id, team_id, prefix))
+    end
+  end
+
+  defp create_stage_label(label, {:ok, created}, group_id, team_id, prefix) do
+    case create_label(%{name: label, parentId: group_id, teamId: team_id}) do
+      {:ok, _id} -> {:cont, {:ok, created ++ ["#{prefix}/#{label}"]}}
+      {:error, reason} -> {:halt, {:error, reason}}
+    end
+  end
+
+  defp inventory_team_id(response) do
+    case get_in(response, ["data", "teams", "nodes", Access.at(0), "id"]) do
+      id when is_binary(id) -> {:ok, id}
+      _ -> {:error, :team_not_found}
+    end
+  end
+
+  # Use the team's own group, else a workspace-wide one, else create it for the team.
+  defp ensure_label_group(nodes, team_id, prefix) do
+    groups = Enum.filter(nodes, &(&1["isGroup"] == true and String.downcase(&1["name"] || "") == prefix))
+
+    case Enum.find(groups, &(get_in(&1, ["team", "id"]) == team_id)) || Enum.find(groups, &is_nil(&1["team"])) do
+      %{"id" => id} ->
+        {:ok, id, []}
+
+      nil ->
+        with {:ok, id} <- create_label(%{name: prefix, isGroup: true, teamId: team_id}), do: {:ok, id, [prefix]}
+    end
+  end
+
+  defp create_label(input) do
+    case client_module().graphql(@label_create_mutation, %{input: input}) do
+      {:ok, %{"data" => %{"issueLabelCreate" => %{"success" => true, "issueLabel" => %{"id" => id}}}}} -> {:ok, id}
+      {:ok, _response} -> {:error, {:label_create_failed, input.name}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   defp client_module do
     Application.get_env(:symphony_elixir, :linear_client_module, Client)
   end

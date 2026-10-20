@@ -134,7 +134,7 @@ defmodule SymphonyElixir.FactoryControlsTest do
 
     %{usage: [row], flow: flow} = UsageLedger.snapshot()
     assert {row.team, row.backend, row.input_tokens, row.output_tokens} == {"PAY", "claude", 1_500_000, 100_000}
-    assert %{from: "review", to: "rework", count: 1} in flow.edges
+    assert %{team: "PAY", from: "review", to: "rework", count: 1} in flow.edges
     assert [%{node: "rework"}] = flow.issues
 
     settings = %{Config.settings!() | pricing: %{"claude" => %{"input_per_mtok" => 3, "output_per_mtok" => 15}}}
@@ -210,11 +210,11 @@ defmodule SymphonyElixir.FactoryControlsTest do
       assert html =~ "Needs you"
       assert html =~ ~s(data-fx="diagram")
 
-      render_hook(view, "factory_control", %{"stage" => "implement", "field" => "paused", "value" => true})
+      render_hook(view, "factory_control", %{"team" => "MT", "stage" => "implement", "field" => "paused", "value" => true})
       assert_reply(view, %{ok: true, controls: %{paused: true}})
-      assert FactoryControls.paused?("implement")
+      assert FactoryControls.paused?({"MT", "implement"})
 
-      render_hook(view, "factory_control", %{"stage" => "implement", "field" => "max_agents", "value" => -1})
+      render_hook(view, "factory_control", %{"team" => "MT", "stage" => "implement", "field" => "max_agents", "value" => -1})
       assert_reply(view, %{ok: false})
     end
 
@@ -224,7 +224,7 @@ defmodule SymphonyElixir.FactoryControlsTest do
       UsageLedger.observe_issue(issue("MT-10", "In Review"))
 
       {:ok, view, _html} = live(build_conn(), "/")
-      render_hook(view, "factory_move", %{"id" => "id-MT-10", "issue" => "MT-10", "action" => "approve", "title" => "Task MT-10"})
+      render_hook(view, "factory_move", %{"id" => "id-MT-10", "to" => "merge"})
       assert_reply(view, %{ok: true})
 
       assert [%Issue{state: "In Progress", labels: ["factory/merge"]}] = Application.get_env(:symphony_elixir, :memory_tracker_issues)

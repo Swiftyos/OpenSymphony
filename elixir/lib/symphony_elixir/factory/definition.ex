@@ -156,6 +156,7 @@ defmodule SymphonyElixir.Factory.Definition do
       "effort" => nil,
       "max_agents" => nil,
       "paused" => false,
+      "skill" => nil,
       "position" => %{"x" => x, "y" => y}
     }
   end
@@ -177,7 +178,8 @@ defmodule SymphonyElixir.Factory.Definition do
       "effort" => blank_to_nil(Map.get(stage, "effort")),
       "max_agents" => Map.get(stage, "max_agents"),
       "paused" => Map.get(stage, "paused") == true,
-      "position" => normalize_position(Map.get(stage, "position"))
+      "position" => normalize_position(Map.get(stage, "position")),
+      "skill" => normalize_skill(Map.get(stage, "skill"), stage |> Map.get("id") |> to_s() |> normalize())
     }
   end
 
@@ -196,6 +198,13 @@ defmodule SymphonyElixir.Factory.Definition do
 
   defp normalize_position(%{"x" => x, "y" => y}) when is_number(x) and is_number(y), do: %{"x" => x, "y" => y}
   defp normalize_position(_position), do: %{"x" => 0, "y" => 0}
+
+  # A stage's skill always lives at .codex/skills/<stage-id>/SKILL.md, whatever
+  # path was suggested, so a draft can't point outside the skills folder.
+  defp normalize_skill(%{"content" => content}, id) when is_binary(content) and content != "",
+    do: %{"path" => ".codex/skills/#{id}/SKILL.md", "content" => String.slice(content, 0, 20_000)}
+
+  defp normalize_skill(_skill, _id), do: nil
 
   # ------------------------------------------------------------------ validation
 
