@@ -1734,6 +1734,68 @@ a.brand:hover {
   vertical-align: middle;
 }
 
+.access-cell {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.access-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  color: var(--ink-2);
+  font-size: 0.76rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.access-chip-granted {
+  border-color: rgba(57, 135, 229, 0.55);
+  color: var(--ink);
+}
+
+.access-chip-admin {
+  border-color: rgba(250, 178, 25, 0.55);
+  color: var(--warning);
+}
+
+.access-remove {
+  padding: 0 2px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.access-remove:hover,
+.access-remove:focus-visible {
+  color: var(--critical-ink);
+}
+
+.access-add select {
+  padding: 2px 6px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.76rem;
+  cursor: pointer;
+}
+
+.access-add select:hover,
+.access-add select:focus-visible {
+  border-color: var(--ink-2);
+  color: var(--ink);
+}
+
 .row-actions {
   display: inline-flex;
   flex-wrap: wrap;

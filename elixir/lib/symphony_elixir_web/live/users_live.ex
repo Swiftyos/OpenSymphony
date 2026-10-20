@@ -1,21 +1,24 @@
 defmodule SymphonyElixirWeb.UsersLive do
   @moduledoc """
-  Admin page for Symphony accounts: approve or reject sign-ups, disable or
-  re-enable people, and hand out one-time password reset links.
+  Accounts and access. Admins approve or reject sign-ups, disable or re-enable
+  people, hand out one-time password reset links, and make people admins of
+  teams. Team admins (and admins) give people access to their teams and to the
+  projects their teams work in.
 
-  Roles are not edited here: they come from Linear (admin flag, team
-  memberships) for each account's email.
+  Linear roles and team memberships are shown but not edited here: they come
+  from Linear for each account's email. Symphony's grants add to them.
   """
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
   import SymphonyElixirWeb.Topbar
 
-  alias SymphonyElixir.{Auth, Config, Users}
+  alias SymphonyElixir.{Auth, Config, UsageLedger, Users}
+  alias SymphonyElixir.Factory.Store
   alias SymphonyElixirWeb.{ObservabilityPubSub, UserAuth}
 
   @impl true
   def mount(_params, _session, socket) do
-    case UserAuth.require_admin(socket) do
+    case UserAuth.require_access_manager(socket) do
       {:cont, socket} ->
         if connected?(socket), do: :ok = ObservabilityPubSub.subscribe()
 
@@ -55,6 +58,56 @@ defmodule SymphonyElixirWeb.UsersLive do
 
   def handle_event("dismiss_reset", _params, socket), do: {:noreply, assign(socket, :reset_link, nil)}
 
+  # `choice` is "access:<scope>" or "admin:<team>"; an empty choice is the
+  # select's placeholder. Grants come from a form (`account`), revokes from a
+  # chip's button (`id`).
+  def handle_event("grant", %{"account" => id} = params, socket),
+    do: handle_event("grant", params |> Map.delete("account") |> Map.put("id", id), socket)
+
+  def handle_event(action, %{"id" => id, "choice" => choice}, socket) when action in ["grant", "revoke"] and choice != "" do
+    case UserAuth.refresh_user(socket) do
+      {:ok, user} ->
+        socket = socket |> assign(:current_user, user) |> change_access(user, id, choice, action == "grant")
+        {:noreply, load_accounts(socket)}
+
+      {:error, _reason} ->
+        {:noreply, redirect(socket, to: "/login")}
+    end
+  end
+
+  def handle_event(action, _params, socket) when action in ["grant", "revoke"], do: {:noreply, socket}
+
+  defp change_access(socket, user, id, "admin:" <> team, admin?) do
+    if Auth.can_control?(user) do
+      message = if admin?, do: "Now a #{team} admin.", else: "No longer a #{team} admin."
+      socket |> result(Users.set_team_admin(id, team, admin?, actor(socket)), message) |> resync(id)
+    else
+      assign(socket, :flash_message, "Only admins can choose team admins.")
+    end
+  end
+
+  defp change_access(socket, user, id, "access:" <> scope, granted?) do
+    if Auth.can_grant?(user, scope) do
+      outcome = Users.set_access(id, scope, granted?, actor(socket))
+      socket |> result(outcome, access_message(scope, granted?)) |> resync(id)
+    else
+      assign(socket, :flash_message, "You can only give access to teams you administer and their projects.")
+    end
+  end
+
+  defp change_access(socket, _user, _id, _choice, _granted?), do: assign(socket, :flash_message, "Pick a team or project.")
+
+  defp access_message("project:" <> slug, true), do: "Given access to the #{slug} project."
+  defp access_message("project:" <> slug, false), do: "Removed from the #{slug} project."
+  defp access_message(team, true), do: "Added to #{team}."
+  defp access_message(team, false), do: "Removed from #{team}."
+
+  # Open dashboards pick up the new access when they reconnect.
+  defp resync(socket, id) do
+    UserAuth.disconnect_sessions(id)
+    socket
+  end
+
   defp apply_action(socket, "approve", id), do: result(socket, Users.approve(id, actor(socket)), "Approved.")
   defp apply_action(socket, "reject", id), do: result(socket, Users.reject(id), "Request rejected.")
   defp apply_action(socket, "enable", id), do: result(socket, Users.enable(id, actor(socket)), "Re-enabled.")
@@ -89,6 +142,9 @@ defmodule SymphonyElixirWeb.UsersLive do
   defp actor(socket), do: socket.assigns.current_user.username || "local"
 
   defp load_accounts(socket) do
+    viewer = socket.assigns.current_user
+    admin? = Auth.can_control?(viewer)
+
     accounts =
       Users.list()
       |> Enum.map(fn account ->
@@ -101,12 +157,60 @@ defmodule SymphonyElixirWeb.UsersLive do
         Map.put(account, :linear, linear)
       end)
 
-    assign(socket, :groups, [
-      {"Waiting for approval", "pending", Enum.filter(accounts, &(&1.status == "pending"))},
-      {"Active", "active", Enum.filter(accounts, &(&1.status == "active"))},
-      {"Disabled", "disabled", Enum.filter(accounts, &(&1.status == "disabled"))}
-    ])
+    {teams, projects} = known_scopes(accounts)
+
+    groups =
+      [
+        {"Waiting for approval", "pending", Enum.filter(accounts, &(&1.status == "pending"))},
+        {"Active", "active", Enum.filter(accounts, &(&1.status == "active"))},
+        {"Disabled", "disabled", Enum.filter(accounts, &(&1.status == "disabled"))}
+      ]
+      # Team admins manage access, not accounts.
+      |> Enum.filter(fn {_title, status, _accounts} -> admin? or status == "active" end)
+
+    assign(socket,
+      groups: groups,
+      admin?: admin?,
+      team_options: if(admin?, do: teams, else: []),
+      grantable: grantable(viewer, teams, projects)
+    )
   end
+
+  # Teams and projects Symphony knows of: from Linear memberships, saved
+  # flows, observed work, and configured projects.
+  defp known_scopes(accounts) do
+    seen = UsageLedger.projects()
+
+    teams =
+      accounts
+      |> Enum.flat_map(&Map.get(&1.linear, :teams, []))
+      |> Enum.map(& &1.key)
+      |> Kernel.++(Store.teams() -- [Store.default_team()])
+      |> Kernel.++(Enum.flat_map(Map.values(seen), & &1.teams))
+      |> Enum.uniq()
+      |> Enum.sort()
+
+    projects =
+      Config.settings!().tracker.projects
+      |> List.wrap()
+      |> Enum.map(& &1.slug)
+      |> Kernel.++(Map.keys(seen) ++ Store.projects())
+      |> Enum.filter(&is_binary/1)
+      |> Enum.uniq()
+      |> Enum.map(&%{slug: &1, name: get_in(seen, [&1, :name]) || &1})
+      |> Enum.sort_by(&String.downcase(&1.name))
+
+    {teams, projects}
+  end
+
+  defp grantable(viewer, teams, projects) do
+    %{
+      teams: Enum.filter(teams, &Auth.can_grant?(viewer, &1)),
+      projects: Enum.filter(projects, &Auth.can_grant?(viewer, "project:" <> &1.slug))
+    }
+  end
+
+  defp project_name(projects, "project:" <> slug), do: Enum.find_value(projects, slug, &(&1.slug == slug && &1.name))
 
   @impl true
   def render(assigns) do
@@ -119,7 +223,9 @@ defmodule SymphonyElixirWeb.UsersLive do
       <section class="panel">
         <div class="panel-head">
           <h2 class="panel-title">Users</h2>
-          <p class="panel-hint">Roles and teams come from Linear for each account's email. Approve people here.</p>
+          <p class="panel-hint">
+            Linear roles and teams come from each account's email. Give people extra access to teams and projects here.
+          </p>
         </div>
 
         <p :if={@flash_message} class="users-flash" role="status">{@flash_message}</p>
@@ -155,6 +261,7 @@ defmodule SymphonyElixirWeb.UsersLive do
                 <th>User</th>
                 <th>Linear</th>
                 <th>Role</th>
+                <th>Access</th>
                 <th class="num">Last sign-in</th>
                 <th class="num"></th>
               </tr>
@@ -179,9 +286,72 @@ defmodule SymphonyElixirWeb.UsersLive do
                 <td>
                   <span class="muted">{role(account)}</span>
                 </td>
+                <td>
+                  <div class="access-cell">
+                    <span :for={team <- linear_teams(account)} class="access-chip" title="Linear team membership">{team}</span>
+                    <span :for={team <- Map.get(account, :team_admin, [])} class="access-chip access-chip-admin">
+                      ★ {team} admin
+                      <button
+                        :if={@admin?}
+                        type="button"
+                        class="access-remove"
+                        phx-click="revoke"
+                        phx-value-id={account.id}
+                        phx-value-choice={"admin:" <> team}
+                        aria-label={"Remove @#{account.username} as #{team} admin"}
+                      >
+                        ×
+                      </button>
+                    </span>
+                    <span :for={scope <- Map.get(account, :access, [])} class="access-chip access-chip-granted" title="Given in Symphony">
+                      {scope_label(scope, @grantable.projects)}
+                      <button
+                        :if={Auth.can_grant?(@current_user, scope)}
+                        type="button"
+                        class="access-remove"
+                        phx-click="revoke"
+                        phx-value-id={account.id}
+                        phx-value-choice={"access:" <> scope}
+                        aria-label={"Remove @#{account.username} from #{scope}"}
+                      >
+                        ×
+                      </button>
+                    </span>
+                    <form
+                      :if={status == "active" and (@grantable.teams != [] or @grantable.projects != [] or @team_options != [])}
+                      id={"grant-#{account.id}"}
+                      phx-change="grant"
+                      class="access-add"
+                    >
+                      <input type="hidden" name="account" value={account.id} />
+                      <select name="choice" aria-label={"Give @#{account.username} access"}>
+                        <option value="">+ Add access</option>
+                        <optgroup :if={@grantable.teams != []} label="Team">
+                          <option :for={team <- @grantable.teams -- Map.get(account, :access, [])} value={"access:" <> team}>
+                            {team}
+                          </option>
+                        </optgroup>
+                        <optgroup :if={@grantable.projects != []} label="Project">
+                          <option
+                            :for={project <- @grantable.projects}
+                            :if={("project:" <> project.slug) not in Map.get(account, :access, [])}
+                            value={"access:project:" <> project.slug}
+                          >
+                            {project.name}
+                          </option>
+                        </optgroup>
+                        <optgroup :if={@team_options != []} label="Make team admin">
+                          <option :for={team <- @team_options -- Map.get(account, :team_admin, [])} value={"admin:" <> team}>
+                            ★ {team} admin
+                          </option>
+                        </optgroup>
+                      </select>
+                    </form>
+                  </div>
+                </td>
                 <td class="num numeric muted">{account.last_sign_in_at || "never"}</td>
                 <td class="num">
-                  <div class="row-actions">
+                  <div :if={@admin?} class="row-actions">
                     <button :if={status == "pending"} type="button" class="fx-action is-primary" phx-click="approve" phx-value-id={account.id}>
                       Approve
                     </button>
@@ -225,17 +395,21 @@ defmodule SymphonyElixirWeb.UsersLive do
   defp role(%{bootstrap_admin: true}), do: "Admin (first account)"
 
   defp role(%{linear: linear}) do
-    teams = Enum.map_join(linear.teams, ", ", & &1.key)
-
-    base =
-      cond do
-        linear.admin -> "Linear admin"
-        linear.guest -> "Guest"
-        true -> "Member"
-      end
-
-    if teams == "", do: base, else: "#{base} · #{teams}"
+    cond do
+      linear.admin -> "Linear admin"
+      linear.guest -> "Guest"
+      true -> "Member"
+    end
   end
+
+  # Teams from Linear itself; granted ones show as their own chips.
+  defp linear_teams(%{linear: linear} = account) do
+    granted = Map.get(account, :team_admin, []) ++ Map.get(account, :access, [])
+    for %{key: key} <- Map.get(linear, :teams, []), key not in granted, do: key
+  end
+
+  defp scope_label("project:" <> _slug = scope, projects), do: "◆ " <> project_name(projects, scope)
+  defp scope_label(team, _projects), do: team
 
   defp problem_label(:not_in_workspace), do: "Not in Linear workspace"
   defp problem_label(:inactive_user), do: "Deactivated in Linear"

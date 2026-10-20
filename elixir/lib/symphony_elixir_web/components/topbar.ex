@@ -63,7 +63,7 @@ defmodule SymphonyElixirWeb.Topbar do
               <span>{role(@current_user)}</span>
             </p>
             <a href="/account">Account &amp; password</a>
-            <a :if={Auth.can_control?(@current_user)} href="/admin/users">Users</a>
+            <a :if={Auth.can_manage_access?(@current_user)} href="/admin/users">Users</a>
             <%!-- POST-only so other sites can't sign people out; the token comes from the page's meta tag. --%>
             <form
               method="post"

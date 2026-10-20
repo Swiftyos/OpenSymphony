@@ -1094,9 +1094,12 @@
       return t.from === stage.id && t.by === "human";
     });
     var movable = this.data.movable_teams;
-    // Project flows hold issues from several teams: moving needs the issue's team.
+    var movableProjects = this.data.movable_projects || [];
+    // Project flows hold issues from several teams: moving needs the issue's
+    // team, or access to its project.
     var canMove = function (issue) {
-      return movable === "all" || (Array.isArray(movable) && movable.indexOf(issue.team) !== -1);
+      if (movable === "all" || (Array.isArray(movable) && movable.indexOf(issue.team) !== -1)) return true;
+      return !!issue.project && movableProjects.indexOf(issue.project) !== -1;
     };
 
     var list = el("div", "fx-drawer-list");

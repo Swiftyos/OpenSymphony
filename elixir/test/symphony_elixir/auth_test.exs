@@ -48,6 +48,7 @@ defmodule SymphonyElixir.AuthTest do
 
     defp member("mia@acme.test"), do: users([user("u-1", "Mia Member", false, [team("PAY")])])
     defp member("ada@acme.test"), do: users([user("u-2", "Ada Admin", true, [])])
+    defp member("lee@acme.test"), do: users([user("u-5", "Lee Guest", false, []) |> Map.put("guest", true)])
     defp member("gone@acme.test"), do: users([Map.put(user("u-4", "Gone", false, []), "active", false)])
     defp member(_email), do: users([])
 
@@ -382,7 +383,7 @@ defmodule SymphonyElixir.AuthTest do
       mia_session = session_for(mia)
       {:ok, view, html} = live(session_for(admin), "/admin/users")
       assert html =~ "@mia"
-      assert html =~ "Member · PAY"
+      assert html =~ ~s(<span class="access-chip" title="Linear team membership">PAY</span>)
 
       view |> element(~s(button[phx-click="reset"][phx-value-id="#{mia.id}"])) |> render_click()
       assert render(view) =~ "/reset/"
@@ -394,6 +395,72 @@ defmodule SymphonyElixir.AuthTest do
 
       # The first admin can't be disabled, by anyone.
       assert {:error, :cannot_disable_bootstrap} = Users.disable(admin.id, "someone")
+    end
+
+    test "admins choose team admins, who give people access to their team and its projects", %{admin: admin, mia: mia} do
+      accounts_mode!(tracker_project_slug: nil, tracker_projects: [%{slug: "configured"}])
+      {:ok, lee} = register!("lee", "lee@acme.test")
+      {:ok, lee} = Users.approve(lee.id, "ada")
+      Enum.each(["PAY-1", "WEB-1"], &UsageLedger.observe_issue(%SymphonyElixir.Linear.Issue{id: &1, identifier: &1, state: "Todo", project_slug: "checkout"}))
+      UsageLedger.observe_issue(%SymphonyElixir.Linear.Issue{id: "OPS-1", identifier: "OPS-1", state: "Todo", project_slug: "ops-only"})
+
+      # A plain member can't open the page; a Linear guest is read-only.
+      assert {:error, {:redirect, %{to: "/"}}} = live(session_for(mia), "/admin/users")
+      assert {:ok, %Auth.User{guest: true, teams: []}} = Auth.user_for_id(lee.id, 1)
+
+      {:ok, admin_view, html} = live(session_for(admin), "/admin/users")
+      assert html =~ ~s(value="admin:PAY")
+      assert html =~ ~s(value="access:project:configured")
+      render_change(element(admin_view, "#grant-#{mia.id}"), %{"account" => mia.id, "choice" => "admin:PAY"})
+      assert render(admin_view) =~ "Now a PAY admin."
+      assert %{team_admin: ["PAY"]} = Users.get(mia.id)
+
+      # Mia, now a PAY admin, manages access but not accounts.
+      {:ok, view, html} = live(session_for(mia), "/admin/users")
+      refute html =~ ~s(phx-click="disable")
+      refute html =~ "admin:PAY"
+      assert html =~ ~s(value="access:PAY")
+      assert html =~ ~s(value="access:project:checkout")
+      refute html =~ ~s(value="access:project:ops-only")
+      refute html =~ ~s(value="access:WEB")
+
+      render_change(element(view, "#grant-#{lee.id}"), %{"account" => lee.id, "choice" => "access:project:checkout"})
+      assert render(view) =~ "Given access to the checkout project."
+      render_hook(view, "grant", %{"account" => lee.id, "choice" => "access:PAY"})
+      assert render(view) =~ "Added to PAY."
+
+      # Grants lift guest status and count like membership.
+      assert {:ok, %Auth.User{guest: false, projects: ["checkout"], teams: [%{key: "PAY"}]} = lee_user} = Auth.user_for_id(lee.id, Users.get(lee.id).session_version)
+      assert Auth.can_move_issue?(lee_user, "WEB-1", "checkout")
+      refute Auth.can_move_issue?(lee_user, "WEB-1", "web")
+      assert Auth.can_edit_factory?(lee_user, "project:checkout")
+      assert Auth.movable_projects(lee_user) == ["checkout"]
+
+      # What a team admin can't do.
+      render_hook(view, "grant", %{"account" => lee.id, "choice" => "access:WEB"})
+      assert render(view) =~ "You can only give access to teams you administer"
+      render_hook(view, "grant", %{"account" => lee.id, "choice" => "admin:PAY"})
+      assert render(view) =~ "Only admins can choose team admins."
+      render_hook(view, "grant", %{"account" => lee.id, "choice" => "bogus"})
+      assert render(view) =~ "Pick a team or project."
+      render_hook(view, "grant", %{"account" => lee.id, "choice" => ""})
+      render_hook(view, "approve", %{"id" => lee.id})
+      assert render(view) =~ "Only admins can manage accounts."
+
+      view |> element(~s(button[phx-click="revoke"][phx-value-choice="access:PAY"])) |> render_click()
+      assert render(view) =~ "Removed from PAY."
+      render_hook(view, "revoke", %{"id" => lee.id, "choice" => "access:project:checkout"})
+      assert render(view) =~ "Removed from the checkout project."
+      assert %{access: []} = Users.get(lee.id)
+
+      admin_view |> element(~s(button[phx-click="revoke"][phx-value-choice="admin:PAY"])) |> render_click()
+      assert render(admin_view) =~ "No longer a PAY admin."
+
+      # No one signed in, no rights; a session that ended is sent to sign in.
+      assert Auth.movable_projects(nil) == []
+      refute Auth.can_grant?(nil, "PAY")
+      {:ok, _} = Users.disable(mia.id, "ada")
+      assert {:error, {:redirect, %{to: "/login"}}} = render_hook(view, "grant", %{"account" => lee.id, "choice" => "access:PAY"})
     end
 
     test "repeated sign-in attempts from one address are rate limited" do

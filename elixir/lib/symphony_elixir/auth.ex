@@ -55,7 +55,8 @@ defmodule SymphonyElixir.Auth do
 
   defmodule User do
     @moduledoc false
-    @derive {Jason.Encoder, only: [:id, :username, :name, :email, :avatar_url, :admin, :guest, :local, :teams]}
+    @public_fields [:id, :username, :name, :email, :avatar_url, :admin, :guest, :local, :teams, :team_admin, :projects]
+    @derive {Jason.Encoder, only: @public_fields}
     defstruct [
       :id,
       :username,
@@ -66,7 +67,9 @@ defmodule SymphonyElixir.Auth do
       admin: false,
       guest: false,
       local: false,
-      teams: []
+      teams: [],
+      team_admin: [],
+      projects: []
     ]
 
     @type t :: %__MODULE__{
@@ -79,7 +82,9 @@ defmodule SymphonyElixir.Auth do
             admin: boolean(),
             guest: boolean(),
             local: boolean(),
-            teams: [%{id: String.t(), key: String.t(), name: String.t()}]
+            teams: [%{id: String.t() | nil, key: String.t(), name: String.t() | nil}],
+            team_admin: [String.t()],
+            projects: [String.t()]
           }
   end
 
@@ -161,19 +166,43 @@ defmodule SymphonyElixir.Auth do
         {:error, :inactive_user}
 
       {:ok, member} ->
-        {:ok, with_linear_member(base, member, account.bootstrap_admin)}
+        {:ok, base |> with_linear_member(member, account.bootstrap_admin) |> with_grants(account)}
 
       :skip ->
-        {:ok, base}
+        {:ok, with_grants(base, account)}
 
       {:error, :not_in_workspace} ->
         {:error, :not_in_workspace}
 
       {:error, _reason} ->
-        # Linear unreachable: keep the person signed in with no team rights
-        # rather than locking everyone out.
-        {:ok, base}
+        # Linear unreachable: keep the person signed in with only the access
+        # Symphony granted, rather than locking everyone out.
+        {:ok, with_grants(base, account)}
     end
+  end
+
+  # Symphony's grants add to Linear: teams someone administers or was given
+  # access to count as their teams, and project access is kept separately.
+  # Any grant lifts Linear's guest read-only status.
+  defp with_grants(user, account) do
+    team_admin = Map.get(account, :team_admin) || []
+    access = Map.get(account, :access) || []
+    {project_scopes, team_access} = Enum.split_with(access, &String.starts_with?(&1, "project:"))
+    known = MapSet.new(user.teams, & &1.key)
+
+    granted =
+      (team_admin ++ team_access)
+      |> Enum.uniq()
+      |> Enum.reject(&MapSet.member?(known, &1))
+      |> Enum.map(&%{id: nil, key: &1, name: nil})
+
+    %{
+      user
+      | teams: user.teams ++ granted,
+        team_admin: team_admin,
+        projects: Enum.map(project_scopes, &String.replace_prefix(&1, "project:", "")),
+        guest: user.guest and team_admin == [] and access == []
+    }
   end
 
   defp with_linear_member(base, member, bootstrap_admin?) do
@@ -211,6 +240,15 @@ defmodule SymphonyElixir.Auth do
   def can_move?(_user, _identifier), do: false
 
   @doc """
+  Like `can_move?/2`, but also allows issues in projects the user was given
+  access to.
+  """
+  @spec can_move_issue?(User.t() | nil, String.t() | nil, String.t() | nil) :: boolean()
+  def can_move_issue?(user, identifier, project_slug) do
+    can_move?(user, identifier) or (is_binary(project_slug) and project_slug in movable_projects(user))
+  end
+
+  @doc """
   Whether the user may change factory-wide stage controls and approve accounts.
   """
   @spec can_control?(User.t() | nil) :: boolean()
@@ -228,10 +266,10 @@ defmodule SymphonyElixir.Auth do
   def can_edit_factory?(%User{admin: true}, _team), do: true
   def can_edit_factory?(%User{guest: true}, _team), do: false
 
-  # A project's flow: members of any team whose issues are in the project.
-  def can_edit_factory?(%User{teams: teams}, "project:" <> slug) do
-    project_teams = get_in(UsageLedger.projects(), [slug, :teams]) || []
-    Enum.any?(teams, &(&1.key in project_teams))
+  # A project's flow: people given the project, and members of any team whose
+  # issues are in it.
+  def can_edit_factory?(%User{teams: teams, projects: projects}, "project:" <> slug) do
+    slug in projects or Enum.any?(teams, &(&1.key in project_teams(slug)))
   end
 
   def can_edit_factory?(%User{teams: teams}, team) when is_binary(team), do: Enum.any?(teams, &(&1.key == team))
@@ -246,6 +284,35 @@ defmodule SymphonyElixir.Auth do
   def movable_teams(%User{guest: true}), do: []
   def movable_teams(%User{teams: teams}), do: Enum.map(teams, & &1.key)
   def movable_teams(_user), do: []
+
+  @doc """
+  Project slugs whose issues the user may move through a project grant.
+  """
+  @spec movable_projects(User.t() | nil) :: [String.t()]
+  def movable_projects(%User{guest: false, projects: projects}), do: projects
+  def movable_projects(_user), do: []
+
+  @doc """
+  Whether the user may open the Users page to manage access: admins, and admins
+  of at least one team.
+  """
+  @spec can_manage_access?(User.t() | nil) :: boolean()
+  def can_manage_access?(%User{team_admin: [_ | _]}), do: true
+  def can_manage_access?(user), do: can_control?(user)
+
+  @doc """
+  Whether the user may grant or revoke access to a scope: admins any team or
+  project, team admins their teams and the projects their teams work in.
+  """
+  @spec can_grant?(User.t() | nil, String.t()) :: boolean()
+  def can_grant?(%User{team_admin: [_ | _] = admin_of} = user, "project:" <> slug) do
+    can_control?(user) or Enum.any?(project_teams(slug), &(&1 in admin_of))
+  end
+
+  def can_grant?(%User{team_admin: admin_of} = user, scope) when is_binary(scope), do: can_control?(user) or scope in admin_of
+  def can_grant?(user, _scope), do: can_control?(user)
+
+  defp project_teams(slug), do: get_in(UsageLedger.projects(), [slug, :teams]) || []
 
   @doc false
   @spec clear_cache() :: :ok

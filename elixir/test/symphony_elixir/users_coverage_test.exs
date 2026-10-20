@@ -113,6 +113,26 @@ defmodule SymphonyElixir.UsersCoverageTest do
     end
   end
 
+  describe "team admins and access" do
+    test "admin and access lists are validated, deduplicated, and only for active accounts" do
+      admin = register!("ada", "ada@acme.test")
+      pending = register!("pat", "pat@acme.test")
+
+      assert {:ok, %{team_admin: ["PAY"]}} = Users.set_team_admin(admin.id, " pay ", true, "ada")
+      assert {:ok, %{team_admin: ["PAY"]}} = Users.set_team_admin(admin.id, "PAY", true, "ada")
+      assert {:ok, %{access: ["project:Checkout"]}} = Users.set_access(admin.id, "project:Checkout", true, "ada")
+      assert {:ok, %{access: ["WEB", "project:Checkout"]}} = Users.set_access(admin.id, "web", true, "ada")
+      assert {:ok, %{access: ["WEB"]}} = Users.set_access(admin.id, "project:Checkout", false, "ada")
+      assert {:ok, %{team_admin: []}} = Users.set_team_admin(admin.id, "PAY", false, "ada")
+
+      assert Users.set_team_admin(admin.id, "project:x", true, "ada") == {:error, :invalid_scope}
+      assert Users.set_access(admin.id, "project:bad slug", true, "ada") == {:error, :invalid_scope}
+      assert Users.set_access(admin.id, nil, true, "ada") == {:error, :invalid_scope}
+      assert Users.set_access("usr_missing", "PAY", true, "ada") == {:error, :not_found}
+      assert Users.set_access(pending.id, "PAY", true, "ada") == {:error, :not_active}
+    end
+  end
+
   describe "Users storage" do
     test "accounts persist to a private file and load back on restart" do
       dir = tmp_dir!()
@@ -121,6 +141,8 @@ defmodule SymphonyElixir.UsersCoverageTest do
 
       account = register!("ada", "ada@acme.test", %{"requested_from" => "10.0.0.1"})
       {:ok, token} = Users.create_reset_token(account.id)
+      {:ok, _} = Users.set_team_admin(account.id, "PAY", true, "ada")
+      {:ok, _} = Users.set_access(account.id, "project:web", true, "ada")
 
       assert {:ok, %{mode: mode}} = File.stat(path)
       assert Bitwise.band(mode, 0o777) == 0o600
@@ -131,7 +153,7 @@ defmodule SymphonyElixir.UsersCoverageTest do
       {:ok, pid} = Users.start_link(path: path)
       Process.unlink(pid)
 
-      assert %{username: "ada", status: "active", bootstrap_admin: true} = Users.get(account.id)
+      assert %{username: "ada", status: "active", bootstrap_admin: true, team_admin: ["PAY"], access: ["project:web"]} = Users.get(account.id)
       assert Users.reset_account_for_token(token).id == account.id
       assert {:ok, _} = Users.authenticate("ada", @password)
     end
@@ -149,6 +171,8 @@ defmodule SymphonyElixir.UsersCoverageTest do
           "status" => "disabled",
           "bootstrap_admin" => true,
           "session_version" => 3,
+          "team_admin" => ["pay", "bad team!", "PAY"],
+          "access" => ["project:ok", "nope nope", "web"],
           "reset" => %{"hash" => Base.encode64(:crypto.hash(:sha256, "tok")), "expires_ms" => expires}
         },
         %{"id" => "usr_min", "username" => "min", "reset" => "garbage"},
@@ -159,8 +183,8 @@ defmodule SymphonyElixir.UsersCoverageTest do
       File.write!(path, Jason.encode!(%{version: 1, users: users}))
       isolated_users!(path: path)
 
-      assert %{status: "disabled", session_version: 3, bootstrap_admin: true} = Users.get("usr_full")
-      assert %{status: "pending", session_version: 1, bootstrap_admin: false} = Users.get("usr_min")
+      assert %{status: "disabled", session_version: 3, bootstrap_admin: true, team_admin: ["PAY"], access: ["project:ok", "WEB"]} = Users.get("usr_full")
+      assert %{status: "pending", session_version: 1, bootstrap_admin: false, team_admin: [], access: []} = Users.get("usr_min")
       assert Enum.map(Users.list(), & &1.id) |> Enum.sort() == ["usr_full", "usr_min"]
       assert Users.reset_account_for_token("tok").id == "usr_full"
     end

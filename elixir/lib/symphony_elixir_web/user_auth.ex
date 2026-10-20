@@ -115,12 +115,12 @@ defmodule SymphonyElixirWeb.UserAuth do
   end
 
   @doc """
-  LiveView mount hook for admin-only pages.
+  LiveView mount hook for the Users page: admins and team admins.
   """
-  @spec require_admin(Phoenix.LiveView.Socket.t()) ::
+  @spec require_access_manager(Phoenix.LiveView.Socket.t()) ::
           {:cont, Phoenix.LiveView.Socket.t()} | {:halt, Phoenix.LiveView.Socket.t()}
-  def require_admin(socket) do
-    if Auth.can_control?(socket.assigns[:current_user]),
+  def require_access_manager(socket) do
+    if Auth.can_manage_access?(socket.assigns[:current_user]),
       do: {:cont, socket},
       else: {:halt, Phoenix.LiveView.redirect(socket, to: "/")}
   end

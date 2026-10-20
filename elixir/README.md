@@ -469,7 +469,10 @@ Open `http://127.0.0.1:<server.port>/`. The page is laid out in the order an ope
 
 ![Dashboard overview](../.github/media/dashboard-overview.png)
 
-- **Top bar**: live or offline, agents in use vs capacity, next poll.
+- **Top bar**: the team picker, live or offline, agents in use vs capacity, next poll. Pick a
+  team to narrow the whole page (numbers, flow, needs-you, sessions, spend) to that team's work
+  and its projects; **All teams** shows everything you can see. The choice is remembered per
+  browser and is in the URL (`/?team=PAY`).
 - **Headline numbers**: spend, tokens in/out, live agents, shipped issues, and how often
   review sent work back.
 - **Flow**: the factory as a live diagram. Each node is a Linear state plus `factory/*`
@@ -482,12 +485,20 @@ Open `http://127.0.0.1:<server.port>/`. The page is laid out in the order an ope
 - **Spend**: cost or tokens grouped by project, team (the Linear key, for example `PAY`), or
   task, split by harness. Hover a bar for input and output tokens, or switch to the table view.
 
-### Each team's flow, and steering it
+### Flows per team and project, and steering them
 
-Every Linear team can have its own factory flow: the stages work moves through and how they
-connect. Teams without one use the organisation's default flow, which starts as Symphony's
-built-in flow. Pick the team at the top of the diagram. `#team=PAY&stage=qa` deep-links to a
-team and stage.
+Each team, and each Linear project, can have its own factory flow: the stages work moves
+through and how they connect. An issue follows the most specific flow that exists:
+
+1. its **project's** flow, if the project has one
+2. otherwise its **team's** flow
+3. otherwise the organisation's **default** flow, which starts as Symphony's built-in flow
+
+Pick the flow at the top of the diagram. The list shows the default flow, teams, and projects,
+and says which flow each one uses until it has its own (for example "Checkout API, uses PAY
+flow"). A team's diagram leaves out issues in projects that have their own flow; those show on
+the project's diagram. `#team=PAY&stage=qa` or `#team=project%3Acheckout-api` deep-links to a
+flow and stage.
 
 Click a stage to manage it. Its panel replaces the Needs-you column so the whole diagram stays
 visible.
@@ -509,7 +520,9 @@ label back to Linear.
 
 #### Editing a flow
 
-**Edit flow** turns the diagram into an editor:
+**Edit flow** (or **Customize for this project/team** when it still uses an inherited flow)
+turns the diagram into an editor. Saving a project or team that inherited creates its own
+flow; **Use team flow** / **Use default flow** in the editor removes it again.
 
 ![Flow editor](../.github/media/dashboard-flow-editor.png)
 
@@ -530,14 +543,32 @@ label back to Linear.
   - Saving checks the flow (for example: every stage needs a Linear state, and there's a done
     stage) and lists any problems.
   - If someone else saved first, you're told rather than overwriting their change.
-  - On save, Symphony creates the team's `factory` label group and any missing stage labels in
-    Linear.
-- **Who can edit.** Team members edit their own team's flow; Linear admins edit any team's and the
+  - On save, Symphony creates the `factory` label group and any missing stage labels in
+    Linear: in the team, or for a project, in every team with issues in it.
+- **Who can edit.** Team members edit their own team's flow and the flows of projects their team
+  works in; people given a project edit its flow; admins edit any flow, including the
   organisation default.
 
 Agents get a **"Your current stage"** section in their prompt. It has the stage's instructions,
 the stage's skill if it has one, and each allowed move with the exact Linear state and label to
 set. Workflow templates can place it themselves with `{{ stage.prompt }}`.
+
+#### Designing a flow with AI
+
+**✦ Design with AI** (above the diagram, or **✦ Draft flow with AI** while editing) designs a
+whole flow from a description of your process, for example: "Agents implement and open a PR.
+A second agent reviews the diff for security issues and sends it back if it finds any. Then QA
+runs Playwright against the preview deploy. A person approves, an agent merges."
+
+- It starts from the flow the team or project uses now, keeps stage ids where a stage keeps its
+  purpose, and writes every stage's instructions and, optionally, skill files for agent stages.
+- The draft is checked like a save. If it isn't a valid flow, the harness is shown the problems
+  and gets one chance to fix them.
+- Runtime controls (harness, thinking level, agent cap, pause) carry over for stages that keep
+  their id, and new layouts are placed on the grid automatically.
+- The preview lists the summary, the stages added, changed, and removed, each stage's
+  instructions and skill, and the connections. **Apply to editor** puts it in the editor; nothing
+  changes until you **Save**. A whole flow usually takes one to three minutes.
 
 #### Drafting a stage with AI
 
@@ -554,9 +585,10 @@ seconds. Nothing changes until you review the preview and click **Apply**, then 
 
 ### Sign-in and permissions
 
-People sign in with a **username and password**. Who they are in Linear decides everything
-else: each account is tied to the Linear user with the same email, and that user's teams and
-admin flag set the permissions, so there are no roles or team lists to maintain in Symphony.
+People sign in with a **username and password**. Each account is tied to the Linear user with
+the same email, and that user's teams and admin flag set the permissions. On top of Linear,
+admins can make people **team admins**, and team admins can give people access to their team or
+to a project, without changing anything in Linear.
 
 ![Sign in](../.github/media/dashboard-sign-in.png)
 
@@ -570,15 +602,26 @@ admin flag set the permissions, so there are no roles or team lists to maintain 
   ownership itself, so the approval screen shows when and from which address each request
   came. Only approve people you expect.
 
-| Who (in Linear)               | Can                                                            |
-| ----------------------------- | -------------------------------------------------------------- |
-| Workspace admin, or the first account | Everything: stage controls, approving accounts         |
-| Team member                   | Move that team's issues (approve, rework, block, …)            |
-| Guest                         | View only                                                      |
-| Not in the workspace          | Can't sign up                                                  |
+| Who                                         | Can                                                                     |
+| ------------------------------------------- | ----------------------------------------------------------------------- |
+| Linear workspace admin, or the first account | Everything: any flow, stage controls, accounts, choosing team admins   |
+| Team admin (set in Symphony)                | What a team member can, plus give people access to the team and to projects the team works in |
+| Team member (in Linear, or given the team)  | See and move the team's issues, edit its flow and its projects' flows   |
+| Given a project                             | See and move that project's issues and edit its flow                    |
+| Linear guest                                | View only, unless given a team or project                               |
+| Not in the workspace                        | Can't sign up                                                           |
 
-- People only see their own teams' issues, sessions, and spend (admins see everything). Host
-  details such as workspace paths and worker hosts are hidden from non-admins.
+![Users and access](../.github/media/dashboard-users.png)
+
+- **Users** shows each person's access as chips: their Linear teams, ★ team-admin roles, and teams
+  and projects given in Symphony (◆ marks a project). Use **+ Add access** to give more, and ×
+  to take it away. Admins see every option; team admins see only their teams and those teams'
+  projects, and don't see account actions (approve, reset, disable).
+- Changing someone's access refreshes their open dashboards. Grants are stored with the account in
+  `~/.symphony/users.json` and logged with who made them.
+- People only see issues, sessions, and spend from their teams and the projects they were given
+  (admins see everything). Host details such as workspace paths and worker hosts are hidden from
+  non-admins.
 - Disabling an account, or changing or resetting its password, signs it out everywhere,
   including dashboard tabs that are already open.
 - Admins can reset passwords from **Users**. That gives a one-time link (valid 24 hours) to

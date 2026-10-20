@@ -3,8 +3,9 @@ defmodule SymphonyElixirWeb.Visibility do
   Trims dashboard and API payloads to what a person may see.
 
   Admins, the local operator, and API-token clients see everything. Everyone
-  else only sees issues, sessions, and spend from their own Linear teams, and
-  never sees host details (workspace paths, worker hosts, agent accounts).
+  else only sees issues, sessions, and spend from their teams (Linear teams
+  plus teams Symphony gave them) and projects they were given, and never sees
+  host details (workspace paths, worker hosts, agent accounts).
   """
 
   alias SymphonyElixir.Auth
@@ -25,7 +26,7 @@ defmodule SymphonyElixirWeb.Visibility do
   def filter_payload(payload, user) do
     case visible_teams(user) do
       :all -> payload
-      teams -> restrict(payload, MapSet.new(teams))
+      teams -> restrict(payload, MapSet.new(teams), user.projects)
     end
   end
 
@@ -41,13 +42,13 @@ defmodule SymphonyElixirWeb.Visibility do
 
   def scope_to_team(payload, team) when is_binary(team) do
     teams = MapSet.new([team])
-    visible? = fn identifier -> MapSet.member?(teams, team(identifier)) end
+    visible? = visible_fun(teams, [])
 
     payload
-    |> Map.update(:running, [], &Enum.filter(&1, fn e -> visible?.(e.issue_identifier) end))
-    |> Map.update(:retrying, [], &Enum.filter(&1, fn e -> visible?.(e.issue_identifier) end))
+    |> Map.update(:running, [], &Enum.filter(&1, fn e -> visible?.(e.issue_identifier, nil) end))
+    |> Map.update(:retrying, [], &Enum.filter(&1, fn e -> visible?.(e.issue_identifier, nil) end))
     |> Map.update(:projects, [], &team_projects(&1, visible?))
-    |> Map.update(:factory, nil, &restrict_factory(&1, visible?, teams))
+    |> Map.update(:factory, nil, &restrict_factory(&1, visible?, teams, []))
     |> then(fn p -> Map.put(p, :counts, %{running: length(p.running), retrying: length(p.retrying)}) end)
   end
 
@@ -65,15 +66,21 @@ defmodule SymphonyElixirWeb.Visibility do
   defp visible_teams(%Auth.User{admin: true}), do: :all
   defp visible_teams(%Auth.User{teams: teams}), do: Enum.map(teams, & &1.key)
 
-  defp restrict(payload, teams) do
-    visible? = fn identifier -> MapSet.member?(teams, team(identifier)) end
+  # An issue is visible when its team is, or its project was granted.
+  defp visible_fun(teams, projects) do
+    fn identifier, project -> MapSet.member?(teams, team(identifier)) or project in projects end
+  end
+
+  defp restrict(payload, teams, projects) do
+    visible? = visible_fun(teams, projects)
+    entry_visible? = fn e -> visible?.(e.issue_identifier, Map.get(e, :project_slug)) end
 
     payload
-    |> Map.update(:running, [], &(&1 |> Enum.filter(fn e -> visible?.(e.issue_identifier) end) |> Enum.map(fn e -> drop_host_fields(e) end)))
-    |> Map.update(:retrying, [], &(&1 |> Enum.filter(fn e -> visible?.(e.issue_identifier) end) |> Enum.map(fn e -> drop_host_fields(e) end)))
-    |> Map.update(:projects, [], fn projects -> Enum.map(projects, &restrict_project_issues(&1, visible?)) end)
+    |> Map.update(:running, [], &(&1 |> Enum.filter(entry_visible?) |> Enum.map(fn e -> drop_host_fields(e) end)))
+    |> Map.update(:retrying, [], &(&1 |> Enum.filter(entry_visible?) |> Enum.map(fn e -> drop_host_fields(e) end)))
+    |> Map.update(:projects, [], fn list -> Enum.map(list, &restrict_project_issues(&1, visible?)) end)
     |> Map.put(:accounts, [])
-    |> Map.update(:factory, nil, &restrict_factory(&1, visible?, teams))
+    |> Map.update(:factory, nil, &restrict_factory(&1, visible?, teams, projects))
     |> then(fn p -> Map.put(p, :counts, %{running: length(p.running), retrying: length(p.retrying)}) end)
   end
 
@@ -81,24 +88,24 @@ defmodule SymphonyElixirWeb.Visibility do
   defp team_projects(projects, visible?) do
     Enum.flat_map(projects, fn project ->
       issues = Map.get(project, :issues, [])
-      kept = Enum.filter(issues, &visible?.(&1[:issue_identifier]))
+      kept = Enum.filter(issues, &visible?.(&1[:issue_identifier], project[:slug]))
       if issues != [] and kept == [], do: [], else: [Map.put(project, :issues, kept)]
     end)
   end
 
   defp restrict_project_issues(project, visible?) do
-    Map.update(project, :issues, [], fn issues -> Enum.filter(issues, fn i -> visible?.(i[:issue_identifier]) end) end)
+    Map.update(project, :issues, [], fn issues -> Enum.filter(issues, fn i -> visible?.(i[:issue_identifier], project[:slug]) end) end)
   end
 
-  defp restrict_factory(nil, _visible?, _teams), do: nil
+  defp restrict_factory(nil, _visible?, _teams, _projects), do: nil
 
-  defp restrict_factory(factory, visible?, teams) do
-    keep = Enum.filter(factory.teams, &visible_flow?(&1, teams))
+  defp restrict_factory(factory, visible?, teams, projects) do
+    keep = Enum.filter(factory.teams, &visible_flow?(&1, teams, projects))
     keys = Enum.map(keep, & &1.key)
 
     %{
       factory
-      | usage: Enum.filter(factory.usage, &visible?.(&1.issue)),
+      | usage: Enum.filter(factory.usage, &visible?.(&1.issue, &1[:project])),
         teams: keep,
         team: keep |> Enum.find(&(Map.get(&1, :kind) != "project")) |> then(&(&1 && &1.key)),
         definitions: Map.take(factory.definitions, keys),
@@ -106,18 +113,20 @@ defmodule SymphonyElixirWeb.Visibility do
     }
   end
 
-  # Projects can span teams: show one when any of its teams is the viewer's,
-  # with only the viewer's teams' issues on it.
-  defp visible_flow?(%{kind: "project", teams: project_teams}, teams), do: Enum.any?(project_teams, &MapSet.member?(teams, &1))
-  defp visible_flow?(entry, teams), do: MapSet.member?(teams, entry.key)
+  # Projects can span teams: show one when it was granted or any of its teams
+  # is the viewer's, with only the issues they may see on it.
+  defp visible_flow?(%{kind: "project"} = entry, teams, projects),
+    do: entry.slug in projects or Enum.any?(entry.teams, &MapSet.member?(teams, &1))
+
+  defp visible_flow?(entry, teams, _projects), do: MapSet.member?(teams, entry.key)
 
   defp restrict_flow(flow, visible?) do
     nodes =
       Map.new(flow.nodes, fn {id, node} ->
-        if Enum.all?(node.issues, &visible?.(&1.issue)) do
+        if Enum.all?(node.issues, &visible?.(&1.issue, &1.project)) do
           {id, node}
         else
-          issues = Enum.filter(node.issues, &visible?.(&1.issue))
+          issues = Enum.filter(node.issues, &visible?.(&1.issue, &1.project))
           {id, %{node | issues: issues, count: length(issues), running: Enum.count(issues, & &1.backend)}}
         end
       end)

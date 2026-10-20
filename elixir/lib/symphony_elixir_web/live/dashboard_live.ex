@@ -77,7 +77,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
     reply =
       with :ok <- authorize(socket, fn _user -> true end, :signed_out),
            {:ok, %Issue{} = issue} <- fetch_movable_issue(id),
-           :ok <- authorize(socket, &Auth.can_move?(&1, issue.identifier), :not_team_member),
+           :ok <- authorize(socket, &Auth.can_move_issue?(&1, issue.identifier, issue.project_slug), :not_team_member),
            {:ok, target} <- allowed_move(socket, issue, to),
            :ok <- Tracker.set_stage(issue.id, target["linear_state"], target["label"]) do
         record_move(issue.id, socket.assigns.current_user, target)
@@ -302,6 +302,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
     |> Map.update!(:teams, fn teams -> Enum.map(teams, &Map.put(&1, :name, &1.name || names[&1.key])) end)
     |> Map.put(:controls_enabled, enabled? and Auth.can_control?(user))
     |> Map.put(:movable_teams, if(enabled?, do: Auth.movable_teams(user), else: []))
+    |> Map.put(:movable_projects, if(enabled?, do: Auth.movable_projects(user), else: []))
     |> Map.put(:can_edit, editable)
     |> Map.put(:can_control, editable)
     |> Jason.encode!()

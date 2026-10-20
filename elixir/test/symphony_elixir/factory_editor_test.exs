@@ -274,6 +274,17 @@ defmodule SymphonyElixir.FactoryEditorTest do
       assert Enum.map(payload.factory.teams, & &1.key) == ["PAY", "project:shared"]
       assert payload.factory.team == "PAY"
       assert %{count: 1, issues: [%{issue: "PAY-1"}]} = payload.factory.flows["project:shared"].nodes["implement"]
+
+      # Someone given only the project sees all of its work, and nothing else.
+      lee = %Auth.User{id: "l", name: "l", teams: [], projects: ["shared"]}
+      running = [%{issue_identifier: "WEB-1", project_slug: "shared"}, %{issue_identifier: "WEB-2", project_slug: "web-only"}]
+      projects = [%{slug: "shared", issues: [%{issue_identifier: "WEB-1"}]}, %{slug: "web-only", issues: [%{issue_identifier: "WEB-2"}]}]
+      payload = Visibility.filter_payload(%{running: running, retrying: [], projects: projects, factory: factory}, lee)
+      assert Enum.map(payload.running, & &1.issue_identifier) == ["WEB-1"]
+      assert [%{issues: [_]}, %{issues: []}] = payload.projects
+      assert Enum.map(payload.factory.teams, & &1.key) == ["project:shared"]
+      assert payload.factory.team == nil
+      assert payload.factory.flows["project:shared"].nodes["implement"].count == 2
     end
 
     test "the presenter shows the default flow when no team has work or a flow yet" do

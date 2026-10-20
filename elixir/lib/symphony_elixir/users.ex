@@ -2,8 +2,13 @@ defmodule SymphonyElixir.Users do
   @moduledoc """
   Dashboard user accounts: username + password, tied to a Linear user by email.
 
-  Accounts hold only what Linear can't: a username and a password hash. Teams and
-  admin rights are always read from Linear (see `SymphonyElixir.Auth`).
+  Accounts hold only what Linear can't: a username and a password hash, plus
+  access Symphony grants on top of Linear. Linear team membership and admin
+  rights are read from Linear (see `SymphonyElixir.Auth`); on top of that:
+
+    * `team_admin` - teams the person administers in Symphony (set by admins)
+    * `access` - extra teams (`PAY`) or projects (`project:<slug>`) the person
+      may work in, granted by an admin or one of the team's admins
 
   Lifecycle:
 
@@ -38,8 +43,13 @@ defmodule SymphonyElixir.Users do
           created_at: String.t(),
           approved_by: String.t() | nil,
           last_sign_in_at: String.t() | nil,
-          session_version: pos_integer()
+          session_version: pos_integer(),
+          team_admin: [String.t()],
+          access: [String.t()]
         }
+
+  @team_pattern ~r/^[A-Z0-9][A-Z0-9_-]{0,15}$/
+  @project_pattern ~r/^project:[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -66,6 +76,36 @@ defmodule SymphonyElixir.Users do
       GenServer.call(__MODULE__, {:register, username, email, hash_password(password), Map.get(params, "setup_code"), request})
     end
   end
+
+  @doc """
+  Makes the account an admin of a team (`true`) or removes that (`false`).
+  """
+  @spec set_team_admin(String.t(), String.t(), boolean(), String.t()) :: {:ok, user()} | {:error, atom()}
+  def set_team_admin(id, team, admin?, by) do
+    with {:ok, team} <- scope_key(team, :team), do: GenServer.call(__MODULE__, {:set_list, id, :team_admin, team, admin?, by})
+  end
+
+  @doc """
+  Grants (`true`) or revokes (`false`) access to a team (`PAY`) or a project
+  (`project:<slug>`). Callers check the granter may do this (`Auth.can_grant?/2`).
+  """
+  @spec set_access(String.t(), String.t(), boolean(), String.t()) :: {:ok, user()} | {:error, atom()}
+  def set_access(id, scope, granted?, by) do
+    with {:ok, scope} <- scope_key(scope, :any), do: GenServer.call(__MODULE__, {:set_list, id, :access, scope, granted?, by})
+  end
+
+  defp scope_key(scope, kind) when is_binary(scope) do
+    scope = String.trim(scope)
+    team = String.upcase(scope)
+
+    cond do
+      Regex.match?(@team_pattern, team) -> {:ok, team}
+      kind == :any and Regex.match?(@project_pattern, scope) -> {:ok, scope}
+      true -> {:error, :invalid_scope}
+    end
+  end
+
+  defp scope_key(_scope, _kind), do: {:error, :invalid_scope}
 
   @spec authenticate(String.t(), String.t()) :: {:ok, user()} | {:error, atom()}
   def authenticate(login, password) when is_binary(login) and is_binary(password) do
@@ -236,6 +276,8 @@ defmodule SymphonyElixir.Users do
           last_sign_in_at: nil,
           session_version: 1,
           reset: nil,
+          team_admin: [],
+          access: [],
           # Shown to the approving admin: Symphony can't verify email ownership itself.
           requested_from: request.from,
           requested_user_agent: request.user_agent
@@ -328,6 +370,25 @@ defmodule SymphonyElixir.Users do
         :ets.insert(@table, {id, record})
         persist(state.path)
         {:reply, {:ok, public(record)}, state}
+    end
+  end
+
+  def handle_call({:set_list, id, field, value, add?, by}, _from, state) do
+    case lookup(id) do
+      %{status: "active"} = record ->
+        current = Map.get(record, field, [])
+        updated = if add?, do: Enum.sort(Enum.uniq([value | current])), else: List.delete(current, value)
+        record = Map.put(record, field, updated)
+        :ets.insert(@table, {id, record})
+        persist(state.path)
+        Logger.info("Account #{field} #{if add?, do: "granted", else: "revoked"} user=#{record.username} scope=#{value} by=#{by}")
+        {:reply, {:ok, public(record)}, state}
+
+      nil ->
+        {:reply, {:error, :not_found}, state}
+
+      _inactive ->
+        {:reply, {:error, :not_active}, state}
     end
   end
 
@@ -499,6 +560,8 @@ defmodule SymphonyElixir.Users do
       last_sign_in_at: raw["last_sign_in_at"],
       session_version: raw["session_version"] || 1,
       reset: load_reset(raw["reset"]),
+      team_admin: load_scopes(raw["team_admin"], :team),
+      access: load_scopes(raw["access"], :any),
       requested_from: raw["requested_from"],
       requested_user_agent: raw["requested_user_agent"]
     }
@@ -512,4 +575,10 @@ defmodule SymphonyElixir.Users do
     do: %{hash: hash, expires_ms: expires_ms}
 
   defp load_reset(_reset), do: nil
+
+  defp load_scopes(scopes, kind) when is_list(scopes) do
+    for scope <- scopes, {:ok, key} <- [scope_key(scope, kind)], uniq: true, do: key
+  end
+
+  defp load_scopes(_scopes, _kind), do: []
 end
