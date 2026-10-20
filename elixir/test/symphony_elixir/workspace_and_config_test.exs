@@ -1651,6 +1651,57 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert claude_runtime_settings.effort == nil
   end
 
+  test "codex otel overrides follow the telemetry settings and sit with the command's own -c settings" do
+    alias SymphonyElixir.Telemetry
+
+    with_overrides = fn command ->
+      Enum.reduce(Telemetry.codex_config_overrides(), command, fn setting, acc ->
+        Config.with_codex_config(acc, "'" <> setting <> "'")
+      end)
+    end
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_command: "codex app-server --config shell_environment_policy.inherit=all --config model_provider=openrouter",
+      telemetry_enabled: true,
+      telemetry_otlp_endpoint: "http://host.containers.internal:4318",
+      telemetry_otlp_protocol: "http/protobuf",
+      telemetry_resource_attributes: %{"environment" => "agent-factory"}
+    )
+
+    assert with_overrides.(Config.codex_command()) ==
+             "codex app-server --config shell_environment_policy.inherit=all --config model_provider=openrouter" <>
+               ~s( -c 'otel.exporter={ otlp-http = { endpoint = "http://host.containers.internal:4318/v1/logs", protocol = "binary" } }') <>
+               ~s( -c 'otel.trace_exporter={ otlp-http = { endpoint = "http://host.containers.internal:4318/v1/traces", protocol = "binary" } }') <>
+               ~s( -c 'otel.metrics_exporter={ otlp-http = { endpoint = "http://host.containers.internal:4318/v1/metrics", protocol = "binary" } }') <>
+               " -c 'analytics.enabled=true' -c 'otel.log_user_prompt=false' -c 'otel.log_agent_responses=false'" <>
+               ~s( -c 'otel.environment="agent-factory"')
+
+    # Settings before `app-server` keep the overrides there too.
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_command: "codex --config a=1 app-server",
+      telemetry_enabled: true,
+      telemetry_otlp_endpoint: "http://collector:4317",
+      telemetry_otlp_traces_endpoint: "http://traces:4318/custom",
+      telemetry_otlp_traces_protocol: "http/json",
+      telemetry_include_logs: false,
+      telemetry_include_metrics: false,
+      telemetry_log_user_prompts: true
+    )
+
+    assert with_overrides.(Config.codex_command()) ==
+             "codex --config a=1" <>
+               ~s( -c 'otel.exporter="none"') <>
+               ~s( -c 'otel.trace_exporter={ otlp-http = { endpoint = "http://traces:4318/custom", protocol = "json" } }') <>
+               " -c 'otel.log_user_prompt=true' -c 'otel.log_agent_responses=true'" <>
+               ~s( -c 'otel.environment="symphony-unknown"' app-server)
+
+    write_workflow_file!(Workflow.workflow_file_path(), telemetry_enabled: true, telemetry_otlp_endpoint: nil)
+    assert Telemetry.codex_config_overrides() == []
+
+    write_workflow_file!(Workflow.workflow_file_path(), telemetry_enabled: false, telemetry_otlp_endpoint: "http://collector:4317")
+    assert Telemetry.codex_config_overrides() == []
+  end
+
   test "path safety returns errors for invalid path segments" do
     invalid_segment = String.duplicate("a", 300)
     path = Path.join(System.tmp_dir!(), invalid_segment)

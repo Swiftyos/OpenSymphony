@@ -196,8 +196,10 @@ defmodule SymphonyElixir.Config do
 
   # A `-c` given after `app-server` discards every `-c` given before it, so the
   # override goes where the command's own settings are: after `app-server` when
-  # they're there (or there are none), otherwise just before it.
-  defp with_codex_config(command, setting) do
+  # they're there (or there are none), otherwise just before it. `setting` is
+  # inserted verbatim, so callers shell-quote it when it isn't a bare word.
+  @spec with_codex_config(String.t(), String.t()) :: String.t()
+  def with_codex_config(command, setting) do
     case String.split(command, ~r/\sapp-server\b/, parts: 2) do
       [before, rest] ->
         if Regex.match?(~r/(^|\s)(-c|--config)(\s|=)/, before) and not Regex.match?(~r/(^|\s)(-c|--config)(\s|=)/, rest),

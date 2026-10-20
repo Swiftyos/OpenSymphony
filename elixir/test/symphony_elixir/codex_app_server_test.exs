@@ -737,13 +737,14 @@ defmodule SymphonyElixir.CodexAppServerTest do
 
       trace = File.read!(trace_file)
       assert trace =~ ~s(ARGV:app-server)
-      assert trace =~ ~s(-c otel.environment="symphony-MT-1001-TEL")
+      assert trace =~ ~s(-c otel.environment="test")
       assert trace =~ ~s(-c otel.exporter={ otlp-grpc = { endpoint = "http://localhost:11338" } })
       assert trace =~ ~s(-c otel.trace_exporter={ otlp-grpc = { endpoint = "http://localhost:11338" } })
       assert trace =~ ~s(-c otel.metrics_exporter={ otlp-grpc = { endpoint = "http://localhost:11338" } })
-      assert trace =~ ~s(-c analytics_enabled=true)
+      assert trace =~ ~s(-c analytics.enabled=true)
       assert trace =~ ~s(-c otel.log_user_prompt=false)
-      assert trace =~ ~s(-c otel.log_tool_details=false)
+      assert trace =~ ~s(-c otel.log_agent_responses=false)
+      refute trace =~ "otel.log_tool_details"
       assert trace =~ "ENV:OTEL_RESOURCE_ATTRIBUTES="
       assert trace =~ "linear.issue.id=issue-MT-1001-TEL"
       assert trace =~ "linear.issue.identifier=MT-1001-TEL"
@@ -802,7 +803,7 @@ defmodule SymphonyElixir.CodexAppServerTest do
     end
   end
 
-  test "codex backend escapes TOML override special characters in identifier and endpoint" do
+  test "codex backend escapes TOML and shell special characters in otel overrides" do
     test_root = temp_root!("telemetry-escape")
     trace_env = "SYMP_TEST_CODEX_TRACE_#{System.unique_integer([:positive])}"
     previous_trace = System.get_env(trace_env)
@@ -835,13 +836,14 @@ defmodule SymphonyElixir.CodexAppServerTest do
         codex_command: "#{codex_binary} app-server",
         telemetry_enabled: true,
         telemetry_otlp_endpoint: ~s(http://"evil"/path),
-        telemetry_otlp_protocol: "grpc"
+        telemetry_otlp_protocol: "grpc",
+        telemetry_resource_attributes: %{"environment" => ~s[it's "q" $(id)]}
       )
 
       assert {:ok, _result} = AppServer.run(workspace, "Escape", issue)
 
       trace = File.read!(trace_file)
-      assert trace =~ ~s(otel.environment="symphony-MT-\\"E\\\\SC")
+      assert trace =~ ~s[-c otel.environment="it's \\"q\\" $(id)"]
       assert trace =~ ~s(endpoint = "http://\\"evil\\"/path")
     after
       File.rm_rf(test_root)
@@ -878,15 +880,16 @@ defmodule SymphonyElixir.CodexAppServerTest do
                AppServer.run(workspace, "Json encoding", issue_fixture("MT-JSON", "Json"))
 
       trace = File.read!(trace_file)
-      assert trace =~ ~s(otel.exporter={ otlp-http = { endpoint = "http://localhost:4318", protocol = "json" } })
-      assert trace =~ ~s(otel.trace_exporter={ otlp-http = { endpoint = "http://localhost:4318", protocol = "json" } })
-      assert trace =~ ~s(otel.metrics_exporter={ otlp-http = { endpoint = "http://localhost:4318", protocol = "json" } })
+      assert trace =~ ~s(otel.exporter={ otlp-http = { endpoint = "http://localhost:4318/v1/logs", protocol = "json" } })
+      assert trace =~ ~s(otel.trace_exporter={ otlp-http = { endpoint = "http://localhost:4318/v1/traces", protocol = "json" } })
+      assert trace =~ ~s(otel.metrics_exporter={ otlp-http = { endpoint = "http://localhost:4318/v1/metrics", protocol = "json" } })
+      assert trace =~ ~s(-c otel.environment="symphony-MT-JSON")
     after
       File.rm_rf(test_root)
     end
   end
 
-  test "codex backend prefers metrics-specific telemetry endpoint for otel override" do
+  test "codex backend prefers per-signal telemetry endpoints for otel overrides" do
     test_root = temp_root!("telemetry-metrics")
     trace_env = "SYMP_TEST_CODEX_TRACE_#{System.unique_integer([:positive])}"
     previous_trace = System.get_env(trace_env)
@@ -920,12 +923,11 @@ defmodule SymphonyElixir.CodexAppServerTest do
                AppServer.run(workspace, "Metrics endpoint", issue_fixture("MT-METRICS", "Metrics"))
 
       trace = File.read!(trace_file)
-      assert trace =~ ~s(otel.exporter={ otlp-http = { endpoint = "http://metrics.example:4318/v1/metrics", protocol = "json" } })
-      assert trace =~ ~s(otel.trace_exporter={ otlp-http = { endpoint = "http://metrics.example:4318/v1/metrics", protocol = "json" } })
+      assert trace =~ ~s(otel.exporter={ otlp-grpc = { endpoint = "http://generic.example:4317" } })
+      assert trace =~ ~s(otel.trace_exporter={ otlp-grpc = { endpoint = "http://generic.example:4317" } })
       assert trace =~ ~s(otel.metrics_exporter={ otlp-http = { endpoint = "http://metrics.example:4318/v1/metrics", protocol = "json" } })
       assert trace =~ ~s(-c otel.log_user_prompt=true)
-      assert trace =~ ~s(-c otel.log_tool_details=true)
-      refute trace =~ ~s(endpoint = "http://generic.example:4317")
+      assert trace =~ ~s(-c otel.log_agent_responses=true)
     after
       File.rm_rf(test_root)
     end
