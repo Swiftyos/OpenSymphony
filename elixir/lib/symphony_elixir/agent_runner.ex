@@ -16,6 +16,7 @@ defmodule SymphonyElixir.AgentRunner do
   alias SymphonyElixir.OpenCode.Tooling
   alias SymphonyElixir.PromptBuilder
   alias SymphonyElixir.Sandbox
+  alias SymphonyElixir.SessionStore
   alias SymphonyElixir.StageResult
   alias SymphonyElixir.Tracker
   alias SymphonyElixir.Workspace
@@ -139,18 +140,29 @@ defmodule SymphonyElixir.AgentRunner do
     StageResult.exclude_from_git(workspace)
     issue = pick_up(issue)
 
-    with {:ok, session} <-
-           CodexAppServer.start_session(workspace,
-             worker_host: worker_host,
-             effort: AgentRoute.codex_effort(route.effort),
-             issue: issue,
-             account: Keyword.get(opts, :account)
-           ) do
-      try do
-        do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
-      after
-        CodexAppServer.stop_session(session)
-      end
+    resume = resumable_session(issue, workspace, "codex")
+
+    case CodexAppServer.start_session(workspace,
+           worker_host: worker_host,
+           effort: AgentRoute.codex_effort(route.effort),
+           issue: issue,
+           account: Keyword.get(opts, :account),
+           resume_thread_id: resume && resume["thread_id"]
+         ) do
+      {:ok, session} ->
+        remember_session(issue, workspace, "codex", %{"thread_id" => session.thread_id})
+        opts = Keyword.put(opts, :resumed, session.resumed)
+
+        try do
+          do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
+        after
+          CodexAppServer.stop_session(session)
+          SessionStore.delete(issue.id)
+        end
+
+      {:error, _reason} = error ->
+        SessionStore.delete(issue.id)
+        error
     end
   end
 
@@ -221,22 +233,50 @@ defmodule SymphonyElixir.AgentRunner do
     StageResult.exclude_from_git(workspace)
     issue = pick_up(issue)
 
-    with {:ok, session} <- AppServer.start_session(workspace, session_opts) do
-      try do
-        do_run_agent_turns(
-          session,
-          workspace,
-          issue,
-          agent_update_recipient,
-          Keyword.put(opts, :backend, route.backend),
-          issue_state_fetcher,
-          1,
-          max_turns
-        )
-      after
-        AppServer.stop_session(session, backend: route.backend)
-      end
+    resume = resumable_session(issue, workspace, route.backend)
+
+    case AppServer.start_session(workspace, Keyword.put(session_opts, :resume_session_id, resume && resume["session_id"])) do
+      {:ok, session} ->
+        remember_session(issue, workspace, route.backend, %{"session_id" => session[:session_id]})
+        opts = opts |> Keyword.put(:backend, route.backend) |> Keyword.put(:resumed, session[:resumed] == true)
+
+        try do
+          do_run_agent_turns(session, workspace, issue, agent_update_recipient, opts, issue_state_fetcher, 1, max_turns)
+        after
+          AppServer.stop_session(session, backend: route.backend)
+          SessionStore.delete(issue.id)
+        end
+
+      {:error, _reason} = error ->
+        SessionStore.delete(issue.id)
+        error
     end
+  end
+
+  # A session recorded by a run that a restart cut off, if it is for this same
+  # stage, backend and workspace; a record that no longer matches is dropped.
+  defp resumable_session(%Issue{id: issue_id} = issue, workspace, backend) do
+    stage = IssueStage.stage(issue)
+
+    case SessionStore.get(issue_id) do
+      %{"backend" => ^backend, "stage" => ^stage, "workspace" => ^workspace} = record when is_binary(stage) ->
+        Logger.info("Resuming interrupted #{backend} session for #{issue_context(issue)} stage=#{stage}")
+        record
+
+      nil ->
+        nil
+
+      _stale ->
+        SessionStore.delete(issue_id)
+        nil
+    end
+  end
+
+  defp resumable_session(_issue, _workspace, _backend), do: nil
+
+  defp remember_session(%Issue{id: issue_id} = issue, workspace, backend, ids) do
+    record = %{"backend" => backend, "stage" => IssueStage.stage(issue), "workspace" => workspace, "identifier" => issue.identifier}
+    SessionStore.put(issue_id, Map.merge(record, ids))
   end
 
   defp do_run_agent_turns(app_session, workspace, issue, agent_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
@@ -290,6 +330,12 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp build_codex_turn_prompt(issue, opts, turn_number, max_turns), do: build_agent_turn_prompt(issue, opts, turn_number, max_turns)
+
+  # The conversation so far is already in the resumed session, so the stage prompt isn't sent again.
+  defp resumed_prompt do
+    "Symphony restarted while you were working on this stage. Your conversation so far is above. " <>
+      "Continue from where you left off: don't redo work you've finished, and finish the stage as its instructions describe."
+  end
 
   # Symphony moves the issue: a result file the agent wrote decides the move;
   # without one, the agent keeps working while the issue stays in its stage.
@@ -347,7 +393,9 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp build_agent_turn_prompt(issue, opts, 1, _max_turns), do: PromptBuilder.build_prompt(issue, opts)
+  defp build_agent_turn_prompt(issue, opts, 1, _max_turns) do
+    if Keyword.get(opts, :resumed), do: resumed_prompt(), else: PromptBuilder.build_prompt(issue, opts)
+  end
 
   defp build_agent_turn_prompt(issue, opts, turn_number, max_turns) do
     case Keyword.get(opts, :result_feedback) do

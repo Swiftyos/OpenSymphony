@@ -424,6 +424,15 @@ Each scope's flow is a file in `~/.symphony/factories` (`<TEAM>.json`, `project-
 - **Deleting a file** returns that scope to its inherited flow.
 - **Version.** Bump `version` when you edit. A dashboard save based on an older version is then refused instead of overwriting yours.
 
+### Session resume
+
+A restart doesn't throw away an agent's work in progress. While a run is going, Symphony records its session in `~/.symphony/sessions.json`: the issue, stage, backend and workspace, plus Codex's thread id or Claude Code's session id.
+
+- **Ending normally.** When the run finishes, by success or by error, the record is removed.
+- **Interrupted runs.** A run cut off by a restart keeps its record. The next run for the same issue, stage, backend and workspace resumes the conversation (Codex `thread/resume`, Claude Code `--resume`), with a short "continue" message instead of the stage prompt.
+- **Fallback.** If the session can't be resumed (for example, its sandbox was recreated), or the issue has moved on, the run starts fresh as before.
+- **OpenCode** sessions always start fresh.
+
 ### Delayed restart
 
 A delayed restart lets you deploy without cutting off running agents.

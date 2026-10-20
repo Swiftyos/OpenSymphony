@@ -791,6 +791,13 @@ Distinct terminal reasons are important because retry logic and logs differ.
 - Reconciliation runs before dispatch on every tick.
 - Restart recovery is tracker-driven and filesystem-driven (no durable orchestrator DB required).
 - Startup terminal cleanup removes stale workspaces for issues already in terminal states.
+- Implementations may record each running issue's agent session (backend, stage, workspace, and the
+  agent's own session or thread id) in a small local file, and resume that session after a restart
+  instead of starting the stage over. A record is removed when its run ends; one that no longer
+  matches the issue's stage, backend or workspace, or whose session can no longer be resumed, falls
+  back to a fresh session.
+- Implementations may offer a delayed restart: start no new agent runs, and restart once the running
+  ones have finished.
 
 ## 8. Polling, Scheduling, and Reconciliation
 

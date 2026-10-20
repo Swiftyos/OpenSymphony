@@ -9,6 +9,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   @initialize_id 1
   @thread_start_id 2
   @turn_start_id 3
+  @thread_resume_id 4
   @port_line_bytes 1_048_576
   @max_stream_log_bytes 1_000
   @non_interactive_tool_input_answer "This is a non-interactive session. Operator input is unavailable."
@@ -21,6 +22,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           thread_sandbox: String.t(),
           turn_sandbox_policy: map(),
           thread_id: String.t(),
+          resumed: boolean(),
           workspace: Path.t(),
           worker_host: String.t() | nil,
           account: map() | nil
@@ -50,7 +52,8 @@ defmodule SymphonyElixir.Codex.AppServer do
       metadata = port_metadata(port, worker_host, account)
 
       with {:ok, session_policies} <- session_policies(expanded_workspace, worker_host),
-           {:ok, thread_id} <- do_start_session(port, expanded_workspace, session_policies) do
+           {:ok, thread_id, resumed?} <-
+             do_start_session(port, expanded_workspace, session_policies, Keyword.get(opts, :resume_thread_id)) do
         {:ok,
          %{
            port: port,
@@ -60,6 +63,7 @@ defmodule SymphonyElixir.Codex.AppServer do
            thread_sandbox: session_policies.thread_sandbox,
            turn_sandbox_policy: session_policies.turn_sandbox_policy,
            thread_id: thread_id,
+           resumed: resumed?,
            workspace: expanded_workspace,
            worker_host: worker_host,
            account: account
@@ -316,10 +320,40 @@ defmodule SymphonyElixir.Codex.AppServer do
     Config.codex_runtime_settings(workspace, remote: true)
   end
 
-  defp do_start_session(port, workspace, session_policies) do
-    case send_initialize(port) do
-      :ok -> start_thread(port, workspace, session_policies)
-      {:error, reason} -> {:error, reason}
+  # With a thread id from an interrupted run, rejoin that thread (Codex keeps it
+  # on disk in the sandbox's ~/.codex); if it's gone, start a new one.
+  defp do_start_session(port, workspace, session_policies, resume_thread_id) do
+    with :ok <- send_initialize(port), do: open_thread(port, workspace, session_policies, resume_thread_id)
+  end
+
+  defp open_thread(port, workspace, session_policies, resume_thread_id) when is_binary(resume_thread_id) do
+    case resume_thread(port, workspace, session_policies, resume_thread_id) do
+      {:ok, thread_id} ->
+        {:ok, thread_id, true}
+
+      failure ->
+        Logger.warning("Could not resume Codex thread #{resume_thread_id}; starting a new one: #{inspect(failure)}")
+        open_thread(port, workspace, session_policies, nil)
+    end
+  end
+
+  defp open_thread(port, workspace, session_policies, _resume_thread_id) do
+    with {:ok, thread_id} <- start_thread(port, workspace, session_policies), do: {:ok, thread_id, false}
+  end
+
+  defp resume_thread(port, workspace, %{approval_policy: approval_policy, thread_sandbox: thread_sandbox}, thread_id) do
+    send_message(port, %{
+      "method" => "thread/resume",
+      "id" => @thread_resume_id,
+      "params" =>
+        %{"threadId" => thread_id, "approvalPolicy" => approval_policy, "sandbox" => thread_sandbox, "cwd" => workspace}
+        |> put_model(Config.settings!().codex.model)
+    })
+
+    case await_response(port, @thread_resume_id) do
+      {:ok, %{"thread" => %{"id" => ^thread_id}}} -> {:ok, thread_id}
+      {:ok, other} -> {:error, {:unexpected_resume_payload, other}}
+      other -> other
     end
   end
 

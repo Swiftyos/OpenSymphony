@@ -34,6 +34,7 @@ defmodule SymphonyElixir.Application do
       {Task.Supervisor, name: SymphonyElixir.TaskSupervisor},
       config_store,
       SymphonyElixir.UsageLedger,
+      SymphonyElixir.SessionStore,
       SymphonyElixir.Transcript,
       SymphonyElixir.Pricing,
       SymphonyElixir.Factory.Store,

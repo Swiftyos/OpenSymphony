@@ -19,6 +19,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
           port: port(),
           metadata: map(),
           session_id: String.t(),
+          resumed: boolean(),
           workspace: Path.t(),
           worker_host: String.t() | nil,
           permission_mode: String.t(),
@@ -45,17 +46,25 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
   def start_session(workspace, opts \\ []) do
     worker_host = Keyword.get(opts, :worker_host)
     account = Keyword.get(opts, :account)
-    session_id = Ecto.UUID.generate()
+    # An interrupted run's session is continued with --resume under its own id.
+    {session_flag, session_id} =
+      case Keyword.get(opts, :resume_session_id) do
+        id when is_binary(id) and id != "" -> {"--resume", id}
+        _ -> {"--session-id", Ecto.UUID.generate()}
+      end
+
     issue = Keyword.get(opts, :issue)
 
     with {:ok, settings} <- Config.claude_runtime_settings(effort: Keyword.get(opts, :effort)),
          {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
-         {:ok, port} <- start_port(expanded_workspace, worker_host, session_id, settings, issue, account) do
+         session = {session_flag, session_id},
+         {:ok, port} <- start_port(expanded_workspace, worker_host, session, settings, issue, account) do
       {:ok,
        %{
          port: port,
          metadata: port_metadata(port, worker_host, account),
          session_id: session_id,
+         resumed: session_flag == "--resume",
          workspace: expanded_workspace,
          worker_host: worker_host,
          permission_mode: settings.permission_mode,
@@ -190,7 +199,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
   defp maybe_put_cd(port_opts, nil), do: port_opts
   defp maybe_put_cd(port_opts, cd), do: Keyword.put(port_opts, :cd, String.to_charlist(cd))
 
-  defp launch_command(session_id, settings) do
+  defp launch_command({session_flag, session_id}, settings) do
     [
       settings.command,
       "-p",
@@ -204,7 +213,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
       shell_escape(Tooling.mcp_config_relative_path()),
       "--permission-mode",
       shell_escape(settings.permission_mode),
-      "--session-id",
+      session_flag,
       shell_escape(session_id)
     ]
     |> maybe_append_model(settings.model)
