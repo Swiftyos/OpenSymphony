@@ -223,31 +223,37 @@ defmodule SymphonyElixir.Factory.Assistant do
   @column_gap 220
   @main_row_y 160
   @row_gap 120
-  @parked_row_y 40
+  @top_y 40
+  @waiting_kinds ["human", "parked"]
 
   @doc """
   Lays a flow out left to right. Stages keep their positions when the draft has
-  exactly the stages `base` has. Otherwise each stage's column is its distance
-  from the start, the shortest path from start to done runs along one row, other
-  stages stack below it, and parked stages sit above it.
+  exactly the stages `base` has. Otherwise:
+
+    * the spine (the longest forward path from the start to the first done
+      stage, so the real pipeline rather than a shortcut through "blocked")
+      runs along one row
+    * other waiting stages (human, parked) sit above the spine, other agent
+      stages (rework loops) below it, each in the column between the spine
+      stages they connect to
+    * other done stages sit under the spine's end
   """
   @spec layout(map(), map()) :: map()
   def layout(definition, base \\ %{}) do
     ids = Enum.map(definition["stages"], & &1["id"])
     base_positions = Map.new(base["stages"] || [], &{&1["id"], &1["position"]})
 
-    if Enum.sort(ids) == Enum.sort(Map.keys(base_positions)) do
-      %{definition | "stages" => Enum.map(definition["stages"], &Map.put(&1, "position", base_positions[&1["id"]]))}
-    else
-      positions = grid_positions(definition)
-      %{definition | "stages" => Enum.map(definition["stages"], &Map.put(&1, "position", positions[&1["id"]]))}
-    end
+    positions =
+      if Enum.sort(ids) == Enum.sort(Map.keys(base_positions)), do: base_positions, else: grid_positions(definition)
+
+    %{definition | "stages" => Enum.map(definition["stages"], &Map.put(&1, "position", positions[&1["id"]]))}
   end
 
   defp grid_positions(definition) do
     stages = definition["stages"]
-    next = Enum.group_by(definition["transitions"], & &1["from"], & &1["to"])
-    incoming = definition["transitions"] |> Enum.map(& &1["to"]) |> MapSet.new()
+    edges = Enum.map(definition["transitions"], &{&1["from"], &1["to"]})
+    next = Enum.group_by(edges, &elem(&1, 0), &elem(&1, 1))
+    incoming = MapSet.new(edges, &elem(&1, 1))
 
     # Start from the queue stages, else stages nothing leads into, else the first.
     roots =
@@ -255,69 +261,106 @@ defmodule SymphonyElixir.Factory.Assistant do
       |> Enum.find(&(&1 != []))
       |> Enum.map(& &1["id"])
 
-    {ranks, parents} = bfs(roots, next, Map.new(roots, &{&1, 0}), %{})
-    done_ids = for %{"kind" => "done", "id" => id} <- stages, do: id
-    last = ranks |> Map.drop(done_ids) |> Map.values() |> Enum.max(fn -> 0 end)
+    forward = forward_edges(roots ++ Enum.map(stages, & &1["id"]), next)
+    spine = spine(roots, forward, stages)
+    columns = Map.new(Enum.with_index(spine))
+    last = max(length(spine) - 1, 0)
 
-    # Stages nothing reaches go after the rest; done stages always come last.
-    ranks =
-      Enum.reduce(stages, ranks, fn stage, acc ->
-        cond do
-          stage["kind"] == "done" -> Map.put(acc, stage["id"], last + 1)
-          Map.has_key?(acc, stage["id"]) -> acc
-          true -> Map.put(acc, stage["id"], last + 1)
-        end
+    {placed, _taken} =
+      stages
+      |> Enum.reject(&Map.has_key?(columns, &1["id"]))
+      |> Enum.reduce({Map.new(columns, fn {id, col} -> {id, {col, 0}} end), MapSet.new(columns, fn {_id, col} -> {col, 0} end)}, fn stage, {acc, taken} ->
+        {col, direction} = off_spine_slot(stage, columns, edges, last)
+        row = free_row(taken, col, direction)
+        {Map.put(acc, stage["id"], {col, row}), MapSet.put(taken, {col, row})}
       end)
 
-    main = main_path(done_ids, ranks, parents)
+    # Rows above the spine are negative; shift down so the top row stays on canvas.
+    top = placed |> Map.values() |> Enum.map(&elem(&1, 1)) |> Enum.min()
+    offset = max(@top_y - (@main_row_y + top * @row_gap), 0)
 
-    stages
-    |> Enum.group_by(&ranks[&1["id"]])
-    |> Enum.flat_map(fn {rank, column} ->
-      x = @column_x + rank * @column_gap
-      {parked, others} = Enum.split_with(column, &(&1["kind"] == "parked"))
-      {on_main, below} = Enum.split_with(others, &(&1["id"] in main))
-      rows = on_main ++ below
-
-      Enum.with_index(rows, fn stage, index -> {stage["id"], %{"x" => x, "y" => @main_row_y + index * @row_gap}} end) ++
-        Enum.with_index(parked, fn stage, index -> {stage["id"], %{"x" => x, "y" => @parked_row_y - index * @row_gap}} end)
+    Map.new(placed, fn {id, {col, row}} ->
+      {id, %{"x" => @column_x + col * @column_gap, "y" => @main_row_y + row * @row_gap + offset}}
     end)
-    |> Map.new()
-    |> shift_down()
   end
 
-  # Several parked stages in one column stack upward; keep everything on canvas.
-  defp shift_down(positions) do
-    top = positions |> Map.values() |> Enum.map(& &1["y"]) |> Enum.min(fn -> @parked_row_y end)
-    offset = max(@parked_row_y - top, 0)
-    Map.new(positions, fn {id, p} -> {id, %{p | "y" => p["y"] + offset}} end)
+  # Waiting stages go above the spine, the rest below; extra done stages under
+  # the spine's end. The column is the middle of the spine stages it touches.
+  defp off_spine_slot(%{"kind" => "done"}, _columns, _edges, last), do: {last, 1}
+
+  defp off_spine_slot(stage, columns, edges, last) do
+    id = stage["id"]
+
+    neighbours =
+      for {from, to} <- edges, id in [from, to], col = columns[other_end(from, to, id)], col != nil, do: col
+
+    col = if neighbours == [], do: last, else: round(Enum.sum(neighbours) / length(neighbours))
+    {col, if(stage["kind"] in @waiting_kinds, do: -1, else: 1)}
   end
 
-  defp bfs([], _next, ranks, parents), do: {ranks, parents}
+  defp other_end(id, to, id), do: to
+  defp other_end(from, _to, _id), do: from
 
-  defp bfs([id | queue], next, ranks, parents) do
-    {queue, ranks, parents} =
+  defp free_row(taken, col, direction) do
+    Stream.iterate(direction, &(&1 + direction)) |> Enum.find(&(not MapSet.member?(taken, {col, &1})))
+  end
+
+  # Edges that don't loop back: a depth-first walk in connection order drops
+  # edges to stages still on the walk's stack.
+  defp forward_edges(starts, next) do
+    {_visited, forward} =
+      Enum.reduce(starts, {%{}, []}, fn id, {visited, forward} -> walk(id, next, [], visited, forward) end)
+
+    # Connection order breaks ties between equally long paths.
+    Enum.reverse(forward)
+  end
+
+  defp walk(id, next, stack, visited, forward) do
+    if Map.has_key?(visited, id) do
+      {visited, forward}
+    else
       next
       |> Map.get(id, [])
-      |> Enum.reduce({queue, ranks, parents}, fn to, {q, r, p} ->
-        if Map.has_key?(r, to), do: {q, r, p}, else: {q ++ [to], Map.put(r, to, r[id] + 1), Map.put(p, to, id)}
-      end)
-
-    bfs(queue, next, ranks, parents)
-  end
-
-  # Stages on the shortest path to the first reachable done stage.
-  defp main_path(done_ids, ranks, parents) do
-    case done_ids |> Enum.filter(&Map.has_key?(parents, &1)) |> Enum.sort_by(&ranks[&1]) do
-      [done | _] -> walk_back(done, parents, [done])
-      [] -> []
+      |> Enum.reduce({Map.put(visited, id, true), forward}, &walk_edge(id, &1, &2, next, [id | stack]))
     end
   end
 
-  defp walk_back(id, parents, acc) do
-    case Map.fetch(parents, id) do
-      {:ok, parent} -> walk_back(parent, parents, [parent | acc])
-      :error -> acc
+  defp walk_edge(id, to, {visited, forward}, next, stack) do
+    if to in stack, do: {visited, forward}, else: walk(to, next, stack, visited, [{id, to} | forward])
+  end
+
+  # The longest forward path from a root to the first done stage it reaches.
+  defp spine(roots, forward, stages) do
+    target = Enum.find_value(stages, fn stage -> stage["kind"] == "done" && stage["id"] end)
+    succ = Enum.group_by(forward, &elem(&1, 0), &elem(&1, 1))
+
+    {best, _memo} =
+      Enum.reduce(roots, {[], %{}}, fn root, {best, memo} ->
+        {path, memo} = longest(root, target, succ, memo)
+        {if(length(path) > length(best), do: path, else: best), memo}
+      end)
+
+    if best == [], do: roots |> Enum.take(1), else: best
+  end
+
+  defp longest(id, id, _succ, memo), do: {[id], memo}
+
+  defp longest(id, target, succ, memo) do
+    case Map.fetch(memo, id) do
+      {:ok, path} ->
+        {path, memo}
+
+      :error ->
+        {best, memo} =
+          succ
+          |> Map.get(id, [])
+          |> Enum.reduce({[], memo}, fn to, {best, memo} ->
+            {path, memo} = longest(to, target, succ, memo)
+            {if(length(path) > length(best), do: path, else: best), memo}
+          end)
+
+        path = if best == [], do: [], else: [id | best]
+        {path, Map.put(memo, id, path)}
     end
   end
 

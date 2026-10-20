@@ -176,12 +176,12 @@ defmodule SymphonyElixir.FactoryAssistantTest do
       assert stages["security"]["skill"] == %{"path" => ".codex/skills/security/SKILL.md", "content" => "audit"}
       assert stages["todo"]["skill"] == nil
 
-      # Columns follow distance from the start, the start-to-done path shares one row,
-      # parked stages sit above it, and unreachable or done stages go last.
+      # The start-to-done pipeline runs along one row, waiting stages sit above the
+      # stages they connect to, and unconnected stages go at the end.
       assert stages["todo"]["position"] == %{"x" => 80, "y" => 160}
       assert stages["implement"]["position"] == %{"x" => 300, "y" => 160}
       assert stages["security"]["position"] == %{"x" => 520, "y" => 160}
-      assert stages["blocked"]["position"] == %{"x" => 520, "y" => 40}
+      assert stages["blocked"]["position"] == %{"x" => 300, "y" => 40}
       assert stages["review"]["position"]["y"] == 160
       assert stages["done"]["position"]["x"] > stages["review"]["position"]["x"]
       assert stages["orphan"]["position"]["x"] == stages["done"]["position"]["x"]
@@ -229,9 +229,35 @@ defmodule SymphonyElixir.FactoryAssistantTest do
       loop = %{"stages" => stages, "transitions" => [%{"from" => "a", "to" => "b"}, %{"from" => "b", "to" => "a"}]}
       assert [%{"position" => %{"x" => 80}}, %{"position" => %{"x" => 300}}] = Assistant.layout(loop)["stages"]
 
-      # Nothing reaches done: no main row; done still goes last.
+      # Done is the start: the agent stage hangs below it.
       cut = %{loop | "transitions" => [%{"from" => "b", "to" => "a"}]}
-      assert [%{"position" => %{"x" => 300, "y" => 160}}, %{"position" => %{"x" => 520, "y" => 160}}] = Assistant.layout(cut)["stages"]
+      assert [%{"position" => %{"x" => 80, "y" => 280}}, %{"position" => %{"x" => 80, "y" => 160}}] = Assistant.layout(cut)["stages"]
+
+      # Nothing reaches done: the start alone is the spine and done sits under it.
+      apart = %{"stages" => [%{"id" => "q", "kind" => "queue"}, %{"id" => "d", "kind" => "done"}], "transitions" => []}
+      assert [%{"position" => %{"x" => 80, "y" => 160}}, %{"position" => %{"x" => 80, "y" => 280}}] = Assistant.layout(apart)["stages"]
+
+      # Waiting stages sharing a column stack upward, and the flow shifts down to fit.
+      stacked = %{
+        "stages" => [%{"id" => "q", "kind" => "queue"}, %{"id" => "d", "kind" => "done"}, %{"id" => "p1", "kind" => "parked"}, %{"id" => "p2", "kind" => "human"}],
+        "transitions" => [%{"from" => "q", "to" => "d"}, %{"from" => "q", "to" => "p1"}, %{"from" => "q", "to" => "p2"}]
+      }
+
+      assert Enum.map(Assistant.layout(stacked)["stages"], &{&1["id"], &1["position"]}) == [
+               {"q", %{"x" => 80, "y" => 280}},
+               {"d", %{"x" => 300, "y" => 280}},
+               {"p1", %{"x" => 80, "y" => 160}},
+               {"p2", %{"x" => 80, "y" => 40}}
+             ]
+
+      # Two branches meeting again: the spine takes one, the other hangs below.
+      diamond = %{
+        "stages" => Enum.map([{"q", "queue"}, {"a", "agent"}, {"b", "agent"}, {"c", "agent"}, {"d", "done"}], fn {id, kind} -> %{"id" => id, "kind" => kind} end),
+        "transitions" => Enum.map([{"q", "a"}, {"q", "b"}, {"a", "c"}, {"b", "c"}, {"c", "d"}], fn {from, to} -> %{"from" => from, "to" => to} end)
+      }
+
+      assert %{"a" => %{"y" => 160}, "b" => %{"x" => 300, "y" => 280}, "c" => %{"x" => 520}, "d" => %{"x" => 740}} =
+               Map.new(Assistant.layout(diamond)["stages"], &{&1["id"], &1["position"]})
     end
 
     test "escaped quotes and braces inside JSON strings don't end the object early" do
