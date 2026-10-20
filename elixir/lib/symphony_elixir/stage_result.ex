@@ -12,7 +12,8 @@ defmodule SymphonyElixir.StageResult do
     1. checks `move` is an agent connection out of the issue's current stage
        and `summary` isn't empty
     2. runs the stage's `checks` (shell commands) in the workspace; all must
-       exit 0
+       exit 0. Moves to a parked or done stage skip them: putting an issue on
+       hold, or finding there's nothing to do, has nothing to check
     3. posts the summary on the issue as the stage's comment
        (`## <stage name>`), then sets the target stage's Linear state and stage
        label, adding the approval label when a person must approve the move
@@ -74,7 +75,7 @@ defmodule SymphonyElixir.StageResult do
         outcome =
           with {:ok, result} <- decode(body),
                {:ok, stage, target, definition} <- allowed_move(issue, result["move"]),
-               :ok <- run_checks(stage, workspace, opts) do
+               :ok <- run_checks(stage, target, workspace, opts) do
             move(issue, stage, target, definition, result["summary"])
           end
 
@@ -115,7 +116,9 @@ defmodule SymphonyElixir.StageResult do
     end
   end
 
-  defp run_checks(stage, workspace, opts) do
+  defp run_checks(_stage, %{"kind" => kind}, _workspace, _opts) when kind in ["parked", "done"], do: :ok
+
+  defp run_checks(stage, _target, workspace, opts) do
     timeout_ms = Keyword.get(opts, :check_timeout_ms, @check_timeout_ms)
     runner = Keyword.get(opts, :check_runner, &run_check(&1, &2, timeout_ms))
 

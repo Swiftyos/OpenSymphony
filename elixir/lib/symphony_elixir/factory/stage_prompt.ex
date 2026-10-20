@@ -85,7 +85,7 @@ defmodule SymphonyElixir.Factory.StagePrompt do
     checks =
       case stage["checks"] || [] do
         [] -> ""
-        list -> "\n\nBefore it moves the issue, Symphony runs these checks in your workspace; all must pass:\n" <> Enum.map_join(list, "\n", &("- `" <> &1 <> "`"))
+        list -> "\n\nBefore it moves the issue (except to a parked or done stage), Symphony runs these checks in your workspace; all must pass:\n" <> Enum.map_join(list, "\n", &("- `" <> &1 <> "`"))
       end
 
     approval =

@@ -95,6 +95,10 @@ defmodule SymphonyElixir.StageResultTest do
     # The prompt lists the checks, and person-moved connections as not the agent's.
     prompt = StagePrompt.render(issue)
     assert prompt =~ "Symphony runs these checks in your workspace; all must pass:\n- `true`\n- `echo boom; exit 3`"
+
+    # Parking the issue skips the checks: there's nothing to check on a blocker.
+    write_result(workspace, %{"move" => "blocked", "summary" => "needs a simkit change"})
+    assert {:moved, %{"id" => "blocked"}} = StageResult.process(issue, workspace)
     review = StagePrompt.render(%{issue | state: "In Review", labels: []})
     assert review =~ "- **Merge** (a person moves it, not you): The reviewer approves the PR."
   end
