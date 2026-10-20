@@ -91,6 +91,19 @@ telemetry:
   # resource_attributes:
   #   environment: local-dev
 
+# Optional: read telemetry back into the dashboard (metrics from ClickHouse,
+# traces from Langfuse and ClickHouse). Values may be $ENV_VAR references.
+# observability:
+#   clickhouse:
+#     url: http://127.0.0.1:8123
+#     user: symphony
+#     password: $SYMPHONY_CLICKHOUSE_PASSWORD
+#     database: otel
+#   langfuse:
+#     url: http://127.0.0.1:3000
+#     public_key: $LANGFUSE_PUBLIC_KEY
+#     secret_key: $LANGFUSE_SECRET_KEY
+
 projects:
   - linear_project: project-a
     repo: your-org/project-a

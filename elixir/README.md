@@ -277,6 +277,44 @@ projects:
   metrics, and JSON API at `/`, `/metrics`, `/api/v1/state`, `/api/v1/<issue_identifier>`,
   `/api/v1/refresh`, and `/api/v1/issues/<issue_identifier>/messages`.
 
+### Telemetry metrics and traces in the dashboard
+
+When `telemetry` exports agent signals to an OpenTelemetry collector that writes ClickHouse (the
+collector's `clickhouse` exporter) and/or Langfuse, Symphony can read them back for the dashboard
+through `SymphonyElixir.Observability`: factory and per-issue token, cost, tool-call, turn and
+API-latency totals with chart series, top tools and issues, recent traces per issue, a
+waterfall-ready span list per trace, and recent tool-result/API-error events. Both sources are
+optional; without them these views report "not configured" and nothing else changes.
+
+```yaml
+observability:
+  timeout_ms: 3000        # per request (default 3000)
+  cache_ttl_ms: 30000     # results are cached this long (default 30000)
+  clickhouse:
+    url: http://127.0.0.1:8123        # ClickHouse HTTP interface
+    user: symphony
+    password: $SYMPHONY_CLICKHOUSE_PASSWORD
+    database: otel                    # default "otel"
+  langfuse:
+    url: http://127.0.0.1:3000
+    public_key: $LANGFUSE_PUBLIC_KEY
+    secret_key: $LANGFUSE_SECRET_KEY
+    # public_url: https://langfuse.example.com   # optional; only used to build "open in Langfuse" links
+```
+
+- Every value may be a `$VAR` reference; a variable that is unset leaves the field unset.
+- ClickHouse queries are read-only `SELECT`s with typed query parameters and no per-query
+  settings, so a user with the `readonly` profile (`readonly=1`) works. It needs `SELECT` on
+  `otel_metrics_sum`, `otel_metrics_histogram`, `otel_logs`, `otel_traces` and
+  `otel_traces_trace_id_ts`.
+- Langfuse is read through its public REST API (`/api/public/traces`, `/api/public/projects`), not
+  its own ClickHouse tables. Trace details prefer Langfuse observations (they carry usage and
+  cost) and fall back to ClickHouse spans; traces bigger than 500 spans come from ClickHouse,
+  trimmed to the root, errors and longest spans.
+- Codex reports no cost, so Codex cost is estimated from `pricing` and also reported as
+  `estimated_cost_usd`. Claude cost is what Claude Code reports.
+- The return shapes are documented in the `SymphonyElixir.Observability` moduledoc.
+
 ## Backend support
 
 ### Managed Accounts

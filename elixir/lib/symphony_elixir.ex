@@ -39,6 +39,7 @@ defmodule SymphonyElixir.Application do
       {Registry, keys: :unique, name: SymphonyElixir.AgentInbox.Registry},
       SymphonyElixir.AgentInbox,
       SymphonyElixir.Pricing,
+      SymphonyElixir.Observability.Cache,
       SymphonyElixir.Factory.Store,
       SymphonyElixir.Users,
       SymphonyElixir.Auth,

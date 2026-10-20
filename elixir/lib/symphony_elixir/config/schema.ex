@@ -556,10 +556,55 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule ObservabilityClickHouse do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+
+    # ClickHouse HTTP interface holding the OpenTelemetry collector's tables.
+    embedded_schema do
+      field(:url, :string)
+      field(:user, :string)
+      field(:password, :string)
+      field(:database, :string, default: "otel")
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      cast(schema, attrs, [:url, :user, :password, :database], empty_values: [])
+    end
+  end
+
+  defmodule ObservabilityLangfuse do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+
+    # Langfuse public REST API (basic auth with the project's key pair).
+    embedded_schema do
+      field(:url, :string)
+      field(:public_key, :string)
+      field(:secret_key, :string)
+      # Base URL for links people open in a browser; nil = no UI links.
+      field(:public_url, :string)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      cast(schema, attrs, [:url, :public_key, :secret_key, :public_url], empty_values: [])
+    end
+  end
+
   defmodule Observability do
     @moduledoc false
     use Ecto.Schema
     import Ecto.Changeset
+
+    alias SymphonyElixir.Config.Schema.{ObservabilityClickHouse, ObservabilityLangfuse}
 
     @primary_key false
 
@@ -567,14 +612,25 @@ defmodule SymphonyElixir.Config.Schema do
       field(:dashboard_enabled, :boolean, default: true)
       field(:refresh_ms, :integer, default: 1_000)
       field(:render_interval_ms, :integer, default: 16)
+      # Read-side metrics and traces for the dashboard (see SymphonyElixir.Observability).
+      field(:timeout_ms, :integer, default: 3_000)
+      field(:cache_ttl_ms, :integer, default: 30_000)
+      embeds_one(:clickhouse, ObservabilityClickHouse, on_replace: :update, defaults_to_struct: true)
+      embeds_one(:langfuse, ObservabilityLangfuse, on_replace: :update, defaults_to_struct: true)
     end
+
+    @fields [:dashboard_enabled, :refresh_ms, :render_interval_ms, :timeout_ms, :cache_ttl_ms]
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:dashboard_enabled, :refresh_ms, :render_interval_ms], empty_values: [])
+      |> cast(attrs, @fields, empty_values: [])
       |> validate_number(:refresh_ms, greater_than: 0)
       |> validate_number(:render_interval_ms, greater_than: 0)
+      |> validate_number(:timeout_ms, greater_than: 0)
+      |> validate_number(:cache_ttl_ms, greater_than_or_equal_to: 0)
+      |> cast_embed(:clickhouse, with: &ObservabilityClickHouse.changeset/2)
+      |> cast_embed(:langfuse, with: &ObservabilityLangfuse.changeset/2)
     end
   end
 
@@ -968,6 +1024,8 @@ defmodule SymphonyElixir.Config.Schema do
       | resource_attributes: normalize_resource_attributes(settings.telemetry.resource_attributes)
     }
 
+    observability = finalize_observability(settings.observability)
+
     log = %{
       settings.log
       | dir: resolve_optional_path_value(settings.log.dir, nil, base_dir),
@@ -985,8 +1043,36 @@ defmodule SymphonyElixir.Config.Schema do
         opencode: opencode,
         claude: claude,
         telemetry: telemetry,
+        observability: observability,
         log: log
     }
+  end
+
+  # Secrets and URLs may be `$ENV_VAR` references; a missing variable leaves the field unset.
+  defp finalize_observability(%{clickhouse: clickhouse, langfuse: langfuse} = observability) do
+    clickhouse = %{
+      clickhouse
+      | url: resolve_optional_setting(clickhouse.url),
+        user: resolve_optional_setting(clickhouse.user),
+        password: resolve_optional_setting(clickhouse.password),
+        database: resolve_optional_setting(clickhouse.database) || "otel"
+    }
+
+    langfuse = %{
+      langfuse
+      | url: resolve_optional_setting(langfuse.url),
+        public_key: resolve_optional_setting(langfuse.public_key),
+        secret_key: resolve_optional_setting(langfuse.secret_key),
+        public_url: resolve_optional_setting(langfuse.public_url)
+    }
+
+    %{observability | clickhouse: clickhouse, langfuse: langfuse}
+  end
+
+  defp resolve_optional_setting(nil), do: nil
+
+  defp resolve_optional_setting(value) when is_binary(value) do
+    value |> resolve_env_value(nil) |> normalize_optional_string()
   end
 
   defp finalize_tracker_project(project, default_workspace_root, base_dir) do

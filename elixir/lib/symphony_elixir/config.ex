@@ -300,6 +300,61 @@ defmodule SymphonyElixir.Config do
     end
   end
 
+  @doc """
+  The ClickHouse source for dashboard metrics and traces (`observability.clickhouse`),
+  or nil when no URL is configured or the config does not load.
+  """
+  @spec observability_clickhouse() :: map() | nil
+  def observability_clickhouse do
+    case settings() do
+      {:ok, %{observability: %{clickhouse: %{url: url} = clickhouse} = observability}} when is_binary(url) ->
+        %{
+          url: url,
+          user: clickhouse.user,
+          password: clickhouse.password,
+          database: clickhouse.database || "otel",
+          timeout_ms: observability.timeout_ms
+        }
+
+      _ ->
+        nil
+    end
+  end
+
+  @doc """
+  The Langfuse source for dashboard traces (`observability.langfuse`), or nil
+  unless the URL and both keys are configured.
+  """
+  @spec observability_langfuse() :: map() | nil
+  def observability_langfuse do
+    case settings() do
+      {:ok, %{observability: observability}} -> langfuse_source(observability)
+      _ -> nil
+    end
+  end
+
+  defp langfuse_source(%{langfuse: %{url: url, public_key: public, secret_key: secret} = langfuse} = observability)
+       when is_binary(url) and is_binary(public) and is_binary(secret) do
+    %{
+      url: url,
+      public_key: public,
+      secret_key: secret,
+      public_url: langfuse.public_url,
+      timeout_ms: observability.timeout_ms
+    }
+  end
+
+  defp langfuse_source(_observability), do: nil
+
+  @doc "How long dashboard metrics and traces are cached, in milliseconds."
+  @spec observability_cache_ttl_ms() :: non_neg_integer()
+  def observability_cache_ttl_ms do
+    case settings() do
+      {:ok, %{observability: %{cache_ttl_ms: ttl}}} when is_integer(ttl) and ttl >= 0 -> ttl
+      _ -> 30_000
+    end
+  end
+
   @spec telemetry_enabled?() :: boolean()
   def telemetry_enabled? do
     settings!().telemetry.enabled

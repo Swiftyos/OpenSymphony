@@ -542,6 +542,30 @@ Claude Code is enabled through `CLAUDE_CODE_*` and `OTEL_*` environment variable
 
 When local observability is enabled through the development wrapper (`AGENT_OBSERVABILITY=1`), Symphony also writes `codex_trace` JSONL events to stderr. These events are ordered by `sequence` and tagged with `session_id`, `thread_id`, `turn_id`, `step`, `issue_id`, and `issue_identifier` so operators can reconstruct a run timeline from VictoriaLogs by filtering on `event="codex_trace"` and the target session or issue.
 
+#### 5.3.9 `observability` (object)
+
+Optional extension for the status surface. Besides the terminal dashboard settings
+(`dashboard_enabled`, `refresh_ms`, `render_interval_ms`), it may name read-only telemetry sources
+that the dashboard reads metrics and traces back from. They are observability-only: when absent or
+unreachable, reads report "not configured" or an error and orchestration is unaffected.
+
+Fields:
+
+- `timeout_ms` (integer) — per-request timeout. Default: `3000`.
+- `cache_ttl_ms` (integer) — how long read results are cached. Default: `30000`.
+- `clickhouse` (object) — ClickHouse holding the OpenTelemetry collector's tables.
+  - `url` (string) — HTTP interface, e.g. `http://127.0.0.1:8123`. Unset disables the source.
+  - `user`, `password` (string) — optional basic auth.
+  - `database` (string) — Default: `otel`.
+- `langfuse` (object) — Langfuse public REST API.
+  - `url`, `public_key`, `secret_key` (string) — all three are required to enable the source.
+  - `public_url` (string) — optional base for browser links to traces.
+
+Every string field accepts a `$VAR` environment reference; an unset variable leaves the field unset.
+Readers must issue read-only queries and pass caller-supplied values only as typed query
+parameters. Telemetry is matched to issues through the `linear.issue.identifier` resource attribute
+from Section 5.3.8.
+
 ### 5.4 Prompt Template Contract
 
 The Markdown body of `WORKFLOW.md` is the per-issue prompt template.
