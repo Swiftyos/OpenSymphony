@@ -11,6 +11,15 @@ defmodule SymphonyElixir.FactoryAssistantTest do
     assert {:ok, ^draft} = Assistant.parse("Sure! " <> Jason.encode!(draft) <> " Hope that helps {not json}")
     assert {:ok, %{"instructions" => "a } b"}} = Assistant.parse(~s({"instructions": "a } b"}))
     assert {:error, _} = Assistant.parse("I can't help with that.")
+
+    # Real claude output: a stdin warning printed ahead of the JSON wrapper.
+    noisy = "Warning: no stdin data received in 3s, proceeding without it.\n" <> wrapped
+    assert {:ok, ^draft} = Assistant.parse(noisy)
+
+    # A wrapper or object without instructions is not a draft.
+    assert {:error, _} = Assistant.parse(Jason.encode!(%{"result" => "Sorry, I can't."}))
+    assert {:error, _} = Assistant.parse(Jason.encode!(%{"duration_ms" => 5}))
+    assert {:error, _} = Assistant.parse(~s({"instructions": ""}))
   end
 
   test "the prompt describes the team's flow and the request" do

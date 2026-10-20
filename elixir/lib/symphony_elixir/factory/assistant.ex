@@ -120,13 +120,15 @@ defmodule SymphonyElixir.Factory.Assistant do
 
   defp command("opencode", prompt, _dir), do: {"opencode", ["run", prompt]}
 
+  # stdin comes from /dev/null: an open stdin makes `claude -p` wait 3s for
+  # input and print a warning ahead of its JSON.
   defp run_port(executable, args, dir, timeout_ms) do
     port =
-      Port.open({:spawn_executable, executable}, [
+      Port.open({:spawn_executable, "/bin/sh"}, [
         :binary,
         :exit_status,
         :stderr_to_stdout,
-        args: args,
+        args: ["-c", ~s(exec "$0" "$@" < /dev/null), executable | args],
         cd: dir
       ])
 
@@ -170,21 +172,20 @@ defmodule SymphonyElixir.Factory.Assistant do
   @doc false
   @spec parse(String.t()) :: {:ok, map()} | {:error, String.t()}
   def parse(output) do
-    text =
-      case Jason.decode(output) do
-        # claude --output-format json wraps the text in "result".
-        {:ok, %{"result" => result}} when is_binary(result) -> result
-        {:ok, %{"instructions" => _} = direct} -> Jason.encode!(direct)
-        _ -> output
-      end
-
-    with {:ok, json} <- first_json_object(text),
-         {:ok, %{} = decoded} <- Jason.decode(json) do
-      {:ok, decoded}
+    with {:ok, json} <- first_json_object(output),
+         {:ok, %{} = decoded} <- Jason.decode(json),
+         {:ok, draft} <- unwrap(decoded) do
+      {:ok, draft}
     else
       _ -> {:error, "The assistant didn't return a usable draft. Try again or rephrase."}
     end
   end
+
+  # `claude --output-format json` wraps the model's text in "result"; CLIs may
+  # also print warnings around it. A draft must at least have instructions.
+  defp unwrap(%{"result" => result}) when is_binary(result), do: parse(result)
+  defp unwrap(%{"instructions" => instructions} = draft) when is_binary(instructions) and instructions != "", do: {:ok, draft}
+  defp unwrap(_decoded), do: :error
 
   defp first_json_object(text) do
     text = text |> String.replace(~r/```(?:json)?/, "") |> String.trim()
