@@ -689,6 +689,10 @@ to a project, without changing anything in Linear.
   minutes), so set it.
 - Only enable `trust_proxy` when the proxy is the sole way to reach Symphony. Otherwise
   clients could spoof those headers.
+- Set `server.public_url` to the address people open (e.g. `https://symphony.example.com`).
+  LiveView only accepts sockets from that origin. Phoenix checks the origin before any
+  proxy header is read, so behind TLS termination the dashboard can't connect without it:
+  pages load but never update, and buttons do nothing.
 - Set `server.secret_key_base` (or `SYMPHONY_SECRET_KEY_BASE`) when running more than one
   instance, or when `~/.symphony` isn't persistent.
 - State lives in `~/.symphony` (accounts, session secret, `factories/<TEAM>.json`, usage), which Symphony

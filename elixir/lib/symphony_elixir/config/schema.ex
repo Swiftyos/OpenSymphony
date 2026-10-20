@@ -654,6 +654,11 @@ defmodule SymphonyElixir.Config.Schema do
       field(:api_token, :string)
       # Behind a TLS-terminating proxy: trust X-Forwarded-For / X-Forwarded-Proto.
       field(:trust_proxy, :boolean, default: false)
+      # The address people open, e.g. https://symphony.example.com, when it differs
+      # from the listener (a proxy or load balancer in front). LiveView accepts
+      # sockets from exactly this origin; Phoenix checks them before any proxy
+      # header is read, so behind TLS termination nothing else can match.
+      field(:public_url, :string)
       # Signs and encrypts session cookies. nil = generated once and kept in
       # ~/.symphony/secret_key_base so sessions survive restarts.
       field(:secret_key_base, :string)
@@ -662,11 +667,22 @@ defmodule SymphonyElixir.Config.Schema do
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:port, :host, :controls, :auth, :secret_key_base, :api_token, :trust_proxy], empty_values: [])
+      |> cast(attrs, [:port, :host, :controls, :auth, :secret_key_base, :api_token, :trust_proxy, :public_url], empty_values: [])
       |> validate_inclusion(:auth, ["local", "accounts"])
+      |> validate_change(:public_url, &validate_public_url/2)
       |> validate_length(:api_token, min: 24)
       |> validate_length(:secret_key_base, min: 64)
       |> validate_number(:port, greater_than_or_equal_to: 0)
+    end
+
+    defp validate_public_url(field, url) do
+      case URI.parse(url) do
+        %URI{scheme: scheme, host: host, path: path} when scheme in ["http", "https"] and host not in [nil, ""] and path in [nil, "", "/"] ->
+          []
+
+        _ ->
+          [{field, "must be an http(s) origin such as https://symphony.example.com"}]
+      end
     end
   end
 

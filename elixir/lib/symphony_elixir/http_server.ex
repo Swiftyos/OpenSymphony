@@ -25,16 +25,16 @@ defmodule SymphonyElixir.HttpServer do
         snapshot_timeout_ms = Keyword.get(opts, :snapshot_timeout_ms, 15_000)
 
         with {:ok, ip} <- parse_host(host) do
+          {url, check_origin} = endpoint_origin(Config.settings!().server, host)
+
           endpoint_opts = [
             server: true,
             http: [ip: ip, port: port],
-            url: [host: normalize_host(host)],
+            url: url,
             orchestrator: orchestrator,
             snapshot_timeout_ms: snapshot_timeout_ms,
             secret_key_base: secret_key_base(),
-            # Refuse LiveView sockets opened from other sites: with sign-in, the page's
-            # own host; without it, only localhost (DNS-rebinding protection).
-            check_origin: if(SymphonyElixir.Auth.mode() == :accounts, do: :conn, else: SymphonyElixirWeb.RequestGuards.local_origins())
+            check_origin: check_origin
           ]
 
           endpoint_config =
@@ -88,6 +88,24 @@ defmodule SymphonyElixir.HttpServer do
         end
     end
   end
+
+  @doc """
+  The endpoint's URL and which origins may open LiveView sockets. Sockets from
+  other sites are refused: with `server.public_url`, exactly that origin; with
+  sign-in, the page's own host; without it, only localhost (DNS-rebinding
+  protection).
+  """
+  @spec endpoint_origin(map(), String.t() | nil, atom()) :: {keyword(), :conn | [String.t()]}
+  def endpoint_origin(server, host, auth_mode \\ SymphonyElixir.Auth.mode())
+
+  def endpoint_origin(%{public_url: url}, _host, _auth_mode) when is_binary(url) and url != "" do
+    %URI{scheme: scheme, host: public_host, port: public_port} = URI.parse(url)
+    origin = URI.to_string(%URI{scheme: scheme, host: public_host, port: public_port})
+    {[scheme: scheme, host: public_host, port: public_port], [origin]}
+  end
+
+  def endpoint_origin(_server, host, :accounts), do: {[host: normalize_host(host)], :conn}
+  def endpoint_origin(_server, host, _auth_mode), do: {[host: normalize_host(host)], SymphonyElixirWeb.RequestGuards.local_origins()}
 
   defp normalize_host(host) when host in ["", nil], do: "127.0.0.1"
   defp normalize_host(host) when is_binary(host), do: host
