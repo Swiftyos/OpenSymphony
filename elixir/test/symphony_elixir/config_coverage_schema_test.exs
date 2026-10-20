@@ -13,15 +13,6 @@ defmodule SymphonyElixir.ConfigCoverageSchemaTest do
     message
   end
 
-  defp project_rejected?(config, expected_message) do
-    case Schema.parse(config) do
-      {:error, {:invalid_workflow_config, message}} -> message =~ expected_message
-      {:ok, _settings} -> false
-    end
-  rescue
-    ArgumentError -> true
-  end
-
   defp unset_env_name do
     name = "SYMPHONY_COVERAGE_UNSET_#{System.unique_integer([:positive])}"
     System.delete_env(name)
@@ -139,11 +130,9 @@ defmodule SymphonyElixir.ConfigCoverageSchemaTest do
       assert parse_error(%{"tracker" => %{"projects" => ["just-a-string"]}}) =~ "tracker.projects"
     end
 
-    # Per-project changeset errors currently make Schema.format_errors/1 raise
-    # (it cannot flatten the list-of-maps errors produced by embeds_many), so
-    # accept either a proper validation error or that ArgumentError here.
     test "projects without a slug or linear_project alias are not accepted" do
-      assert project_rejected?(%{"tracker" => %{"projects" => [%{"repo" => "owner/repo"}]}}, "slug can't be blank")
+      assert parse_error(%{"tracker" => %{"projects" => [%{"slug" => "ok"}, %{"repo" => "owner/repo"}]}}) =~
+               "tracker.projects[1].slug can't be blank"
 
       changeset = Schema.TrackerProject.changeset(%Schema.TrackerProject{}, %{"repo" => "owner/repo"})
       refute changeset.valid?
@@ -151,10 +140,8 @@ defmodule SymphonyElixir.ConfigCoverageSchemaTest do
     end
 
     test "projects reject unknown backends" do
-      assert project_rejected?(
-               %{"tracker" => %{"projects" => [%{"slug" => "alpha", "backend" => "gpt"}]}},
-               "backend must be one of"
-             )
+      assert parse_error(%{"tracker" => %{"projects" => [%{"slug" => "alpha", "backend" => "gpt"}]}}) =~
+               "tracker.projects[0].backend must be one of"
 
       changeset = Schema.TrackerProject.changeset(%Schema.TrackerProject{}, %{"slug" => "alpha", "backend" => "gpt"})
       refute changeset.valid?

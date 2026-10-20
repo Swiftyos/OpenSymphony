@@ -1366,8 +1366,14 @@ defmodule SymphonyElixir.Config.Schema do
     end)
   end
 
+  # embeds_many errors arrive as one map per item (empty for valid items).
   defp flatten_errors(errors, prefix) when is_list(errors) do
-    Enum.map(errors, &(prefix <> " " <> &1))
+    errors
+    |> Enum.with_index()
+    |> Enum.flat_map(fn
+      {%{} = item_errors, index} -> flatten_errors(item_errors, "#{prefix}[#{index}]")
+      {message, _index} -> [prefix <> " " <> message]
+    end)
   end
 
   defp translate_error({message, options}) do

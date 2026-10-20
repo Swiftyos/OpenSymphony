@@ -422,6 +422,9 @@ defmodule SymphonyElixir.AccountsCoverageTest do
       cases = [
         {%{"unlimited" => true, "balance" => 0}, "healthy"},
         {%{has_credits: false}, "exhausted"},
+        # String keys, as decoded from provider JSON (was missed: `false || nil` is nil).
+        {%{"has_credits" => false}, "exhausted"},
+        {%{"has_credits" => true, "unlimited" => false}, "healthy"},
         {%{balance: 0}, "exhausted"},
         {%{"balance" => 12.5}, "healthy"},
         {%{"balance" => "0.00"}, "exhausted"},

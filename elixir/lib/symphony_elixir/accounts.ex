@@ -1509,12 +1509,20 @@ defmodule SymphonyElixir.Accounts do
     end
   end
 
+  defp credit_field(credits, key) do
+    case Map.fetch(credits, key) do
+      {:ok, value} -> value
+      :error -> Map.get(credits, String.to_existing_atom(key))
+    end
+  end
+
   defp depleted_credits?(nil), do: false
 
   defp depleted_credits?(credits) when is_map(credits) do
-    unlimited = Map.get(credits, "unlimited") || Map.get(credits, :unlimited)
-    has_credits = Map.get(credits, "has_credits") || Map.get(credits, :has_credits)
-    balance = Map.get(credits, "balance") || Map.get(credits, :balance)
+    # Map.fetch, not `||`: `false` is a meaningful value here.
+    unlimited = credit_field(credits, "unlimited")
+    has_credits = credit_field(credits, "has_credits")
+    balance = credit_field(credits, "balance")
 
     cond do
       unlimited == true -> false
