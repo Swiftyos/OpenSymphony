@@ -29,6 +29,8 @@ config :symphony_elixir,
   secret_key_base_path: nil,
   users_path: nil,
   factories_dir: nil,
+  # Tests reload the factory store explicitly (Store.reload/0).
+  factories_reload_ms: 0,
   # ConnTest requests use host "www.example.com"; the guard is tested explicitly.
   enforce_local_host: false,
   password_iterations: 1_000,

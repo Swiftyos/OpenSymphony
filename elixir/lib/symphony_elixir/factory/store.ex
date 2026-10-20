@@ -11,6 +11,12 @@ defmodule SymphonyElixir.Factory.Store do
   Reads come from a public ETS table because the orchestrator resolves stages on
   every dispatch decision. Each scope is persisted to
   `~/.symphony/factories/<TEAM>.json` or `project--<slug>.json`.
+
+  The directory is rescanned every couple of seconds, so a flow edited on disk
+  takes effect without a restart. A changed file is loaded only if it
+  validates; otherwise the error is logged and the last good flow stays. A
+  deleted file drops the scope's own flow, as `reset_team/1` does. The store's
+  own saves are fingerprinted, so they never come back as reloads.
   """
 
   use GenServer
@@ -23,6 +29,7 @@ defmodule SymphonyElixir.Factory.Store do
   @project_pattern ~r/^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/
   @project_prefix "project:"
   @project_file_prefix "project--"
+  @reload_interval_ms 2_000
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -173,6 +180,16 @@ defmodule SymphonyElixir.Factory.Store do
   @spec reset_team(String.t()) :: :ok
   def reset_team(team), do: GenServer.call(__MODULE__, {:reset_team, team})
 
+  @doc """
+  Rescans the directory now instead of waiting for the next tick.
+  """
+  @spec reload() :: :ok
+  def reload, do: GenServer.call(__MODULE__, :reload)
+
+  @doc false
+  @spec use_dir(Path.t() | nil) :: :ok
+  def use_dir(dir), do: GenServer.call(__MODULE__, {:use_dir, dir})
+
   @doc false
   @spec reset() :: :ok
   def reset do
@@ -183,10 +200,21 @@ defmodule SymphonyElixir.Factory.Store do
   @impl true
   def init(opts) do
     dir = Keyword.get(opts, :dir, default_dir())
+    interval = Keyword.get(opts, :reload_interval_ms, Application.get_env(:symphony_elixir, :factories_reload_ms, @reload_interval_ms))
     :ets.new(@table, [:named_table, :protected, :set, read_concurrency: true])
-    load(dir)
-    {:ok, %{dir: dir}}
+    state = scan(%{dir: dir, seen: %{}, interval: interval})
+    schedule_reload(state)
+    {:ok, state}
   end
+
+  @impl true
+  def handle_info(:reload, state) do
+    state = scan(state)
+    schedule_reload(state)
+    {:noreply, state}
+  end
+
+  def handle_info(_message, state), do: {:noreply, state}
 
   @impl true
   def handle_call({:put, team, definition, base_version, updated_by}, _from, state) do
@@ -196,8 +224,7 @@ defmodule SymphonyElixir.Factory.Store do
          {:ok, valid} <- Definition.validate(definition) do
       saved = stamp(valid, key, current["version"] + 1, updated_by)
       :ets.insert(@table, {key, saved})
-      persist(state.dir, key, saved)
-      {:reply, {:ok, saved}, state}
+      {:reply, {:ok, saved}, persist(state, key, saved)}
     else
       {:conflict, current} -> {:reply, {:error, {:conflict, current}}, state}
       {:error, reason} -> {:reply, {:error, reason}, state}
@@ -212,8 +239,7 @@ defmodule SymphonyElixir.Factory.Store do
          {:ok, valid} <- Definition.validate(updated) do
       saved = stamp(valid, key, current["version"] + 1, updated_by)
       :ets.insert(@table, {key, saved})
-      persist(state.dir, key, saved)
-      {:reply, {:ok, saved}, state}
+      {:reply, {:ok, saved}, persist(state, key, saved)}
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
@@ -234,8 +260,14 @@ defmodule SymphonyElixir.Factory.Store do
     case team_key(team) do
       {:ok, key} ->
         :ets.delete(@table, key)
-        if state.dir, do: File.rm(Path.join(state.dir, file_name(key)))
-        {:reply, :ok, state}
+
+        if state.dir do
+          path = Path.join(state.dir, file_name(key))
+          File.rm(path)
+          {:reply, :ok, %{state | seen: Map.delete(state.seen, path)}}
+        else
+          {:reply, :ok, state}
+        end
 
       error ->
         {:reply, error, state}
@@ -245,6 +277,13 @@ defmodule SymphonyElixir.Factory.Store do
   def handle_call(:reset_all, _from, state) do
     :ets.delete_all_objects(@table)
     {:reply, :ok, state}
+  end
+
+  def handle_call(:reload, _from, state), do: {:reply, :ok, scan(state)}
+
+  def handle_call({:use_dir, dir}, _from, state) do
+    :ets.delete_all_objects(@table)
+    {:reply, :ok, scan(%{state | dir: dir, seen: %{}})}
   end
 
   defp review_streak(current, stage_id, verdict) do
@@ -265,8 +304,7 @@ defmodule SymphonyElixir.Factory.Store do
          {:ok, valid} <- Definition.validate(changed) do
       saved = stamp(valid, key, current["version"] + 1, updated_by)
       :ets.insert(@table, {key, saved})
-      persist(state.dir, key, saved)
-      {:reply, {:ok, saved}, state}
+      {:reply, {:ok, saved}, persist(state, key, saved)}
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
@@ -319,38 +357,71 @@ defmodule SymphonyElixir.Factory.Store do
     end
   end
 
-  defp persist(nil, _key, _definition), do: :ok
+  defp persist(%{dir: nil} = state, _key, _definition), do: state
 
-  defp persist(dir, key, definition) do
+  defp persist(%{dir: dir} = state, key, definition) do
     path = Path.join(dir, file_name(key))
+    body = Jason.encode!(definition, pretty: true)
 
-    case SymphonyElixir.PrivateFile.write(path, Jason.encode!(definition, pretty: true)) do
-      :ok -> :ok
-      {:error, reason} -> Logger.error("Factory save failed team=#{key} path=#{path} reason=#{inspect(reason)}")
+    case SymphonyElixir.PrivateFile.write(path, body) do
+      :ok ->
+        %{state | seen: Map.put(state.seen, path, fingerprint(body))}
+
+      {:error, reason} ->
+        Logger.error("Factory save failed team=#{key} path=#{path} reason=#{inspect(reason)}")
+        state
     end
   end
 
-  defp load(nil), do: :ok
+  defp schedule_reload(%{dir: dir, interval: interval}) when is_binary(dir) and is_integer(interval) and interval > 0,
+    do: Process.send_after(self(), :reload, interval)
 
-  defp load(dir) do
-    dir
-    |> Path.join("*.json")
-    |> Path.wildcard()
-    |> Enum.each(&load_file/1)
+  defp schedule_reload(_state), do: :ok
+
+  # Loads every file that is new or changed since it was last seen, and drops
+  # the flows whose files are gone. A file that fails to load is remembered, so
+  # its error is logged once per change, not on every tick.
+  defp scan(%{dir: nil} = state), do: state
+
+  defp scan(%{dir: dir, seen: seen} = state) do
+    current =
+      dir
+      |> Path.join("*.json")
+      |> Path.wildcard()
+      |> Enum.flat_map(fn path ->
+        case File.read(path) do
+          {:ok, body} -> [{path, {fingerprint(body), body}}]
+          {:error, _reason} -> []
+        end
+      end)
+      |> Map.new()
+
+    for {path, {print, body}} <- current, Map.get(seen, path) != print, do: load_file(path, body, map_size(seen) > 0)
+
+    for path <- Map.keys(seen) -- Map.keys(current), {:ok, key} <- [file_key(path)] do
+      :ets.delete(@table, key)
+      Logger.info("Factory definition removed from disk scope=#{key}")
+    end
+
+    %{state | seen: Map.new(current, fn {path, {print, _body}} -> {path, print} end)}
   end
 
-  defp load_file(path) do
-    key =
-      case Path.basename(path, ".json") do
-        @project_file_prefix <> slug -> @project_prefix <> slug
-        team -> String.upcase(team)
-      end
+  defp fingerprint(body), do: :crypto.hash(:sha256, body)
 
-    with {:ok, ^key} <- team_key(key),
-         {:ok, body} <- File.read(path),
+  defp file_key(path) do
+    case Path.basename(path, ".json") do
+      @project_file_prefix <> slug -> team_key(@project_prefix <> slug)
+      team -> team_key(team)
+    end
+  end
+
+  defp load_file(path, body, reload?) do
+    with {:ok, key} <- file_key(path),
          {:ok, raw} <- Jason.decode(body),
          {:ok, valid} <- Definition.validate(raw) do
-      :ets.insert(@table, {key, valid |> Map.put("team", key) |> Map.put("version", raw["version"] || 1)})
+      version = raw["version"] || 1
+      :ets.insert(@table, {key, valid |> Map.put("team", key) |> Map.put("version", version)})
+      if reload?, do: Logger.info("Factory definition reloaded from disk scope=#{key} version=#{version}")
     else
       other -> Logger.error("Factory definition skipped path=#{path} reason=#{inspect(other, limit: 5)}")
     end

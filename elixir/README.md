@@ -416,6 +416,14 @@ resumes that branch instead of resetting it. A workspace whose bootstrap or
 - **Freeing a slot.** Moving to done, blocked or another human stage frees a slot. An issue between runs (retrying, waiting on CI) keeps its slot, so work already started is never crowded out by new work.
 - **Order.** When issues wait for a free agent, the one furthest along the flow goes first (its distance from the queue in the flow's transitions), then Linear priority, then age.
 
+### Editing flows on disk
+
+Each scope's flow is a file in `~/.symphony/factories` (`<TEAM>.json`, `project--<slug>.json`, `DEFAULT.json`). The dashboard's flow editor is the usual way to change one, but you can also edit the file:
+- **Pickup.** Symphony rescans the directory every couple of seconds and loads a changed file once it validates, with no restart.
+- **Bad edits.** An invalid edit is logged, and the last good flow stays.
+- **Deleting a file** returns that scope to its inherited flow.
+- **Version.** Bump `version` when you edit. A dashboard save based on an older version is then refused instead of overwriting yours.
+
 ### Docker sandbox
 
 Set `sandbox.kind: docker` to run each issue's hooks and agent process inside its
