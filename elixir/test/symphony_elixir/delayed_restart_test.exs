@@ -22,13 +22,16 @@ defmodule SymphonyElixir.DelayedRestartTest do
     {:ok, pid} = Orchestrator.start_link(name: name)
 
     on_exit(fn ->
-      if previous, do: Application.put_env(:symphony_elixir, :memory_tracker_issues, previous), else: Application.delete_env(:symphony_elixir, :memory_tracker_issues)
+      restore_memory_tracker_issues(previous)
       if Process.alive?(pid), do: Process.exit(pid, :normal)
       File.rm_rf(test_root)
     end)
 
     %{pid: pid, name: name}
   end
+
+  defp restore_memory_tracker_issues(nil), do: Application.delete_env(:symphony_elixir, :memory_tracker_issues)
+  defp restore_memory_tracker_issues(issues), do: Application.put_env(:symphony_elixir, :memory_tracker_issues, issues)
 
   # The issue also exists in the memory tracker, so reconciling keeps the run.
   defp fake_running(pid, issue_id) do
@@ -77,7 +80,8 @@ defmodule SymphonyElixir.DelayedRestartTest do
   end
 
   test "the snapshot shows a pending restart to the dashboard and API", %{pid: pid, name: name} do
-    :sys.replace_state(pid, fn state -> %{state | delayed_restart: %{requested_at: DateTime.utc_now(), requested_by: "ada"}} end)
+    pending = %{requested_at: DateTime.utc_now(), requested_by: "ada"}
+    :sys.replace_state(pid, fn state -> %{state | delayed_restart: pending} end)
     assert %{delayed_restart: %{pending: true, requested_by: "ada", waiting_for: 0}} = Orchestrator.snapshot(name, 1_000)
   end
 
