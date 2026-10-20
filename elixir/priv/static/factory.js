@@ -633,7 +633,8 @@
     var panel = panels[targetId] || (panels[targetId] = new Panel(target));
     if (hook && panel.hook !== hook) {
       panel.hook = hook;
-      hook.handleEvent("factory_assist_result", function (payload) {
+      if (typeof hook.handleEvent === "function")
+        hook.handleEvent("factory_assist_result", function (payload) {
         panel.deliver("factory_assist_result", payload);
       });
     }

@@ -150,4 +150,11 @@ defmodule SymphonyElixir.IssueStageTest do
     assert name =~ ~r/^symphony-MT_1-[0-9a-f]{10}$/
     refute name == Sandbox.container_name("/tmp/other/MT 1")
   end
+
+  test "the team is the identifier prefix, and nothing without an identifier" do
+    assert IssueStage.team(%Issue{identifier: "PAY-12"}) == "PAY"
+    assert IssueStage.team(%Issue{identifier: "nodash"}) == nil
+    assert IssueStage.team(%Issue{identifier: nil}) == nil
+    assert IssueStage.team(nil) == nil
+  end
 end

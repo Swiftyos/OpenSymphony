@@ -88,6 +88,10 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 
 ## States and factory stages
 
+The table below is the default flow. Your team may have its own stages and connections; when
+it does, the "Your current stage" section at the end of this prompt is authoritative for your
+instructions and allowed moves.
+
 This workflow uses Linear's default states only. Finer-grained stages inside a
 state are expressed with labels from the `{{ factory.label_prefix }}` label group (Linear reports them
 as `{{ factory.label_prefix }}/<stage>`). A label group allows only one stage label per issue at a time.

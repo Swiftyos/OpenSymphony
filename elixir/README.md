@@ -482,30 +482,75 @@ Open `http://127.0.0.1:<server.port>/`. The page is laid out in the order an ope
 - **Spend**: cost or tokens grouped by project, team (the Linear key, for example `PAY`), or
   task, split by harness. Hover a bar for input and output tokens, or switch to the table view.
 
-### Steering the factory from the diagram
+### Each team's flow, and steering it
 
-Click a stage to manage it. Its controls replace the Needs-you column so the whole diagram
-stays visible. `#stage=<name>` in the URL deep-links to a stage.
+Every Linear team can have its own factory flow: the stages work moves through and how they
+connect. Teams without one use the organisation's default flow, which starts as Symphony's
+built-in flow. Pick the team at the top of the diagram. `#team=PAY&stage=qa` deep-links to a
+team and stage.
+
+Click a stage to manage it. Its panel replaces the Needs-you column so the whole diagram stays
+visible.
 
 ![Stage controls](../.github/media/dashboard-stage-controls.png)
 
-For agent stages (Todo, Implement, Rework, Merge) you can:
+For stages agents work in, you can:
 
-- **Pause dispatch**: no new agents start in that stage, and running ones finish their turn.
-- **Cap concurrency**: the most agents allowed in that stage at once.
-- **Pick the harness and thinking level**: the default for that stage. An issue's own `codex`,
-  `claude`, `thinking/*` labels still win.
+- **Pause dispatch.** No new agents start in that stage; running ones finish their turn.
+- **Cap concurrency.** Set the most agents allowed in that stage at once.
+- **Pick the harness and thinking level** used by default in that stage. An issue's own `codex`,
+  `claude`, or `thinking/*` labels still win.
 
-Each stage also lists its issues with one-click moves that write back to Linear (state plus
-stage label). In review, that means **Approve & merge** or **Send to rework**:
+Each stage lists its issues, with a button for every connection a person can move them along.
+For example, In Review offers Merge, Rework, and Implement. Moves write the state and stage
+label back to Linear.
 
-![Review actions](../.github/media/dashboard-review-actions.png)
+![Moving issues](../.github/media/dashboard-review-actions.png)
 
-Stage settings persist in `~/.symphony/factory_controls.json`. Changes apply instantly in the
-UI and roll back with a message if the server rejects them.
+#### Editing a flow
 
-Who can do what comes from Linear (see below). `server.controls: false` makes the page
-read-only for everyone.
+**Edit flow** turns the diagram into an editor:
+
+![Flow editor](../.github/media/dashboard-flow-editor.png)
+
+- **Stages.** Use **+ Stage** to add one, drag stages to place them, and click one to set its:
+  - name
+  - **kind**: *queue* (waiting for an agent), *agent*, *human*, *parked* (never dispatched), or
+    *done*
+  - **Linear state**, plus an optional **stage label**. Many stages can share a state; for
+    example, Implement, QA, and Merge all live in In Progress, told apart by label.
+  - agent instructions
+  - default harness, thinking level, and agent cap
+- **Connections.** Drag from a stage's ＋ handle to another stage. Each connection says whether
+  an **agent** or a **person** moves issues along it, and when (its exit criteria). Agents are told
+  their allowed moves; people get buttons for theirs.
+- **Routing.** Lines are drawn at right angles with rounded corners, spaced apart where they
+  share a side, with loops kept in their own lanes.
+- **Saving.**
+  - Saving checks the flow (for example: every stage needs a Linear state, and there's a done
+    stage) and lists any problems.
+  - If someone else saved first, you're told rather than overwriting their change.
+  - On save, Symphony creates the team's `factory` label group and any missing stage labels in
+    Linear.
+- **Who can edit.** Team members edit their own team's flow; Linear admins edit any team's and the
+  organisation default.
+
+Agents get a **"Your current stage"** section in their prompt. It has the stage's instructions,
+the stage's skill if it has one, and each allowed move with the exact Linear state and label to
+set. Workflow templates can place it themselves with `{{ stage.prompt }}`.
+
+#### Drafting a stage with AI
+
+In a stage's form, **✦ Draft with AI** takes a plain description ("before review, run the
+Playwright suite against the preview deploy; send it back if anything fails") and drafts:
+
+- the stage's agent instructions
+- its connections, with who moves each one and when
+- an optional skill file, which is stored with the stage and added to its prompt
+
+It runs your configured harness (`claude -p`, `codex exec`, or `opencode run`) one-shot in an
+empty scratch directory with file, shell, and web tools disallowed. A draft takes 20 to 40
+seconds. Nothing changes until you review the preview and click **Apply**, then **Save**.
 
 ### Sign-in and permissions
 
@@ -562,7 +607,7 @@ admin flag set the permissions, so there are no roles or team lists to maintain 
   clients could spoof those headers.
 - Set `server.secret_key_base` (or `SYMPHONY_SECRET_KEY_BASE`) when running more than one
   instance, or when `~/.symphony` isn't persistent.
-- State lives in `~/.symphony` (accounts, session secret, factories, usage), which Symphony
+- State lives in `~/.symphony` (accounts, session secret, `factories/<TEAM>.json`, usage), which Symphony
   creates as owner-only (0700, files 0600). Back it up.
 - Without sign-in (`local` mode) Symphony only answers requests addressed to `localhost`,
   `127.0.0.1`, or `[::1]`, which blocks DNS-rebinding attacks from web pages.

@@ -328,7 +328,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <section class="panel flow-panel">
               <div class="panel-head">
                 <h2 class="panel-title">Flow</h2>
-                <p class="panel-hint">Click a stage to pause it, cap it, pick its harness, or move its issues. Dashed arrows are loops.</p>
+                <p class="panel-hint">Click a stage to manage it or move its issues. Solid lines are agent moves, dotted lines are person moves.</p>
               </div>
               <div id="fx-diagram" data-fx="diagram" phx-update="ignore"></div>
             </section>
@@ -733,7 +733,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp stage_of(%{status: :retrying}), do: "retrying"
 
   defp stage_of(entry) do
-    issue = %Issue{state: Map.get(entry, :state), labels: Map.get(entry, :labels) || []}
+    # The identifier carries the team, whose flow decides the stage.
+    issue = %Issue{identifier: Map.get(entry, :issue_identifier), state: Map.get(entry, :state), labels: Map.get(entry, :labels) || []}
 
     IssueStage.stage(issue) ||
       entry |> Map.get(:state) |> to_string() |> String.downcase() |> String.replace(" ", "-")

@@ -661,6 +661,11 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `tracker.paused_stages` (extension): list of stage names, default `["blocked", "review"]`;
   issues in these stages are not dispatched even when their state is active
 - `sandbox` (extension): optional per-workspace container isolation (`kind: none | docker`)
+- Factory definitions (extension, not workflow config): per Linear team, stored by the service,
+  listing stages (Linear state + optional stage label, kind `queue|agent|human|parked|done`,
+  instructions, optional skill, harness/effort/agent-cap defaults) and connections (moved by
+  `agent|human`, criteria). Only `queue` and `agent` stages are dispatched; the agent prompt gets
+  the current stage's instructions and allowed moves.
 - `server.auth` (extension): dashboard sign-in, `local` or `accounts` (username/password
   accounts tied to Linear users by email; teams and admin rights come from Linear); defaults
   to `local` on loopback hosts

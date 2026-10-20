@@ -14,12 +14,14 @@ _In this [demo video](.github/media/symphony-demo.mp4), Symphony monitors a Line
 
 ![Symphony dashboard](.github/media/dashboard-overview.png)
 
-The dashboard shows the factory as a live flow diagram you can steer. Click a stage to pause it,
-cap its agents, or choose its harness and thinking level, and approve or send back issues
-in review without leaving the page. It also shows what needs a human, what each agent is doing,
+The dashboard shows each Linear team's factory as a live flow diagram you can steer. You can
+design the flow itself: add stages, draw connections, and draft a stage's agent instructions
+and skill with AI. Click a stage to pause it, cap its agents, choose its harness and thinking
+level, or move issues along its connections. People sign in with Symphony accounts tied to
+their Linear identity. The dashboard also shows what needs a human, what each agent is doing,
 and what it all costs by project, team, task, and harness.
 
-![Stage controls](.github/media/dashboard-stage-controls.png)
+![Flow editor](.github/media/dashboard-flow-editor.png)
 
 See [elixir/README.md](elixir/README.md#web-dashboard) for details.
 
