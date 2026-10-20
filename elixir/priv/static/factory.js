@@ -18,6 +18,78 @@
 
   // ---------------------------------------------------------------- helpers
 
+  // Dot-matrix numbers, like the n8n site's hero: each character is a 5×7
+  // grid of rounded squares over a field of small dots.
+  var DM_GLYPHS = {
+    "0": ["01110", "10001", "10011", "10101", "11001", "10001", "01110"],
+    "1": ["00100", "01100", "00100", "00100", "00100", "00100", "01110"],
+    "2": ["01110", "10001", "00001", "00010", "00100", "01000", "11111"],
+    "3": ["11110", "00001", "00001", "01110", "00001", "00001", "11110"],
+    "4": ["00010", "00110", "01010", "10010", "11111", "00010", "00010"],
+    "5": ["11111", "10000", "11110", "00001", "00001", "10001", "01110"],
+    "6": ["00110", "01000", "10000", "11110", "10001", "10001", "01110"],
+    "7": ["11111", "00001", "00010", "00100", "01000", "01000", "01000"],
+    "8": ["01110", "10001", "10001", "01110", "10001", "10001", "01110"],
+    "9": ["01110", "10001", "10001", "01111", "00001", "00010", "01100"],
+    "$": ["00100", "01111", "10100", "01110", "00101", "11110", "00100"],
+    ".": ["0", "0", "0", "0", "0", "0", "1"],
+    ",": ["0", "0", "0", "0", "0", "1", "1"],
+    "/": ["00001", "00010", "00010", "00100", "01000", "01000", "10000"],
+    "%": ["11001", "11010", "00010", "00100", "01000", "01011", "10011"],
+    "-": ["000", "000", "000", "111", "000", "000", "000"],
+    "—": ["00000", "00000", "00000", "11111", "00000", "00000", "00000"],
+    " ": ["00", "00", "00", "00", "00", "00", "00"],
+    K: ["10001", "10010", "10100", "11000", "10100", "10010", "10001"],
+    M: ["10001", "11011", "10101", "10101", "10001", "10001", "10001"],
+    B: ["11110", "10001", "10001", "11110", "10001", "10001", "11110"],
+    T: ["11111", "00100", "00100", "00100", "00100", "00100", "00100"],
+    s: ["00000", "00000", "01111", "10000", "01110", "00001", "11110"],
+    m: ["00000", "00000", "11010", "10101", "10101", "10101", "10101"],
+    h: ["10000", "10000", "10110", "11001", "10001", "10001", "10001"],
+    k: ["10000", "10000", "10010", "10100", "11000", "10100", "10010"]
+  };
+
+  function dotMatrix(text) {
+    var NS = "http://www.w3.org/2000/svg";
+    var cell = 5;
+    var x = 0;
+    var svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("class", "dot-matrix");
+    svg.setAttribute("role", "img");
+    svg.setAttribute("aria-label", text);
+    String(text).split("").forEach(function (ch) {
+      var glyph = DM_GLYPHS[ch] || DM_GLYPHS[ch.toUpperCase()];
+      if (!glyph) return;
+      var width = glyph[0].length;
+      glyph.forEach(function (row, y) {
+        for (var i = 0; i < width; i++) {
+          var on = row[i] === "1";
+          var r = document.createElementNS(NS, on ? "rect" : "circle");
+          if (on) {
+            r.setAttribute("x", (x + i) * cell + 0.7);
+            r.setAttribute("y", y * cell + 0.7);
+            r.setAttribute("width", cell - 1.4);
+            r.setAttribute("height", cell - 1.4);
+            r.setAttribute("rx", 0.9);
+          } else {
+            r.setAttribute("cx", (x + i) * cell + cell / 2);
+            r.setAttribute("cy", y * cell + cell / 2);
+            r.setAttribute("r", 0.6);
+          }
+          r.setAttribute("class", on ? "dm-on" : "dm-off");
+          svg.appendChild(r);
+        }
+      });
+      x += width + 1;
+    });
+    var w = Math.max(x - 1, 1) * cell;
+    svg.setAttribute("viewBox", "0 0 " + w + " " + 7 * cell);
+    svg.style.aspectRatio = w + " / " + 7 * cell;
+    return svg;
+  }
+
+  window.SymphonyDotMatrix = dotMatrix;
+
   function el(tag, cls, text) {
     var node = document.createElement(tag);
     if (cls) node.className = cls;
@@ -503,7 +575,9 @@
     tiles.forEach(function (tile) {
       var cell = el("div", "fx-stat" + (tile.live ? " is-live" : ""));
       cell.appendChild(el("span", "fx-stat-label", tile.label));
-      cell.appendChild(el("strong", "fx-stat-value", tile.value));
+      var value = el("strong", "fx-stat-value");
+      value.appendChild(dotMatrix(tile.value));
+      cell.appendChild(value);
       cell.appendChild(el("span", "fx-stat-detail", tile.detail));
       stats.appendChild(cell);
     });
@@ -688,6 +762,32 @@
     },
     updated: function () {
       if (this.pinned) this.el.scrollTop = this.el.scrollHeight;
+    }
+  };
+
+  // Chat composer: Enter sends, Shift+Enter is a new line, the box grows with
+  // what is typed and empties once the message is accepted.
+  window.SymphonyHooks.ChatComposer = {
+    mounted: function () {
+      var form = this.el;
+      var box = form.querySelector("textarea");
+      var grow = function () {
+        box.style.height = "auto";
+        box.style.height = Math.min(box.scrollHeight, 220) + "px";
+      };
+      box.addEventListener("input", grow);
+      box.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+          e.preventDefault();
+          if (box.value.trim() !== "") form.requestSubmit();
+        }
+      });
+      this.handleEvent("chat_sent", function () {
+        box.value = "";
+        grow();
+        box.focus();
+      });
+      box.focus();
     }
   };
 

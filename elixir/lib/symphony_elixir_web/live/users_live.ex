@@ -216,7 +216,7 @@ defmodule SymphonyElixirWeb.UsersLive do
   def render(assigns) do
     ~H"""
     <section class="dashboard-shell">
-      <.topbar instance_name={@instance_name} current_user={@current_user}>
+      <.topbar instance_name={@instance_name} current_user={@current_user} current="users">
         <a class="meta-link" href="/">Dashboard</a>
       </.topbar>
 

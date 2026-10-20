@@ -11,10 +11,11 @@ defmodule SymphonyElixirWeb.DashboardLive do
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
   alias Phoenix.LiveView.JS
+  import SymphonyElixirWeb.ChatPanel
   import SymphonyElixirWeb.Topbar
   require Logger
 
-  alias SymphonyElixir.{Auth, Config, FactoryControls, IssueStage, Orchestrator, Tracker, Transcript}
+  alias SymphonyElixir.{AgentInbox, Auth, Config, FactoryControls, IssueStage, Orchestrator, Tracker, Transcript}
   alias SymphonyElixir.Factory.{Assistant, Definition, Store}
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.UsageLedger
@@ -32,6 +33,9 @@ defmodule SymphonyElixirWeb.DashboardLive do
       |> assign(:bell_open, false)
       |> assign(:chat_issue, nil)
       |> assign(:chat_entries, [])
+      |> assign(:chat_queued, [])
+      |> assign(:chat_error, nil)
+      |> assign(:chat_expanded, false)
       |> assign_payload()
       |> assign(:now, DateTime.utc_now())
 
@@ -196,10 +200,32 @@ defmodule SymphonyElixirWeb.DashboardLive do
   def handle_event("open_chat", %{"id" => identifier}, socket) when is_binary(identifier) do
     if Visibility.filter_issue(%{}, socket.assigns.current_user, identifier) == :hidden,
       do: {:noreply, socket},
-      else: {:noreply, assign(socket, chat_issue: identifier, chat_entries: Transcript.entries(identifier))}
+      else: {:noreply, socket |> assign(chat_issue: identifier, chat_error: nil) |> assign_chat()}
   end
 
-  def handle_event("close_chat", _params, socket), do: {:noreply, assign(socket, chat_issue: nil, chat_entries: [])}
+  def handle_event("close_chat", _params, socket), do: {:noreply, assign(socket, chat_issue: nil, chat_entries: [], chat_queued: [])}
+  def handle_event("toggle_chat_size", _params, socket), do: {:noreply, assign(socket, :chat_expanded, !socket.assigns.chat_expanded)}
+
+  # A message to the agent on the open issue: Codex takes it mid-turn, other
+  # agents at their next turn (AgentInbox).
+  def handle_event("send_message", %{"text" => text}, socket) do
+    user = socket.assigns.current_user
+    issue = socket.assigns.chat_issue
+
+    cond do
+      is_nil(issue) ->
+        {:noreply, socket}
+
+      not can_message?(user, socket.assigns.payload, issue) ->
+        {:noreply, assign(socket, :chat_error, "You can't message this agent.")}
+
+      true ->
+        case AgentInbox.send_message(issue, text, author_name(user)) do
+          {:ok, _message} -> {:noreply, socket |> assign(:chat_error, nil) |> assign_chat() |> push_event("chat_sent", %{})}
+          {:error, reason} -> {:noreply, assign(socket, :chat_error, message_error(reason))}
+        end
+    end
+  end
 
   def handle_event("toggle_bell", _params, socket), do: {:noreply, assign(socket, :bell_open, !socket.assigns.bell_open)}
   def handle_event("close_bell", _params, socket), do: {:noreply, assign(socket, :bell_open, false)}
@@ -489,8 +515,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
             </div>
           </div>
         </div>
-        <a class="meta-link" href="/api/v1/state">API</a>
-        <a class="meta-link" href="/metrics">Metrics</a>
       </.topbar>
 
       <%= if @payload[:error] do %>
@@ -617,7 +641,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </div>
         </section>
 
-        <section class="panel">
+        <section id="sessions" class="panel">
           <div class="panel-head">
             <h2 class="panel-title">Live sessions</h2>
             <span class="panel-hint numeric">
@@ -715,7 +739,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <% end %>
         </section>
 
-        <section class="panel">
+        <section id="spend" class="panel">
           <div class="panel-head">
             <h2 class="panel-title">Spend</h2>
             <p class="panel-hint">By project, team, or task, split by harness. Hover a bar for input and output tokens.</p>
@@ -761,24 +785,16 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </details>
         </footer>
       <% end %>
-      <aside :if={@chat_issue} class="chat-panel" aria-label={"Agent transcript for #{@chat_issue}"} phx-window-keydown="close_chat" phx-key="Escape">
-        <header class="chat-head">
-          <div>
-            <h2 class="chat-title">💬 <%= @chat_issue %></h2>
-            <p class="chat-sub">What its agents said and did, newest at the bottom. Updates live.</p>
-          </div>
-          <button type="button" class="chat-close" phx-click="close_chat" aria-label="Close transcript">✕</button>
-        </header>
-        <div id={"chat-log-#{@chat_issue}"} class="chat-log" phx-hook="ChatScroll">
-          <p :if={@chat_entries == []} class="chat-empty">
-            Nothing yet. Entries appear as soon as an agent works on this issue (since Symphony last started).
-          </p>
-          <div :for={entry <- @chat_entries} class={"chat-entry chat-#{entry.kind}"}>
-            <span class="chat-meta"><%= chat_kind(entry.kind) %> · <%= Calendar.strftime(entry.at, "%H:%M:%S") %></span>
-            <div class="chat-text"><%= entry.text %></div>
-          </div>
-        </div>
-      </aside>
+      <.chat_panel
+        :if={@chat_issue}
+        issue={@chat_issue}
+        entries={@chat_entries}
+        queued={@chat_queued}
+        session={chat_session(@payload, @chat_issue)}
+        can_message={can_message?(@current_user, @payload, @chat_issue)}
+        error={@chat_error}
+        expanded={@chat_expanded}
+      />
     </section>
     """
   end
@@ -798,7 +814,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
     team = if Enum.any?(choices, &(&1.key == socket.assigns.team_filter)), do: socket.assigns.team_filter
 
     socket
-    |> assign(:chat_entries, Transcript.entries(socket.assigns[:chat_issue]))
+    |> assign_chat()
     # An assign, not a template call: LiveView only re-renders template calls
     # when their arguments change, so an approved account would never clear.
     |> assign(:pending_accounts, pending_accounts(user))
@@ -806,6 +822,43 @@ defmodule SymphonyElixirWeb.DashboardLive do
     |> assign(:team_filter, team)
     |> assign(:payload, Visibility.scope_to_team(visible, team))
   end
+
+  defp assign_chat(socket) do
+    issue = socket.assigns[:chat_issue]
+
+    socket
+    |> assign(:chat_entries, Transcript.entries(issue))
+    |> assign(:chat_queued, if(issue, do: Enum.filter(AgentInbox.messages(issue), &(&1.status == "queued")), else: []))
+  end
+
+  # The open issue's running entry, for the chat header.
+  defp chat_session(%{running: running}, identifier) when is_list(running) do
+    case Enum.find(running, &(&1.issue_identifier == identifier)) do
+      nil -> nil
+      entry -> Map.put(entry, :stage, stage_label(entry))
+    end
+  end
+
+  defp chat_session(_payload, _identifier), do: nil
+
+  # Messaging an agent is a change to its work, so it takes the same right as
+  # moving the issue.
+  defp can_message?(user, payload, identifier) do
+    project =
+      case chat_session(payload, identifier),
+        do: (
+          %{project_slug: slug} -> slug
+          _ -> nil
+        )
+
+    Auth.can_move_issue?(user, identifier, project)
+  end
+
+  defp author_name(user), do: user.name || user.username || user.email || "someone"
+
+  defp message_error(:empty), do: "Write a message first."
+  defp message_error(:too_long), do: "That message is too long (8,000 characters at most)."
+  defp message_error(reason), do: "Couldn't send: #{inspect(reason)}"
 
   defp team_choices(%{factory: %{teams: entries}}, user) do
     names = if user, do: Map.new(user.teams, &{&1.key, &1.name}), else: %{}
@@ -859,13 +912,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
     ]
     |> Enum.reject(&(&1.items == []))
   end
-
-  defp chat_kind("agent"), do: "Agent"
-  defp chat_kind("thinking"), do: "Thinking"
-  defp chat_kind("tool"), do: "Ran"
-  defp chat_kind("error"), do: "Error"
-  defp chat_kind("symphony"), do: "Agent Factory"
-  defp chat_kind(kind), do: kind
 
   defp attention_count(payload, pending_accounts) do
     payload

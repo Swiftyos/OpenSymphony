@@ -11,6 +11,7 @@ defmodule SymphonyElixirWeb.Topbar do
   attr(:current_user, :any, required: true)
   attr(:teams, :list, default: [], doc: "team picker choices (%{key, name}); none hides the picker")
   attr(:team, :string, default: nil)
+  attr(:current, :string, default: "factory", doc: "the nav item for this page")
   slot(:inner_block)
 
   @spec topbar(map()) :: Phoenix.LiveView.Rendered.t()
@@ -26,17 +27,17 @@ defmodule SymphonyElixirWeb.Topbar do
           <circle cx="19" cy="18" r="2.6" />
           <circle cx="26" cy="8" r="2.6" />
         </svg>
-        <div>
-          <h1 class="ops-title">
-            <%= if @instance_name do %>
-              <%= @instance_name %> Operations Dashboard
-            <% else %>
-              Operations Dashboard
-            <% end %>
-          </h1>
-          <p class="ops-subtitle">Symphony agent factory</p>
-        </div>
+        <h1 class="ops-title">
+          <span class="sr-only">{@instance_name && "#{@instance_name} "}Operations Dashboard</span>
+          <span class="brand-name" aria-hidden="true">{@instance_name || "Symphony"}</span>
+        </h1>
       </a>
+
+      <nav class="topnav" aria-label="Pages">
+        <a :for={item <- nav_items(@current_user)} href={item.href} class={["topnav-link", item.key == @current && "is-current"]}>
+          {item.label}
+        </a>
+      </nav>
 
       <form :if={@teams != []} id="team-picker" class="team-picker" phx-change="pick_team" phx-hook="TeamPicker">
         <label class="team-picker-label" for="team-picker-select">Team</label>
@@ -72,6 +73,8 @@ defmodule SymphonyElixirWeb.Topbar do
               <span>{role(@current_user)}</span>
             </p>
             <a href="/account">Account &amp; password</a>
+            <a href="/api/v1/state">State API</a>
+            <a href="/metrics">Prometheus metrics</a>
             <a :if={Auth.can_manage_access?(@current_user)} href="/admin/users">Users</a>
             <%!-- POST-only so other sites can't sign people out; the token comes from the page's meta tag. --%>
             <form
@@ -87,6 +90,18 @@ defmodule SymphonyElixirWeb.Topbar do
       </div>
     </header>
     """
+  end
+
+  # The page links; the factory's sections are anchors on the dashboard.
+  defp nav_items(user) do
+    [
+      %{key: "factory", label: "Factory", href: "/"},
+      %{key: "sessions", label: "Sessions", href: "/#sessions"},
+      %{key: "spend", label: "Spend", href: "/#spend"},
+      %{key: "insights", label: "Traces & metrics", href: "/insights"},
+      Auth.can_manage_access?(user) && %{key: "users", label: "Users", href: "/admin/users"}
+    ]
+    |> Enum.filter(& &1)
   end
 
   defp logo?, do: is_binary(SymphonyElixir.Config.instance_logo())
