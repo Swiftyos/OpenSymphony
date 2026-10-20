@@ -41,6 +41,32 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
     end
   end
 
+  @doc """
+  Asks for a delayed restart: no new agent runs, then a restart once the
+  running ones finish. Admins only (or the server.api_token).
+  """
+  @spec request_restart(Conn.t(), map()) :: Conn.t()
+  def request_restart(conn, _params) do
+    restart_action(conn, &SymphonyElixir.Orchestrator.request_delayed_restart(&1, orchestrator()))
+  end
+
+  @spec cancel_restart(Conn.t(), map()) :: Conn.t()
+  def cancel_restart(conn, _params) do
+    restart_action(conn, fn _requested_by -> SymphonyElixir.Orchestrator.cancel_delayed_restart(orchestrator()) end)
+  end
+
+  # A signed-in admin, or no user at all: the request came with server.api_token.
+  defp restart_action(conn, action) do
+    case conn.assigns[:current_user] do
+      %{admin: true} = user -> restart_response(conn, action.(user.username || user.email || "admin"))
+      nil -> restart_response(conn, action.("api token"))
+      _user -> error_response(conn, 403, "forbidden", "Only admins can restart Symphony")
+    end
+  end
+
+  defp restart_response(conn, :unavailable), do: error_response(conn, 503, "orchestrator_unavailable", "Orchestrator is unavailable")
+  defp restart_response(conn, payload), do: conn |> put_status(202) |> json(%{delayed_restart: payload})
+
   @spec metrics(Conn.t(), map()) :: Conn.t()
   def metrics(conn, _params) do
     body = PrometheusMetrics.render()

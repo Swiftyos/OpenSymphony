@@ -50,7 +50,15 @@ defmodule SymphonyElixirWeb.Topbar do
 
       <div class="topbar-meta">
         {render_slot(@inner_block)}
-        <details :if={!@current_user.local} class="user-menu">
+        <%!-- The browser sets `open`; the server never does, so LiveView must not
+             strip it on every update, or the menu snaps shut while the
+             dashboard is busy. --%>
+        <details
+          :if={!@current_user.local}
+          id="user-menu"
+          class="user-menu"
+          phx-mounted={Phoenix.LiveView.JS.ignore_attributes(["open"])}
+        >
           <summary class="user-chip" title={user_title(@current_user)}>
             <img :if={@current_user.avatar_url} class="user-avatar" src={@current_user.avatar_url} alt="" />
             <span :if={!@current_user.avatar_url} class="user-avatar user-avatar-initial">

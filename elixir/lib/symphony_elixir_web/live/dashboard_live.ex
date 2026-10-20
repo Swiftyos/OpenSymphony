@@ -9,6 +9,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
   """
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
+
+  alias Phoenix.LiveView.JS
   import SymphonyElixirWeb.Topbar
   require Logger
 
@@ -447,6 +449,9 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <%= @payload.counts.running %>/<%= @payload.capacity.max_concurrent_agents %> agents
         </span>
         <span class="meta-item numeric"><%= polling_label(@payload[:polling]) %></span>
+        <span :if={get_in(@payload, [:delayed_restart, :pending])} class="meta-item status-badge-offline" title="No new agent runs start until Symphony restarts">
+          Restart pending: waiting for <%= @payload.delayed_restart.waiting_for %> agent(s)
+        </span>
         <div :if={!@payload[:error]} class="bell" phx-click-away="close_bell">
           <button
             type="button"
@@ -750,7 +755,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
             </span>
           </div>
 
-          <details class="footer-details">
+          <details id="rate-limit-details" class="footer-details" phx-mounted={JS.ignore_attributes(["open"])}>
             <summary>Raw rate-limit snapshot</summary>
             <pre class="code-panel"><%= pretty_value(@payload.rate_limits) %></pre>
           </details>

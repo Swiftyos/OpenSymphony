@@ -54,6 +54,8 @@ defmodule SymphonyElixir.Orchestrator do
       :poll_check_in_progress,
       :tick_timer_ref,
       :tick_token,
+      # %{requested_at: DateTime, requested_by: String} while a delayed restart is pending.
+      :delayed_restart,
       running: %{},
       completed: MapSet.new(),
       claimed: MapSet.new(),
@@ -90,6 +92,7 @@ defmodule SymphonyElixir.Orchestrator do
       |> initialize_backend_totals(config)
 
     run_terminal_workspace_cleanup()
+    :ok = SymphonyElixir.DelayedRestartSignal.install()
     state = schedule_tick(state, 0)
 
     {:ok, state}
@@ -195,6 +198,7 @@ defmodule SymphonyElixir.Orchestrator do
 
         Logger.info("Agent task finished for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}")
 
+        if state.delayed_restart, do: send(self(), :delayed_restart_check)
         notify_dashboard()
         {:noreply, state}
     end
@@ -275,6 +279,17 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info({:agent_worker_update, _issue_id, _update}, state), do: {:noreply, state}
 
+  # Delayed restart: once nothing is running, stop so the supervisor (systemd,
+  # Restart=always) starts Symphony again with the new binary or config.
+  def handle_info(:delayed_restart_check, %{delayed_restart: %{}, running: running} = state) when map_size(running) == 0 do
+    Logger.warning("Delayed restart: no agents running; stopping so the supervisor starts Symphony again")
+    {module, function, args} = Application.get_env(:symphony_elixir, :delayed_restart_stop, {System, :stop, [0]})
+    apply(module, function, args)
+    {:noreply, state}
+  end
+
+  def handle_info(:delayed_restart_check, state), do: {:noreply, state}
+
   def handle_info({:retry_issue, issue_id, retry_token}, state) do
     result =
       case pop_retry_attempt_state(state, issue_id, retry_token) do
@@ -295,6 +310,9 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp maybe_dispatch(%State{} = state) do
     state = reconcile_running_issues(state)
+    # Reconciling can stop the last agent without a :DOWN reaching us (its issue
+    # closed or vanished), so a pending delayed restart is checked every poll too.
+    if state.delayed_restart, do: send(self(), :delayed_restart_check)
 
     with {:ok, issues} <- Tracker.fetch_candidate_issues(),
          :ok <- Enum.each(issues, &UsageLedger.observe_issue/1),
@@ -810,7 +828,16 @@ defmodule SymphonyElixir.Orchestrator do
     |> MapSet.new()
   end
 
-  defp dispatch_issue(%State{} = state, issue, attempt \\ nil, preferred_worker_host \\ nil) do
+  # Every new run (an issue leaving the queue, its next stage, a retry or a
+  # continuation) starts here, so a pending delayed restart holds them all.
+  defp dispatch_issue(state, issue, attempt \\ nil, preferred_worker_host \\ nil)
+
+  defp dispatch_issue(%State{delayed_restart: %{}} = state, issue, _attempt, _preferred_worker_host) do
+    Logger.info("Not starting a run during a delayed restart: #{issue_context(issue)}")
+    state
+  end
+
+  defp dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host) do
     case revalidate_issue_for_dispatch(issue, &Tracker.fetch_issue_states_by_ids/1, terminal_state_set()) do
       {:ok, %Issue{} = refreshed_issue} ->
         do_dispatch_issue(state, refreshed_issue, attempt, preferred_worker_host)
@@ -1447,6 +1474,24 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  @doc """
+  Delayed restart: start no new agent runs (an issue leaving the queue, its
+  next stage, retries) and, once the last running agent has finished, stop so
+  the supervisor starts Symphony again. Asking again changes nothing.
+  """
+  @spec request_delayed_restart(String.t(), GenServer.server()) :: map() | :unavailable
+  def request_delayed_restart(requested_by, server \\ __MODULE__) do
+    if GenServer.whereis(server), do: GenServer.call(server, {:request_delayed_restart, requested_by}), else: :unavailable
+  end
+
+  @doc """
+  Calls off a pending delayed restart; runs start again from the next poll.
+  """
+  @spec cancel_delayed_restart(GenServer.server()) :: map() | :unavailable
+  def cancel_delayed_restart(server \\ __MODULE__) do
+    if GenServer.whereis(server), do: GenServer.call(server, :cancel_delayed_restart), else: :unavailable
+  end
+
   @spec snapshot() :: map() | :timeout | :unavailable
   def snapshot, do: snapshot(__MODULE__, 15_000)
 
@@ -1502,12 +1547,34 @@ defmodule SymphonyElixir.Orchestrator do
        retrying: retrying,
        agent_totals: snapshot_agent_totals(state),
        rate_limits: snapshot_rate_limits(state),
+       delayed_restart: delayed_restart_payload(state),
        polling: %{
          checking?: poll_check_in_progress?(state),
          next_poll_in_ms: next_poll_in_ms(state.next_poll_due_at_ms, now_ms),
          poll_interval_ms: state.poll_interval_ms
        }
      }, state}
+  end
+
+  def handle_call({:request_delayed_restart, requested_by}, _from, state) do
+    state =
+      if state.delayed_restart do
+        state
+      else
+        Logger.warning("Delayed restart requested by #{requested_by}: no new agent runs; restarting once #{map_size(state.running)} running agent(s) finish")
+        %{state | delayed_restart: %{requested_at: DateTime.utc_now(), requested_by: requested_by}}
+      end
+
+    send(self(), :delayed_restart_check)
+    notify_dashboard()
+    {:reply, delayed_restart_payload(state), state}
+  end
+
+  def handle_call(:cancel_delayed_restart, _from, state) do
+    if state.delayed_restart, do: Logger.warning("Delayed restart cancelled; agent runs start again")
+    state = schedule_tick(%{state | delayed_restart: nil}, 0)
+    notify_dashboard()
+    {:reply, delayed_restart_payload(state), state}
   end
 
   def handle_call(:request_refresh, _from, state) do
@@ -1524,6 +1591,11 @@ defmodule SymphonyElixir.Orchestrator do
        operations: ["poll", "reconcile"]
      }, state}
   end
+
+  defp delayed_restart_payload(%State{delayed_restart: %{requested_at: at, requested_by: by}, running: running}),
+    do: %{pending: true, requested_at: DateTime.to_iso8601(at), requested_by: by, waiting_for: map_size(running)}
+
+  defp delayed_restart_payload(%State{}), do: %{pending: false}
 
   defp snapshot_running_entry(issue_id, metadata, now) do
     %{

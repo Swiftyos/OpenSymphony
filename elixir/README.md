@@ -424,6 +424,14 @@ Each scope's flow is a file in `~/.symphony/factories` (`<TEAM>.json`, `project-
 - **Deleting a file** returns that scope to its inherited flow.
 - **Version.** Bump `version` when you edit. A dashboard save based on an older version is then refused instead of overwriting yours.
 
+### Delayed restart
+
+A delayed restart lets you deploy without cutting off running agents.
+- **What it does.** Symphony starts no new agent runs: no issue leaves the queue, no next stage starts after a transition, and no retry runs. Once the last running agent finishes, Symphony stops cleanly, and a supervisor such as systemd with `Restart=always` starts it again with the new binary or config.
+- **Triggers.** Send `SIGHUP` (`systemctl reload symphony` with `ExecReload=/bin/kill -HUP $MAINPID`), or `POST /api/v1/restart` as an admin or with `server.api_token`.
+- **Cancel** with `DELETE /api/v1/restart`.
+- **While pending,** the dashboard shows "Restart pending", and `/api/v1/state` carries `delayed_restart`.
+
 ### Docker sandbox
 
 Set `sandbox.kind: docker` to run each issue's hooks and agent process inside its

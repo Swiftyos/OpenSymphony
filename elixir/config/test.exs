@@ -31,6 +31,9 @@ config :symphony_elixir,
   factories_dir: nil,
   # Tests reload the factory store explicitly (Store.reload/0).
   factories_reload_ms: 0,
+  # Never trap SIGHUP or stop the VM from tests.
+  handle_sighup: false,
+  delayed_restart_stop: {Kernel, :send, [:delayed_restart_test_probe, :stopped]},
   # ConnTest requests use host "www.example.com"; the guard is tested explicitly.
   enforce_local_host: false,
   password_iterations: 1_000,

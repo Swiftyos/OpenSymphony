@@ -73,6 +73,9 @@ defmodule SymphonyElixirWeb.Router do
     get("/metrics", ObservabilityApiController, :metrics)
     get("/api/v1/state", ObservabilityApiController, :state)
     post("/api/v1/refresh", ObservabilityApiController, :refresh)
+    # Delayed restart: no new runs, then restart once running agents finish (admins or server.api_token).
+    post("/api/v1/restart", ObservabilityApiController, :request_restart)
+    delete("/api/v1/restart", ObservabilityApiController, :cancel_restart)
     # Must precede the :issue_identifier route so GET /api/v1/refresh stays a 405.
     match(:*, "/api/v1/refresh", ObservabilityApiController, :method_not_allowed)
     get("/api/v1/:issue_identifier", ObservabilityApiController, :issue)

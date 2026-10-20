@@ -27,6 +27,7 @@ defmodule SymphonyElixirWeb.Presenter do
           agent_totals: snapshot.agent_totals,
           rate_limits: Map.get(snapshot, :rate_limits),
           polling: Map.get(snapshot, :polling),
+          delayed_restart: Map.get(snapshot, :delayed_restart, %{pending: false}),
           accounts: account_usage_payload(running, settings),
           projects: project_usage_payload(running, retrying, settings),
           telemetry: telemetry_payload(settings),
