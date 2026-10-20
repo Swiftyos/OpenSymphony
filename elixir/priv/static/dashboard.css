@@ -4357,3 +4357,58 @@ a.brand:hover {
     display: none;
   }
 }
+
+.cx-delivery {
+  color: #a0a0a0;
+}
+
+.cx-delivery.is-queued {
+  color: var(--warning);
+}
+
+.cx-work-icon.is-running {
+  color: var(--h-codex);
+  animation: fx-breathe 1.6s ease-in-out infinite;
+}
+
+.cx-file-head {
+  display: flex;
+  gap: 8px;
+}
+
+.cx-diff {
+  max-height: 360px;
+  margin: 4px 0 8px;
+  padding: 8px 0;
+  overflow: auto;
+  border-radius: 12px;
+  background: var(--night);
+  color: #d8d8d8;
+  font-size: 0.74rem;
+  line-height: 1.45;
+  white-space: pre;
+}
+
+.cx-diff span {
+  display: block;
+  min-height: 1.45em;
+  padding: 0 12px;
+}
+
+.cx-diff .d-add {
+  background: rgba(31, 157, 85, 0.22);
+  color: #c9f2d9;
+}
+
+.cx-diff .d-del {
+  background: rgba(208, 59, 59, 0.24);
+  color: #f6cccc;
+}
+
+.cx-diff .d-hunk {
+  color: #8fb3e8;
+}
+
+.cx-diff .d-file {
+  color: #a0a0a0;
+}

@@ -62,9 +62,7 @@ defmodule SymphonyElixirWeb.ChatPanel do
           <p :if={@items == []} class="cx-empty">
             Nothing yet. The conversation appears as soon as an agent works on this issue.
           </p>
-          <%= for item <- @items do %>
-            <.item item={item} />
-          <% end %>
+          <.item :for={item <- @items} id={item[:id]} item={item} />
         </div>
       </div>
 
@@ -99,6 +97,7 @@ defmodule SymphonyElixirWeb.ChatPanel do
   end
 
   attr(:item, :map, required: true)
+  attr(:id, :string, default: nil)
 
   defp item(%{item: %{type: :user}} = assigns) do
     ~H"""
@@ -106,7 +105,10 @@ defmodule SymphonyElixirWeb.ChatPanel do
       <div class="cx-bubble">
         <div class="cx-md">{Markdown.to_html(@item.text)}</div>
       </div>
-      <span class="cx-time">{@item.author}{@item.author && " · "}{time(@item.at)}</span>
+      <span class="cx-time">
+        {@item.author}{@item.author && " · "}{time(@item.at)}
+        <span :if={@item[:status]} class={"cx-delivery is-#{@item.status}"}>· {delivery_label(@item)}</span>
+      </span>
     </div>
     """
   end
@@ -148,7 +150,7 @@ defmodule SymphonyElixirWeb.ChatPanel do
     ~H"""
     <details class={["cx-row cx-work cx-command", @item.failed && "is-failed"]}>
       <summary>
-        <span class="cx-work-icon">{if @item.failed, do: "✗", else: "›_"}</span>
+        <span class={["cx-work-icon", @item[:running] && "is-running"]}>{command_icon(@item)}</span>
         Ran <code class="cx-cmd">{@item.command}</code>
         <span :if={@item.meta} class="cx-work-meta">{@item.meta}</span>
       </summary>
@@ -168,9 +170,12 @@ defmodule SymphonyElixirWeb.ChatPanel do
       </summary>
       <ul class="cx-files">
         <li :for={file <- @item.files}>
-          <code>{file.path}</code>
-          <span :if={file[:additions]} class="cx-add">+{file.additions}</span>
-          <span :if={file[:deletions]} class="cx-del">−{file.deletions}</span>
+          <div class="cx-file-head">
+            <code>{file.path}</code>
+            <span :if={file[:additions]} class="cx-add">+{file.additions}</span>
+            <span :if={file[:deletions]} class="cx-del">−{file.deletions}</span>
+          </div>
+          <pre :if={file[:diff] not in [nil, ""]} class="cx-diff"><span :for={line <- diff_lines(file.diff)} class={line.class}>{line.text}</span></pre>
         </li>
       </ul>
     </details>
@@ -192,20 +197,24 @@ defmodule SymphonyElixirWeb.ChatPanel do
   @doc false
   @spec view_entry(map()) :: map()
   def view_entry(%{kind: kind} = entry) do
-    base = %{at: entry[:at], text: entry[:text] || entry[:body] || ""}
+    base = %{id: entry[:id], at: entry[:at], text: entry[:text] || entry[:body] || ""}
 
     case kind do
-      "user" -> Map.merge(base, %{type: :user, author: entry[:author]})
+      "user" -> Map.merge(base, %{type: :user, author: entry[:author], status: entry[:status], delivery: entry[:delivery]})
       "agent" -> Map.put(base, :type, :agent)
       "thinking" -> Map.put(base, :type, :thinking)
       "symphony" -> Map.put(base, :type, :note)
-      "turn" -> Map.put(base, :type, :note)
+      "turn" -> Map.merge(base, %{type: :note, text: entry[:title] || base.text})
       "error" -> Map.put(base, :type, :error)
       "command" -> command(base, entry)
       "edit" -> edit(base, entry)
-      "tool" -> legacy_tool(base, entry)
+      "tool" -> if is_binary(entry[:tool]), do: tool(base, entry), else: legacy_tool(base, entry)
       _ -> Map.merge(base, %{type: :tool, title: entry[:title] || kind})
     end
+  end
+
+  defp tool(base, entry) do
+    Map.merge(base, %{type: :tool, title: entry[:title] || entry[:tool], text: entry[:body] || "", failed: entry[:status] == "failed"})
   end
 
   defp command(base, entry) do
@@ -216,7 +225,8 @@ defmodule SymphonyElixirWeb.ChatPanel do
       type: :command,
       command: entry[:command] || entry[:title] || first_line(base.text),
       output: entry[:output] || entry[:body] || "",
-      failed: (is_integer(exit_code) and exit_code != 0) or entry[:status] == "failed",
+      failed: (is_integer(exit_code) and exit_code != 0) or entry[:status] in ["failed", "declined"],
+      running: entry[:status] == "running",
       meta: if(meta == "", do: nil, else: meta)
     })
   end
@@ -227,7 +237,13 @@ defmodule SymphonyElixirWeb.ChatPanel do
       |> Map.get(:files, [])
       |> List.wrap()
       |> Enum.map(fn
-        %{} = file -> %{path: file[:path] || file["path"] || "a file", additions: file[:additions] || file["additions"], deletions: file[:deletions] || file["deletions"]}
+        %{} = file ->
+          %{
+            path: file[:path] || file["path"] || "a file",
+            additions: file[:additions] || file["additions"],
+            deletions: file[:deletions] || file["deletions"],
+            diff: file[:diff] || file["diff"]
+          }
         path when is_binary(path) -> %{path: path}
       end)
 
@@ -268,6 +284,35 @@ defmodule SymphonyElixirWeb.ChatPanel do
       [_, rest] -> rest
       _ -> ""
     end
+  end
+
+  defp delivery_label(%{status: "queued"}), do: "queued for the agent"
+  defp delivery_label(%{delivery: "steered"}), do: "delivered mid-turn"
+  defp delivery_label(%{delivery: "next_turn"}), do: "delivered at turn start"
+  defp delivery_label(%{status: status}), do: status
+
+  defp command_icon(%{running: true}), do: "◐"
+  defp command_icon(%{failed: true}), do: "✗"
+  defp command_icon(_item), do: "›_"
+
+  @max_diff_lines 400
+
+  defp diff_lines(diff) do
+    diff
+    |> String.split("\n")
+    |> Enum.take(@max_diff_lines)
+    |> Enum.map(fn line ->
+      class =
+        cond do
+          String.starts_with?(line, "+++") or String.starts_with?(line, "---") -> "d-file"
+          String.starts_with?(line, "+") -> "d-add"
+          String.starts_with?(line, "-") -> "d-del"
+          String.starts_with?(line, "@@") -> "d-hunk"
+          true -> nil
+        end
+
+      %{class: class, text: line}
+    end)
   end
 
   defp peek(text), do: text |> String.replace(~r/\s+/, " ") |> String.slice(0, 90)
