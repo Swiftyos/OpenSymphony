@@ -18,6 +18,14 @@ defmodule SymphonyElixir.Telemetry do
 
   def env_pairs(_backend, nil, _account), do: []
 
+  # Codex exports only what `codex_config_overrides/1` names; given the OTEL_*
+  # exporter variables too, something in it posted to the bare endpoint.
+  def env_pairs("codex", issue, account) when is_map(issue) do
+    if Config.telemetry_enabled?(),
+      do: maybe_put([], "OTEL_RESOURCE_ATTRIBUTES", Config.telemetry_issue_resource_attributes(issue, "codex", account)),
+      else: []
+  end
+
   def env_pairs(backend, issue, account) when is_binary(backend) and is_map(issue) do
     if Config.telemetry_enabled?() do
       settings = Config.settings!()

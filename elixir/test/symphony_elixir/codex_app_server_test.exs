@@ -689,7 +689,7 @@ defmodule SymphonyElixir.CodexAppServerTest do
     end
   end
 
-  test "codex backend passes otel config overrides and injects telemetry env vars when telemetry is enabled" do
+  test "codex backend passes otel config overrides and only resource attributes in the env when telemetry is enabled" do
     test_root = temp_root!("telemetry")
     trace_env = "SYMP_TEST_CODEX_TRACE_#{System.unique_integer([:positive])}"
     previous_trace = System.get_env(trace_env)
@@ -757,8 +757,8 @@ defmodule SymphonyElixir.CodexAppServerTest do
       assert trace =~ "symphony.account.credential_kind=codex_home"
       assert trace =~ "environment=test"
       assert trace =~ "ENV:CODEX_HOME=#{account.codex_home}"
-      assert trace =~ "ENV:OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:11338"
-      assert trace =~ "ENV:OTEL_EXPORTER_OTLP_PROTOCOL=grpc"
+      refute trace =~ "ENV:OTEL_EXPORTER_OTLP_ENDPOINT"
+      refute trace =~ "ENV:OTEL_LOGS_EXPORTER"
     after
       File.rm_rf(test_root)
     end
