@@ -167,6 +167,37 @@ defmodule SymphonyElixir.Factory.Definition do
   def transitions_from(definition, stage_id), do: Enum.filter(definition["transitions"], &(&1["from"] == stage_id))
 
   @doc """
+  How far along the flow each stage is: its distance in transitions from the
+  nearest queue stage (0 for the queues themselves). Back edges such as test ->
+  implement don't shorten anything, so a later stage always ranks higher than
+  the stages that lead to it. Stages no queue reaches are left out.
+  """
+  @spec stage_depths(t()) :: %{String.t() => non_neg_integer()}
+  def stage_depths(%{"stages" => stages, "transitions" => transitions}) when is_list(stages) and is_list(transitions) do
+    queues = for %{"kind" => "queue", "id" => id} <- stages, do: id
+    next = Enum.group_by(transitions, & &1["from"], & &1["to"])
+    walk_depths(queues, Map.new(queues, &{&1, 0}), next)
+  end
+
+  def stage_depths(_definition), do: %{}
+
+  defp walk_depths([], depths, _next), do: depths
+
+  defp walk_depths(frontier, depths, next) do
+    {frontier, depths} = Enum.reduce(frontier, {[], depths}, &visit_successors(&1, &2, next))
+    walk_depths(Enum.reverse(frontier), depths, next)
+  end
+
+  # Gives each stage reached from `id` for the first time a depth one past it.
+  defp visit_successors(id, {frontier, depths}, next) do
+    next
+    |> Map.get(id, [])
+    |> Enum.reject(&Map.has_key?(depths, &1))
+    |> Enum.uniq()
+    |> Enum.reduce({frontier, depths}, fn to, {frontier, depths} -> {[to | frontier], Map.put(depths, to, depths[id] + 1)} end)
+  end
+
+  @doc """
   Linear workflow states the definition uses for dispatchable stages.
   """
   @spec active_states(t()) :: [String.t()]

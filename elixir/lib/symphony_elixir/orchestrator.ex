@@ -21,6 +21,7 @@ defmodule SymphonyElixir.Orchestrator do
     Workspace
   }
 
+  alias SymphonyElixir.Factory.Definition
   alias SymphonyElixir.Linear.Issue
 
   @continuation_retry_delay_ms 1_000
@@ -577,20 +578,69 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp terminate_task(_pid), do: :ok
 
+  # Issues further along the flow go first, and an issue leaves a queue stage
+  # (Todo) only while fewer issues than there are agent slots are in agent
+  # stages. Done, blocked and other human stages free a slot; an issue between
+  # runs (retrying, waiting on CI) still holds its slot.
   defp choose_issues(issues, state) do
     active_states = active_state_set()
     terminal_states = terminal_state_set()
+    staged = Enum.map(issues, &{&1, dispatch_stage(&1)})
+    limit = state.max_concurrent_agents || Config.settings!().agent.max_concurrent_agents
 
-    issues
-    |> sort_issues_for_dispatch()
-    |> Enum.reduce_while(state, fn issue, state_acc ->
-      if available_slots(state_acc) <= 0 do
-        {:halt, state_acc}
-      else
-        {:cont, maybe_dispatch_issue(state_acc, issue, active_states, terminal_states)}
+    staged
+    |> order_for_dispatch()
+    |> Enum.reduce_while({state, queue_allowance(staged, limit)}, fn {issue, {kind, _rank}}, {state_acc, allowance} ->
+      cond do
+        available_slots(state_acc) <= 0 ->
+          {:halt, {state_acc, allowance}}
+
+        kind == "queue" and allowance <= 0 ->
+          {:cont, {state_acc, allowance}}
+
+        true ->
+          next = maybe_dispatch_issue(state_acc, issue, active_states, terminal_states)
+          admitted? = kind == "queue" and Map.has_key?(next.running, issue.id) and not Map.has_key?(state_acc.running, issue.id)
+          {:cont, {next, if(admitted?, do: allowance - 1, else: allowance)}}
       end
     end)
+    |> elem(0)
   end
+
+  @doc """
+  Dispatch order: the furthest stage first (its distance from the queue in the
+  flow), then Linear priority, then age. Takes `{issue, {stage_kind, rank}}`.
+  """
+  @type staged_issue :: {term(), {String.t() | nil, non_neg_integer()}}
+
+  @spec order_for_dispatch([staged_issue()]) :: [staged_issue()]
+  def order_for_dispatch(staged) when is_list(staged) do
+    Enum.sort_by(staged, fn
+      {%Issue{} = issue, {_kind, rank}} ->
+        {-rank, priority_rank(issue.priority), issue_created_at_sort_key(issue), issue.identifier || issue.id || ""}
+
+      {_issue, {_kind, rank}} ->
+        {-rank, priority_rank(nil), issue_created_at_sort_key(nil), ""}
+    end)
+  end
+
+  @doc """
+  How many issues may leave a queue stage now: the slot limit less the issues
+  already in agent stages, never below zero.
+  """
+  @spec queue_allowance([staged_issue()], non_neg_integer()) :: non_neg_integer()
+  def queue_allowance(staged, limit) when is_list(staged) and is_integer(limit) do
+    max(limit - Enum.count(staged, fn {_issue, {kind, _rank}} -> kind == "agent" end), 0)
+  end
+
+  defp dispatch_stage(%Issue{} = issue) do
+    case IssueStage.stage_definition(issue) do
+      %{"id" => id, "kind" => kind} -> {kind, Map.get(Definition.stage_depths(IssueStage.definition(issue)), id, 0)}
+      _ -> {nil, 0}
+    end
+  end
+
+  defp dispatch_stage(_issue), do: {nil, 0}
 
   defp maybe_dispatch_issue(state, issue, active_states, terminal_states) do
     if should_dispatch_issue?(issue, state, active_states, terminal_states) do

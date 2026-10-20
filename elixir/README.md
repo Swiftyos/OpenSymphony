@@ -409,6 +409,13 @@ and its `symphony/<ISSUE>` branch already exists on the remote, the new clone
 resumes that branch instead of resetting it. A workspace whose bootstrap or
 `after_create` hook fails is deleted so the next attempt starts clean.
 
+### Scheduling
+
+`agent.max_concurrent_agents` is also the limit on issues in the pipeline:
+- **Leaving the queue.** An issue leaves a queue stage (such as Todo) only while fewer issues than that are in agent stages.
+- **Freeing a slot.** Moving to done, blocked or another human stage frees a slot. An issue between runs (retrying, waiting on CI) keeps its slot, so work already started is never crowded out by new work.
+- **Order.** When issues wait for a free agent, the one furthest along the flow goes first (its distance from the queue in the flow's transitions), then Linear priority, then age.
+
 ### Docker sandbox
 
 Set `sandbox.kind: docker` to run each issue's hooks and agent process inside its
