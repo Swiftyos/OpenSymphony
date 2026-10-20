@@ -548,7 +548,11 @@ Open `http://127.0.0.1:<server.port>/`. The page is laid out in the order an ope
 
 ![Dashboard overview](../.github/media/dashboard-overview.png)
 
-- **Top bar**: the team picker, live or offline, agents in use vs capacity, next poll. Pick a
+The look follows n8n's site: dotted paper, soft grey cards, mono uppercase labels, dot-matrix
+headline numbers, black pills for what is selected and pink for the action to take.
+
+- **Top bar**: links to the factory, sessions, spend, and **Traces & metrics** pages, the team
+  picker, live or offline, agents in use vs capacity, next poll. Pick a
   team to narrow the whole page (numbers, flow, needs-you, sessions, spend) to that team's work
   and its projects; **All teams** shows everything you can see. The choice is remembered per
   browser and is in the URL (`/?team=PAY`).
@@ -563,6 +567,15 @@ Open `http://127.0.0.1:<server.port>/`. The page is laid out in the order an ope
   runtime, latest update, and tokens.
 - **Spend**: cost or tokens grouped by project, team (the Linear key, for example `PAY`), or
   task, split by harness. Hover a bar for input and output tokens, or switch to the table view.
+
+### Traces and metrics
+
+`/insights` reads the factory's own telemetry back (needs the `observability` section; see
+"Telemetry metrics and traces in the dashboard"): tokens, cost, turns, tool calls and API
+latency for the last hour, day or week, charts of tokens, cost and tool calls by harness, the
+issues and tools that used the most, and for a picked issue its metrics by model, its recent
+traces, and a waterfall of the trace you open. Issues you can't see are left out. The chat's
+≋ button opens the issue here.
 
 ### Transcripts and messaging an agent
 

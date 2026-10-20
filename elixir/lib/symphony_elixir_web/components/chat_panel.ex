@@ -194,20 +194,22 @@ defmodule SymphonyElixirWeb.ChatPanel do
   @spec view_entry(map()) :: map()
   def view_entry(%{kind: kind} = entry) do
     base = %{id: entry[:id], at: entry[:at], text: entry[:text] || entry[:body] || ""}
-
-    case kind do
-      "user" -> Map.merge(base, %{type: :user, author: entry[:author], status: entry[:status], delivery: entry[:delivery]})
-      "agent" -> Map.put(base, :type, :agent)
-      "thinking" -> Map.put(base, :type, :thinking)
-      "symphony" -> Map.put(base, :type, :note)
-      "turn" -> Map.merge(base, %{type: :note, text: entry[:title] || base.text})
-      "error" -> Map.put(base, :type, :error)
-      "command" -> command(base, entry)
-      "edit" -> edit(base, entry)
-      "tool" -> if is_binary(entry[:tool]), do: tool(base, entry), else: legacy_tool(base, entry)
-      _ -> Map.merge(base, %{type: :tool, title: entry[:title] || kind})
-    end
+    shape(kind, base, entry)
   end
+
+  @plain %{"agent" => :agent, "thinking" => :thinking, "symphony" => :note, "error" => :error}
+
+  defp shape(kind, base, _entry) when is_map_key(@plain, kind), do: Map.put(base, :type, @plain[kind])
+
+  defp shape("user", base, entry),
+    do: Map.merge(base, %{type: :user, author: entry[:author], status: entry[:status], delivery: entry[:delivery]})
+
+  defp shape("turn", base, entry), do: Map.merge(base, %{type: :note, text: entry[:title] || base.text})
+  defp shape("command", base, entry), do: command(base, entry)
+  defp shape("edit", base, entry), do: edit(base, entry)
+  defp shape("tool", base, %{tool: tool} = entry) when is_binary(tool), do: tool(base, entry)
+  defp shape("tool", base, entry), do: legacy_tool(base, entry)
+  defp shape(kind, base, entry), do: Map.merge(base, %{type: :tool, title: entry[:title] || kind})
 
   defp tool(base, entry) do
     Map.merge(base, %{type: :tool, title: entry[:title] || entry[:tool], text: entry[:body] || "", failed: entry[:status] == "failed"})
@@ -215,16 +217,23 @@ defmodule SymphonyElixirWeb.ChatPanel do
 
   defp command(base, entry) do
     exit_code = entry[:exit_code]
-    meta = [exit_code && exit_code != 0 && "exit #{exit_code}", duration(entry[:duration_ms])] |> Enum.filter(& &1) |> Enum.join(" · ")
+    failed_exit? = is_integer(exit_code) and exit_code != 0
 
     Map.merge(base, %{
       type: :command,
       command: entry[:command] || entry[:title] || first_line(base.text),
       output: entry[:output] || entry[:body] || "",
-      failed: (is_integer(exit_code) and exit_code != 0) or entry[:status] in ["failed", "declined"],
+      failed: failed_exit? or entry[:status] in ["failed", "declined"],
       running: entry[:status] == "running",
-      meta: if(meta == "", do: nil, else: meta)
+      meta: command_meta(if(failed_exit?, do: exit_code), entry[:duration_ms])
     })
+  end
+
+  defp command_meta(exit_code, duration_ms) do
+    case Enum.filter([exit_code && "exit #{exit_code}", duration(duration_ms)], & &1) do
+      [] -> nil
+      parts -> Enum.join(parts, " · ")
+    end
   end
 
   defp edit(base, entry) do
@@ -240,7 +249,9 @@ defmodule SymphonyElixirWeb.ChatPanel do
             deletions: file[:deletions] || file["deletions"],
             diff: file[:diff] || file["diff"]
           }
-        path when is_binary(path) -> %{path: path}
+
+        path when is_binary(path) ->
+          %{path: path}
       end)
 
     Map.merge(base, %{type: :edit, files: if(files == [], do: [%{path: entry[:title] || "a file"}], else: files)})

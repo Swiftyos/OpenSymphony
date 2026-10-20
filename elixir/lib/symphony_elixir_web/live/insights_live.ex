@@ -26,9 +26,8 @@ defmodule SymphonyElixirWeb.InsightsLive do
 
     {:ok,
      socket
-     |> assign(instance_name: Config.instance_name(), range: "day", issue: nil, trace_id: nil, trace: nil)
-     |> assign(ranges: @ranges)
-     |> load()}
+     |> assign(instance_name: Config.instance_name(), range: "day", issue: nil, trace_id: nil)
+     |> assign(ranges: @ranges)}
   end
 
   @impl true
@@ -82,6 +81,9 @@ defmodule SymphonyElixirWeb.InsightsLive do
         </header>
 
         <p :if={@overview_error} class="insights-notice">{@overview_error}</p>
+        <p :if={@loading and is_nil(@overview) and is_nil(@overview_error)} class="insights-notice">
+          Reading ClickHouse and Langfuse…
+        </p>
 
         <div :if={@overview} class="fx-stats kpi-row">
           <.kpi label="Tokens" value={compact(get_in(@overview, [:totals, :tokens]))} detail={tokens_detail(@overview.totals)} />
@@ -160,7 +162,7 @@ defmodule SymphonyElixirWeb.InsightsLive do
                     phx-value-id={trace.id}
                   >
                     <span class="trace-name">{trace[:name] || trace.id}</span>
-                    <span class="trace-meta">{trace[:span_count] && "#{trace.span_count} spans"}</span>
+                    <span class="trace-meta">{trace[:span_count] && "#{compact(trace.span_count)} spans"}</span>
                     <span class="trace-meta">{ms(trace[:duration_ms])} · {when_label(trace[:started_at])}</span>
                   </button>
                 </li>
@@ -211,48 +213,55 @@ defmodule SymphonyElixirWeb.InsightsLive do
 
   # ------------------------------------------------------------------ data
 
+  # Reads run in a task (a cold read takes a few seconds); the page shows what
+  # it last had until the new data arrives.
   defp load(socket) do
-    %{range: range, issue: issue, trace_id: trace_id} = socket.assigns
+    %{range: range, issue: issue, trace_id: trace_id, current_user: user} = socket.assigns
     range_atom = String.to_existing_atom(range)
 
-    {overview, overview_error} = result(Observability.factory_overview(range_atom))
+    socket
+    |> assign_new(:overview, fn -> nil end)
+    |> assign_new(:overview_error, fn -> nil end)
+    |> assign_new(:issue_metrics, fn -> nil end)
+    |> assign_new(:issue_error, fn -> nil end)
+    |> assign_new(:traces, fn -> [] end)
+    |> assign_new(:trace, fn -> nil end)
+    |> assign_new(:sources, fn -> %{clickhouse: %{state: :loading}, langfuse: %{state: :loading}} end)
+    |> assign(:loading, true)
+    |> start_async(:load, fn -> fetch(range_atom, issue, trace_id, user) end)
+  end
+
+  @impl true
+  def handle_async(:load, {:ok, data}, socket), do: {:noreply, socket |> assign(data) |> assign(:loading, false)}
+
+  def handle_async(:load, {:exit, reason}, socket) do
+    {:noreply, assign(socket, loading: false, overview_error: "Couldn't read telemetry: #{inspect(reason)}")}
+  end
+
+  defp fetch(range, issue, trace_id, user) do
+    {overview, overview_error} = result(Observability.factory_overview(range))
 
     {issue_metrics, issue_error, traces} =
       if issue do
-        {metrics, error} = result(Observability.issue_metrics(issue, range_atom))
-
-        traces =
-          case Observability.issue_traces(issue, 20),
-            do: (
-              {:ok, list} -> list
-              _ -> []
-            )
-
-        {metrics, error, traces}
+        {metrics, error} = result(Observability.issue_metrics(issue, range))
+        {metrics, error, ok_or(Observability.issue_traces(issue, 20), [])}
       else
         {nil, nil, []}
       end
 
-    trace =
-      if trace_id,
-        do:
-          case(Observability.trace(trace_id),
-            do: (
-              {:ok, t} -> t
-              _ -> nil
-            )
-          )
-
-    assign(socket,
-      overview: overview && Map.update(overview, :top_issues, [], &visible_rows(&1, socket.assigns.current_user)),
+    %{
+      overview: overview && Map.update(overview, :top_issues, [], &visible_rows(&1, user)),
       overview_error: overview_error,
       issue_metrics: issue_metrics,
       issue_error: issue_error,
       traces: traces,
-      trace: trace,
+      trace: trace_id && ok_or(Observability.trace(trace_id), nil),
       sources: Observability.status()
-    )
+    }
   end
+
+  defp ok_or({:ok, value}, _default), do: value
+  defp ok_or(_result, default), do: default
 
   defp result({:ok, data}), do: {data, nil}
   defp result({:error, :not_configured}), do: {nil, "Traces and metrics aren't set up: add an `observability` section to Symphony's config."}
@@ -269,6 +278,7 @@ defmodule SymphonyElixirWeb.InsightsLive do
   defp issue_rows(overview, range) do
     overview
     |> Map.get(:top_issues, [])
+    |> Enum.sort_by(&(-(&1[:tokens] || 0)))
     |> Enum.map(&%{label: &1.identifier, detail: &1[:title], value: &1[:tokens] || 0, href: "/insights?range=#{range}&issue=#{&1.identifier}"})
   end
 
@@ -289,7 +299,9 @@ defmodule SymphonyElixirWeb.InsightsLive do
   # ------------------------------------------------------------------ labels
 
   defp tokens_detail(totals) when is_map(totals) do
-    "in #{compact(totals[:input_tokens])} · out #{compact(totals[:output_tokens])}"
+    cached = (totals[:cache_read_tokens] || 0) + (totals[:cache_creation_tokens] || 0)
+    cache = if cached > 0, do: " · cached #{compact(cached)}", else: ""
+    "in #{compact(totals[:input_tokens])}#{cache} · out #{compact(totals[:output_tokens])}"
   end
 
   defp tokens_detail(_totals), do: nil
@@ -306,11 +318,12 @@ defmodule SymphonyElixirWeb.InsightsLive do
   defp harness_label(name), do: name
 
   defp source_class(%{state: :ok}), do: nil
-  defp source_class(%{state: :not_configured}), do: "is-off"
+  defp source_class(%{state: state}) when state in [:not_configured, :loading], do: "is-off"
   defp source_class(_status), do: "is-down"
 
   defp source_title(%{state: :ok}), do: "Connected"
   defp source_title(%{state: :not_configured}), do: "Not configured"
+  defp source_title(%{state: :loading}), do: "Checking…"
   defp source_title(%{error: error}), do: "Unreachable: #{inspect(error)}"
   defp source_title(_status), do: "Unknown"
 

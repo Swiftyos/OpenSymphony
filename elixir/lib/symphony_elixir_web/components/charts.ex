@@ -30,14 +30,8 @@ defmodule SymphonyElixirWeb.Charts do
       points
       |> Enum.with_index()
       |> Enum.map(fn {point, i} ->
-        {segments, _} =
-          Enum.map_reduce(series, 0.0, fn name, base ->
-            value = Map.get(point.values, name, 0) || 0
-            h = if max > 0, do: value / max * (height - 18), else: 0
-            {%{name: name, y: height - base - h, h: h, value: value}, base + h}
-          end)
-
-        %{x: i * slot + (slot - bar) / 2, w: bar, segments: Enum.filter(segments, &(&1.h > 0)), label: point_label(point), total: total(point)}
+        segments = segments(point, series, max, height)
+        %{x: i * slot + (slot - bar) / 2, w: bar, segments: segments, label: point_label(point), total: total(point)}
       end)
 
     assigns = assign(assigns, bars: bars, series: series, max: max, width: width, fmt: fmt, first: List.first(points), last: List.last(points))
@@ -124,6 +118,18 @@ defmodule SymphonyElixirWeb.Charts do
     """
   end
 
+  # One bar's stacked pieces, bottom up, in series order; empty ones dropped.
+  defp segments(point, series, max, height) do
+    series
+    |> Enum.map_reduce(0.0, fn name, base ->
+      value = Map.get(point.values, name, 0) || 0
+      h = if max > 0, do: value / max * (height - 18), else: 0
+      {%{name: name, y: height - base - h, h: h, value: value}, base + h}
+    end)
+    |> elem(0)
+    |> Enum.filter(&(&1.h > 0))
+  end
+
   # Parents before children, children by start time; orphans at the top level.
   defp tree_order(spans) do
     ids = MapSet.new(spans, & &1.id)
@@ -164,7 +170,6 @@ defmodule SymphonyElixirWeb.Charts do
   def ms(n), do: "#{round(n)}ms"
 
   defp trim(f) when is_float(f), do: f |> Float.round(1) |> then(&if(&1 == trunc(&1), do: trunc(&1), else: &1)) |> to_string()
-  defp trim(n), do: to_string(n)
 
   defp pct(_value, max) when max in [0, 0.0], do: 0
   defp pct(value, max), do: Float.round((value || 0) / max * 100, 2)
