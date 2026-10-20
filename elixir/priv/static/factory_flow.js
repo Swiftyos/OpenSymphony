@@ -769,6 +769,7 @@
 
     var config = [];
     if (stage.paused) config.push("paused");
+    if (stage.approval) config.push("✋ approval");
     if (stage.harness) config.push(HARNESS_LABELS[stage.harness] || stage.harness);
     if (stage.effort) config.push(stage.effort);
     if (stage.max_agents) config.push("≤" + stage.max_agents);
@@ -948,6 +949,7 @@
       effort: null,
       max_agents: null,
       paused: false,
+      approval: false,
       position: { x: snap(maxX + 200), y: snap(minY) },
       _new: true
     });
@@ -1089,10 +1091,18 @@
     );
     drawer.appendChild(listHead);
 
-    // Moves come from the team's flow: every human-moved connection out of here.
-    var moves = this.definition().transitions.filter(function (t) {
-      return t.from === stage.id && t.by === "human";
+    // Moves come from the flow: every human-moved connection out of here, and
+    // for an issue waiting for approval, every connection (the person approves
+    // the agent's move).
+    var out = this.definition().transitions.filter(function (t) {
+      return t.from === stage.id;
     });
+    var humanMoves = out.filter(function (t) {
+      return t.by === "human";
+    });
+    var movesFor = function (issue) {
+      return issue.awaiting ? out : humanMoves;
+    };
     var movable = this.data.movable_teams;
     var movableProjects = this.data.movable_projects || [];
     // Project flows hold issues from several teams: moving needs the issue's
@@ -1116,9 +1126,11 @@
       line.appendChild(idEl);
       if (issue.backend) line.appendChild(el("span", "fx-dot h-" + issue.backend));
       line.appendChild(el("span", "fx-issue-title", issue.title || ""));
+      if (issue.awaiting) line.appendChild(el("span", "fx-awaiting", "✋ approve"));
       line.appendChild(el("span", "fx-issue-age", since(issue.since_ms)));
       row.appendChild(line);
 
+      var moves = movesFor(issue);
       if (moves.length && issue.id && canMove(issue)) {
         var actions = el("div", "fx-issue-actions");
         if (self.pending[issue.issue]) {
@@ -1252,6 +1264,29 @@
     def.appendChild(box);
     def.appendChild(document.createTextNode(" Default stage for issues in this state with no stage label"));
     form.appendChild(def);
+
+    if (DISPATCHABLE[stage.kind]) {
+      var gate = el("label", "fx-check");
+      var gateBox = el("input");
+      gateBox.type = "checkbox";
+      gateBox.checked = !!stage.approval;
+      gateBox.addEventListener("change", function () {
+        stage.approval = gateBox.checked;
+        rerender();
+      });
+      gate.appendChild(gateBox);
+      gate.appendChild(document.createTextNode(" ✋ A person approves before the issue moves on"));
+      form.appendChild(gate);
+      form.appendChild(
+        el(
+          "p",
+          "fx-field-hint",
+          "The agent posts its work on the Linear ticket, recommends a move and adds the `" +
+            (this.data.approval_label || "needs-approval") +
+            "` label. The issue waits in Needs you until someone approves a move."
+        )
+      );
+    }
 
     var instructions = el("textarea", "fx-textarea");
     instructions.rows = 6;

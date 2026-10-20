@@ -24,6 +24,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
       socket
       |> assign(:instance_name, SymphonyElixir.Config.instance_name())
       |> assign(:team_filter, nil)
+      |> assign(:approval_error, nil)
       |> assign_payload()
       |> assign(:now, DateTime.utc_now())
 
@@ -75,22 +76,21 @@ defmodule SymphonyElixirWeb.DashboardLive do
   # move must be a connection in that team's flow.
   def handle_event("factory_move", %{"id" => id, "to" => to}, socket) when is_binary(id) and is_binary(to) do
     reply =
-      with :ok <- authorize(socket, fn _user -> true end, :signed_out),
-           {:ok, %Issue{} = issue} <- fetch_movable_issue(id),
-           :ok <- authorize(socket, &Auth.can_move_issue?(&1, issue.identifier, issue.project_slug), :not_team_member),
-           {:ok, target} <- allowed_move(socket, issue, to),
-           :ok <- Tracker.set_stage(issue.id, target["linear_state"], target["label"]) do
-        record_move(issue.id, socket.assigns.current_user, target)
-        UsageLedger.observe_issue(%{issue | state: target["linear_state"], labels: replace_stage_label(issue.labels, target["label"])})
-
-        Orchestrator.request_refresh()
-        ObservabilityPubSub.broadcast_update()
-        %{ok: true}
-      else
+      case move_issue(socket, id, to) do
+        :ok -> %{ok: true}
         {:error, reason} -> %{ok: false, error: describe_error(reason)}
       end
 
     {:reply, reply, socket}
+  end
+
+  # Approving a held issue from Needs you: makes the chosen move, which also
+  # removes the approval label.
+  def handle_event("approve_move", %{"id" => id, "to" => to}, socket) when is_binary(id) and is_binary(to) do
+    case move_issue(socket, id, to) do
+      :ok -> {:noreply, assign(socket, :approval_error, nil)}
+      {:error, reason} -> {:noreply, assign(socket, :approval_error, describe_error(reason))}
+    end
   end
 
   def handle_event("factory_save", %{"team" => team, "version" => version, "definition" => definition}, socket)
@@ -225,8 +225,26 @@ defmodule SymphonyElixirWeb.DashboardLive do
     |> Enum.uniq_by(&String.downcase/1)
   end
 
-  # Members make the person-moved connections of their team's flow; admins can
-  # make any connection the flow defines.
+  defp move_issue(socket, id, to) do
+    with :ok <- authorize(socket, fn _user -> true end, :signed_out),
+         {:ok, %Issue{} = issue} <- fetch_movable_issue(id),
+         :ok <- authorize(socket, &Auth.can_move_issue?(&1, issue.identifier, issue.project_slug), :not_team_member),
+         {:ok, target} <- allowed_move(socket, issue, to),
+         approval = IssueStage.approval_label(),
+         :ok <- Tracker.set_stage(issue.id, target["linear_state"], target["label"], drop_labels: [approval]) do
+      record_move(issue.id, socket.assigns.current_user, target)
+      labels = issue.labels |> replace_stage_label(target["label"]) |> Enum.reject(&(String.downcase(&1) == approval))
+      UsageLedger.observe_issue(%{issue | state: target["linear_state"], labels: labels})
+
+      Orchestrator.request_refresh()
+      ObservabilityPubSub.broadcast_update()
+      :ok
+    end
+  end
+
+  # Members make the person-moved connections of their flow, and any connection
+  # out of a stage whose issue is waiting for their approval; admins can make
+  # any connection the flow defines.
   defp allowed_move(socket, issue, to) do
     definition = IssueStage.definition(issue)
     from = IssueStage.stage(issue)
@@ -234,7 +252,10 @@ defmodule SymphonyElixirWeb.DashboardLive do
     with %{} = target <- Definition.stage(definition, to) || {:error, :unknown_target},
          %{} = transition <- Enum.find(definition["transitions"], &(&1["from"] == from and &1["to"] == to)) || {:error, :not_a_move} do
       {:ok, user} = UserAuth.refresh_user(socket)
-      if transition["by"] == "human" or Auth.can_control?(user), do: {:ok, target}, else: {:error, :agent_move}
+
+      if transition["by"] == "human" or IssueStage.awaiting_approval?(issue) or Auth.can_control?(user),
+        do: {:ok, target},
+        else: {:error, :agent_move}
     end
   end
 
@@ -440,9 +461,40 @@ defmodule SymphonyElixirWeb.DashboardLive do
                 </div>
               </div>
 
+              <p :if={@approval_error} class="attention-more" role="alert"><%= @approval_error %></p>
+
               <%= if attention_count(@payload, @current_user) == 0 do %>
                 <p class="all-clear">All clear. Nothing is waiting on a human.</p>
               <% else %>
+                <div :if={approvals(@payload, @now) != []} class="attention-group">
+                  <h3 class="attention-title">
+                    <span class="attention-icon attention-icon-review" aria-hidden="true">✋</span>
+                    Waiting for your approval
+                    <span class="attention-count numeric"><%= length(approvals(@payload, @now)) %></span>
+                  </h3>
+                  <div :for={item <- approvals(@payload, @now)} class="attention-item approval-item">
+                    <a :if={item.href} class="attention-id" href={item.href} target="_blank" rel="noopener"><%= item.id %></a>
+                    <span :if={!item.href} class="attention-id"><%= item.id %></span>
+                    <span class="attention-text" title={item.text}><%= item.stage %> · <%= item.text %></span>
+                    <span class="attention-age numeric"><%= item.age %></span>
+                    <div class="approval-actions">
+                      <a :if={item.href} class="fx-link-btn" href={item.href} target="_blank" rel="noopener">Read the ticket ↗</a>
+                      <button
+                        :for={move <- item.moves}
+                        :if={Auth.can_move_issue?(@current_user, item.id, item.project)}
+                        type="button"
+                        class="fx-action"
+                        phx-click="approve_move"
+                        phx-value-id={item.issue_id}
+                        phx-value-to={move.id}
+                        title={move.criteria}
+                      >
+                        → <%= move.name %>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
                 <div :for={group <- attention_groups(@payload, @now)} class="attention-group">
                   <h3 class="attention-title">
                     <span class={"attention-icon attention-icon-#{group.tone}"} aria-hidden="true"><%= group.icon %></span>
@@ -679,7 +731,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp attention_count(payload, user) do
     payload
     |> attention_groups(DateTime.utc_now())
-    |> Enum.reduce(length(pending_accounts(user)), &(length(&1.items) + &2))
+    |> Enum.reduce(length(pending_accounts(user)) + length(approvals(payload, DateTime.utc_now())), &(length(&1.items) + &2))
   end
 
   defp pending_accounts(user) do
@@ -698,6 +750,41 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   defp issues_in_kind(_payload, _kind), do: []
+
+  # Issues an agent finished in a stage that needs approval, with the moves a
+  # person can approve (every connection out of that stage).
+  defp approvals(%{factory: %{definitions: definitions, flows: flows}}, now) do
+    definitions
+    |> Enum.flat_map(fn {scope, definition} ->
+      Enum.flat_map(definition["stages"], fn stage ->
+        (get_in(flows, [scope, :nodes, stage["id"], :issues]) || [])
+        |> Enum.filter(& &1[:awaiting])
+        |> Enum.map(&approval_item(&1, stage, definition, now))
+      end)
+    end)
+    |> Enum.uniq_by(& &1.id)
+    |> Enum.sort_by(& &1.since_ms)
+  end
+
+  defp approvals(_payload, _now), do: []
+
+  defp approval_item(issue, stage, definition, now) do
+    moves =
+      for t <- Definition.transitions_from(definition, stage["id"]), target = Definition.stage(definition, t["to"]) do
+        %{id: target["id"], name: target["name"], criteria: t["criteria"]}
+      end
+
+    issue
+    |> flow_item(now)
+    |> Map.merge(%{
+      issue_id: issue[:id],
+      project: issue[:project],
+      stage: stage["name"],
+      since_ms: issue.since_ms,
+      href: safe_url(issue[:url]),
+      moves: moves
+    })
+  end
 
   defp flow_item(issue, now) do
     %{

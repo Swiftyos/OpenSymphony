@@ -1,8 +1,12 @@
 defmodule SymphonyElixir.Factory.StagePrompt do
   @moduledoc """
   Renders the "your current stage" part of an agent's prompt from the issue's
-  team factory: the stage's instructions and every move allowed from it, with
-  the exact Linear state and stage label to apply for each.
+  flow: the stage's instructions, how stages hand work to each other, and every
+  move allowed from it, with the exact Linear state and stage label for each.
+
+  Stages hand off through two channels: the Linear issue (each stage reads the
+  earlier stages' comments and posts its own, headed with its name) and the
+  issue's git branch (`symphony/<ID>`), which carries the code.
   """
 
   alias SymphonyElixir.Factory.Definition
@@ -45,15 +49,45 @@ defmodule SymphonyElixir.Factory.StagePrompt do
       blank_or(stage["instructions"], "Follow the workflow for this stage."),
       "",
       skill_section(stage),
+      handoff_section(issue, stage),
       "### Allowed moves from here",
       "",
       moves(definition, stage, prefix),
       "",
-      "Move the issue by setting its Linear state and `#{prefix}/*` stage label exactly as listed. " <>
-        "Only make moves marked for agents; moves marked for humans are theirs to make. " <>
-        "If none of these fit, record why in the workpad and stop."
+      move_rule(stage, prefix)
     ]
     |> Enum.join("\n")
+  end
+
+  defp handoff_section(issue, stage) do
+    branch = "symphony/#{issue.identifier}"
+
+    """
+    ### Hand-off between stages
+
+    - **Read first.** Earlier stages post their output as comments on this Linear issue, each headed
+      `## <stage name>` (the newest one wins when a stage ran more than once). Read them all before you
+      start, and build on them instead of redoing their work.
+    - **Code travels on the branch `#{branch}`.** If it exists on `origin`, check it out and start from it.
+      Commit and push your changes to it before you move the issue.
+    - **Post your output.** When your work is done, add one new comment headed `## #{stage["name"]}`: what
+      you did, what you found or decided, and what the next stage needs (file paths, commands, results,
+      open questions). The next stage reads only the issue and the branch, so put everything it needs there.
+    """
+  end
+
+  defp move_rule(%{"approval" => true}, _prefix) do
+    label = IssueStage.approval_label()
+
+    "**This stage needs a person's approval before the issue moves on.** When your work is done, don't " <>
+      "change the state or stage label. End your stage comment with `Recommended move: <stage name>` and why, " <>
+      "add the `#{label}` label to the issue, and stop. A person reviews the issue and makes the move."
+  end
+
+  defp move_rule(_stage, prefix) do
+    "Move the issue by setting its Linear state and `#{prefix}/*` stage label exactly as listed. " <>
+      "Only make moves marked for agents; moves marked for humans are theirs to make. " <>
+      "If none of these fit, record why in the workpad and stop."
   end
 
   defp moves(definition, stage, prefix) do

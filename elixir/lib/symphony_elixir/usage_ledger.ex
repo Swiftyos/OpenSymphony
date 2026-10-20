@@ -69,19 +69,26 @@ defmodule SymphonyElixir.UsageLedger do
          node when is_binary(node) <- factory_node(issue) do
       now = System.system_time(:millisecond)
 
+      meta = issue_meta(issue)
+
       case :ets.lookup(@issues_table, identifier) do
-        [{^identifier, ^node, _since, _meta}] ->
+        [{^identifier, ^node, _since, ^meta}] ->
           :ok
+
+        # Same stage, but its title or approval flag changed.
+        [{^identifier, ^node, since, _meta}] ->
+          :ets.insert(@issues_table, {identifier, node, since, meta})
+          mark_dirty()
 
         [{^identifier, previous, _since, _meta}] ->
           # Counted per team and project: their flows can share stage ids.
           key = {team_key(identifier), issue.project_slug, previous, node}
           :ets.update_counter(@edges_table, key, {2, 1}, {key, 0})
-          :ets.insert(@issues_table, {identifier, node, now, issue_meta(issue)})
+          :ets.insert(@issues_table, {identifier, node, now, meta})
           mark_dirty()
 
         [] ->
-          :ets.insert(@issues_table, {identifier, node, now, issue_meta(issue)})
+          :ets.insert(@issues_table, {identifier, node, now, meta})
           mark_dirty()
       end
     end
@@ -278,7 +285,15 @@ defmodule SymphonyElixir.UsageLedger do
     do: :ets.insert(@edges_table, {{row["team"], row["project"], from, to}, count})
 
   defp load_flow_issue(row) do
-    meta = %{id: row["id"], title: row["title"], project: row["project"], team: row["team"], url: row["url"]}
+    meta = %{
+      id: row["id"],
+      title: row["title"],
+      project: row["project"],
+      team: row["team"],
+      url: row["url"],
+      awaiting_approval: row["awaiting_approval"] == true
+    }
+
     :ets.insert(@issues_table, {row["issue"], row["node"], row["since_ms"], meta})
   end
 
@@ -306,7 +321,8 @@ defmodule SymphonyElixir.UsageLedger do
       title: meta[:title],
       project: meta[:project],
       team: meta[:team],
-      url: meta[:url]
+      url: meta[:url],
+      awaiting_approval: meta[:awaiting_approval] == true
     }
   end
 
@@ -324,7 +340,14 @@ defmodule SymphonyElixir.UsageLedger do
   end
 
   defp issue_meta(%Issue{} = issue) do
-    %{id: issue.id, title: issue.title, project: issue.project_slug, team: team_key(issue.identifier), url: issue.url}
+    %{
+      id: issue.id,
+      title: issue.title,
+      project: issue.project_slug,
+      team: team_key(issue.identifier),
+      url: issue.url,
+      awaiting_approval: IssueStage.awaiting_approval?(issue)
+    }
   end
 
   defp team_key(identifier) when is_binary(identifier) do

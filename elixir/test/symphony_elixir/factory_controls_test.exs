@@ -158,6 +158,11 @@ defmodule SymphonyElixir.FactoryControlsTest do
 
     assert :ok = Memory.set_stage("id-MT-9", "In Progress", "merge")
     assert [%Issue{state: "In Progress", labels: ["claude", "factory/merge"]}] = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue("MT-9", "In Progress", ["factory/merge", "Needs-Approval"])])
+    assert :ok = Memory.set_stage("id-MT-9", "Done", nil, drop_labels: ["needs-approval"])
+    assert [%Issue{state: "Done", labels: []}] = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    assert :ok = SymphonyElixir.Tracker.set_stage("id-MT-9", "In Progress", "merge")
   end
 
   test "linear set_stage keeps other labels and picks the team's stage label" do

@@ -110,7 +110,7 @@ defmodule SymphonyElixir.IssueStage do
       |> Issue.label_names()
       |> Enum.any?(fn label -> is_binary(label) and normalize(label) in Enum.map(paused_stages(settings), &(label_prefix(settings) <> "/" <> &1)) end)
 
-    not opted_in?(issue, settings) or
+    not opted_in?(issue, settings) or awaiting_approval?(issue, settings) or
       case stage_definition(issue, settings) do
         %{"id" => id, "kind" => kind} -> paused_label? or kind not in @dispatchable_kinds or id in paused_stages(settings)
         nil -> paused_label?
@@ -118,6 +118,27 @@ defmodule SymphonyElixir.IssueStage do
   end
 
   def paused?(_issue, _settings), do: false
+
+  @doc """
+  True while the issue carries `tracker.approval_label`: an agent finished a
+  stage that needs a person to approve the next move. The issue is held until a
+  person makes the move (which removes the label).
+  """
+  @spec awaiting_approval?(Issue.t(), Schema.t() | nil) :: boolean()
+  def awaiting_approval?(issue, settings \\ nil)
+
+  def awaiting_approval?(%Issue{} = issue, settings) do
+    label = approval_label(settings)
+    issue |> Issue.label_names() |> Enum.any?(&(is_binary(&1) and normalize(&1) == label))
+  end
+
+  def awaiting_approval?(_issue, _settings), do: false
+
+  @spec approval_label(Schema.t() | nil) :: String.t()
+  def approval_label(settings \\ nil) do
+    settings = settings || Config.settings!()
+    normalize(settings.tracker.approval_label || "needs-approval")
+  end
 
   @doc """
   True unless `tracker.require_label` is set and the issue doesn't carry it

@@ -41,8 +41,15 @@ defmodule SymphonyElixir.FactoryEditorTest do
       {:ok,
        for id <- ids, String.starts_with?(id, "id-") do
          identifier = String.replace_prefix(id, "id-", "")
-         labels = if identifier == "PAY-2", do: ["factory/merge"], else: []
-         state = if identifier == "PAY-2", do: "In Progress", else: "In Review"
+
+         labels =
+           case identifier do
+             "PAY-2" -> ["factory/merge"]
+             "PAY-3" -> ["factory/merge", "needs-approval"]
+             _ -> []
+           end
+
+         state = if identifier in ["PAY-2", "PAY-3"], do: "In Progress", else: "In Review"
 
          %SymphonyElixir.Linear.Issue{
            id: id,
@@ -76,7 +83,10 @@ defmodule SymphonyElixir.FactoryEditorTest do
 
     defp stage_lookup do
       %{
-        "issue" => %{"team" => %{"id" => "t-PAY", "states" => %{"nodes" => [%{"id" => "s"}]}}, "labels" => %{"nodes" => []}},
+        "issue" => %{
+          "team" => %{"id" => "t-PAY", "states" => %{"nodes" => [%{"id" => "s"}]}},
+          "labels" => %{"nodes" => [%{"id" => "keep", "name" => "bug"}, %{"id" => "appr", "name" => "Needs-Approval"}]}
+        },
         "issueLabels" => %{"nodes" => [%{"id" => "l", "team" => %{"id" => "t-PAY"}}]}
       }
     end
@@ -287,6 +297,41 @@ defmodule SymphonyElixir.FactoryEditorTest do
       assert payload.factory.flows["project:shared"].nodes["implement"].count == 2
     end
 
+    test "approval stages: the flag is kept, held issues pause, and the prompt says how to hand off" do
+      template = Definition.default_template()
+      stages = Enum.map(template["stages"], &if(&1["id"] == "implement", do: Map.put(&1, "approval", true), else: &1))
+      {:ok, saved} = Store.put("PAY", %{template | "stages" => stages}, 0, "mia")
+      assert Definition.stage(saved, "implement")["approval"] == true
+      assert Definition.stage(saved, "merge")["approval"] == false
+
+      issue = %Issue{id: "i", identifier: "PAY-7", state: "In Progress", labels: ["factory/implement"]}
+      held = %{issue | labels: ["factory/implement", "Needs-Approval"]}
+      refute IssueStage.awaiting_approval?(issue)
+      assert IssueStage.awaiting_approval?(held)
+      refute IssueStage.awaiting_approval?(nil)
+      assert IssueStage.paused?(held)
+      refute IssueStage.paused?(issue)
+
+      prompt = StagePrompt.render(issue)
+      assert prompt =~ "### Hand-off between stages"
+      assert prompt =~ "Code travels on the branch `symphony/PAY-7`"
+      assert prompt =~ "add one new comment headed `## Implement`"
+      assert prompt =~ "needs a person's approval before the issue moves on"
+      assert prompt =~ "add the `needs-approval` label"
+
+      # A normal stage still makes its own moves.
+      assert StagePrompt.render(%{issue | labels: ["factory/merge"]}) =~ "Only make moves marked for agents"
+
+      # The ledger notices the approval flag without counting a transition.
+      UsageLedger.observe_issue(issue)
+      UsageLedger.observe_issue(held)
+      assert [%{issue: "PAY-7", awaiting_approval: true}] = UsageLedger.snapshot().flow.issues
+      assert UsageLedger.snapshot().flow.edges == []
+      payload = FactoryPresenter.payload([], Config.settings!())
+      assert [%{awaiting: true}] = payload.flows["PAY"].nodes["implement"].issues
+      assert payload.approval_label == "needs-approval"
+    end
+
     test "the presenter shows the default flow when no team has work or a flow yet" do
       payload = FactoryPresenter.payload([], Config.settings!())
       assert payload.teams == [%{key: "DEFAULT", kind: "default", name: "Default flow", custom: false}]
@@ -375,6 +420,29 @@ defmodule SymphonyElixir.FactoryEditorTest do
       {:ok, admin_view, _html} = live(session_for(ada), "/")
       render_hook(admin_view, "factory_move", %{"id" => "id-PAY-2", "to" => "done"})
       assert_reply(admin_view, %{ok: true})
+    end
+
+    test "people approve a held issue's move from Needs you, which drops the approval label", %{mia: mia} do
+      template = Definition.default_template()
+      stages = Enum.map(template["stages"], &if(&1["id"] == "merge", do: Map.put(&1, "approval", true), else: &1))
+      {:ok, _} = Store.put("PAY", %{template | "stages" => stages}, 0, "mia")
+      held = %Issue{id: "id-PAY-3", identifier: "PAY-3", title: "Held", state: "In Progress", labels: ["factory/merge", "needs-approval"], url: "https://linear.app/acme/issue/PAY-3"}
+      UsageLedger.observe_issue(held)
+
+      {:ok, view, html} = live(session_for(mia), "/")
+      assert html =~ "Waiting for your approval"
+      assert html =~ "Read the ticket ↗"
+      assert html =~ ~s(href="https://linear.app/acme/issue/PAY-3")
+      assert html =~ ~s(phx-value-to="done")
+
+      # merge -> done is an agent move, but a person may approve it for a held issue.
+      view |> element(~s(button[phx-click="approve_move"][phx-value-to="done"])) |> render_click()
+      assert_receive {:graphql, query, %{labelIds: label_ids}} when is_binary(query), 1_000
+      assert "keep" in label_ids
+      refute "appr" in label_ids
+
+      render_hook(view, "approve_move", %{"id" => "not-an-issue", "to" => "done"})
+      assert render(view) =~ "That issue isn&#39;t in a project this Symphony manages."
     end
 
     test "members change their own team's stage controls", %{mia: mia} do

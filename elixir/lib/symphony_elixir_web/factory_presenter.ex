@@ -53,7 +53,8 @@ defmodule SymphonyElixirWeb.FactoryPresenter do
       definitions: definitions,
       flows: Map.merge(team_flows, project_flows),
       linear_states: linear_states(settings, definitions),
-      label_prefix: IssueStage.label_prefix(settings)
+      label_prefix: IssueStage.label_prefix(settings),
+      approval_label: IssueStage.approval_label(settings)
     }
   end
 
@@ -143,7 +144,8 @@ defmodule SymphonyElixirWeb.FactoryPresenter do
       project: issue.project,
       team: issue.team,
       since_ms: issue.since_ms,
-      backend: agent && agent.backend
+      backend: agent && agent.backend,
+      awaiting: issue[:awaiting_approval] == true
     }
   end
 

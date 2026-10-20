@@ -48,13 +48,14 @@ defmodule SymphonyElixir.Tracker.Memory do
   end
 
   @spec set_stage(String.t(), String.t(), String.t() | nil, keyword()) :: :ok | {:error, term()}
-  def set_stage(issue_id, state_name, stage, _opts \\ []) do
+  def set_stage(issue_id, state_name, stage, opts \\ []) do
     prefix = SymphonyElixir.IssueStage.label_prefix() <> "/"
+    drop = opts |> Keyword.get(:drop_labels, []) |> Enum.map(&String.downcase/1)
 
     issues =
       Enum.map(configured_issues(), fn
         %Issue{id: ^issue_id, labels: labels} = issue ->
-          labels = Enum.reject(labels || [], &String.starts_with?(String.downcase(&1), prefix))
+          labels = Enum.reject(labels || [], &(String.starts_with?(String.downcase(&1), prefix) or String.downcase(&1) in drop))
           %{issue | state: state_name, labels: if(stage, do: labels ++ [prefix <> stage], else: labels)}
 
         other ->

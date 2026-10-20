@@ -375,6 +375,7 @@ tracker:
   stage_label_prefix: factory # label group name
   paused_stages: [blocked, review] # stages that are never dispatched
   require_label: null # e.g. auto-build: only dispatch issues carrying this label
+  approval_label: needs-approval # agents add it when a stage needs a person's approval
 ```
 
 `paused_stages` matches stage ids, so if a flow has an agent-run stage called `review`, set it to
@@ -556,6 +557,28 @@ flow; **Use team flow** / **Use default flow** in the editor removes it again.
 - **Who can edit.** Team members edit their own team's flow and the flows of projects their team
   works in; people given a project edit its flow; admins edit any flow, including the
   organisation default.
+
+#### How stages hand off
+
+Each stage is a fresh agent, possibly on a different harness, so stages pass work through two
+channels that every agent is told about:
+
+- **The Linear issue.** A stage reads the comments earlier stages posted, then posts its own output
+  as one comment headed with its name (`## Research APIs`, `## Plan service`, …): what it did, what it
+  found or decided, and what the next stage needs. The ticket becomes the full record of the work.
+- **The issue's branch, `symphony/<ID>`.** Code travels here. A stage starts from the branch if it
+  exists, and commits and pushes before it moves the issue.
+
+#### Approval gates
+
+Tick **✋ A person approves before the issue moves on** on an agent stage to put a person between it
+and the next stage. When the agent is done it posts its stage comment ending with
+`Recommended move: <stage>`, adds the `needs-approval` label (`tracker.approval_label`), and stops.
+Symphony holds the issue, and **Needs you** lists it under **Waiting for your approval** with a link
+to the Linear ticket, where the stage comments show everything that happened, and a button for every
+connection out of the stage. Approving makes that move and removes the label. Team members can
+approve their team's issues (and anyone given the issue's project); the stage panel offers the same
+buttons.
 
 Agents get a **"Your current stage"** section in their prompt. It has the stage's instructions,
 the stage's skill if it has one, and each allowed move with the exact Linear state and label to

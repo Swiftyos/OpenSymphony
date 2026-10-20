@@ -128,7 +128,7 @@ defmodule SymphonyElixir.Linear.Adapter do
 
     with {:ok, response} <- client_module().graphql(@stage_lookup_query, variables, graphql_opts),
          {:ok, state_id} <- stage_state_id(response),
-         {:ok, label_ids} <- stage_label_ids(response, prefix, stage),
+         {:ok, label_ids} <- stage_label_ids(response, prefix, stage, Keyword.get(opts, :drop_labels, [])),
          {:ok, update} <-
            client_module().graphql(
              @set_stage_mutation,
@@ -151,14 +151,10 @@ defmodule SymphonyElixir.Linear.Adapter do
     end
   end
 
-  # Keep every non-stage label, drop old stage labels, add the new one.
-  defp stage_label_ids(response, prefix, stage) do
-    current = get_in(response, ["data", "issue", "labels", "nodes"]) || []
-
-    kept =
-      current
-      |> Enum.reject(&stage_label?(&1, prefix))
-      |> Enum.map(& &1["id"])
+  # Keep every non-stage label (except `drop`, e.g. the approval label), drop
+  # old stage labels, add the new one.
+  defp stage_label_ids(response, prefix, stage, drop) do
+    kept = kept_label_ids(get_in(response, ["data", "issue", "labels", "nodes"]) || [], prefix, Enum.map(drop, &String.downcase/1))
 
     case stage do
       nil ->
@@ -177,6 +173,12 @@ defmodule SymphonyElixir.Linear.Adapter do
           _ -> {:error, {:stage_label_not_found, "#{prefix}/#{stage}"}}
         end
     end
+  end
+
+  defp kept_label_ids(labels, prefix, drop) do
+    labels
+    |> Enum.reject(&(stage_label?(&1, prefix) or String.downcase(&1["name"] || "") in drop))
+    |> Enum.map(& &1["id"])
   end
 
   defp stage_label?(label, prefix) do

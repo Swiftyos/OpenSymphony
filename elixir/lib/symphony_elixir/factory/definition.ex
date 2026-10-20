@@ -156,6 +156,7 @@ defmodule SymphonyElixir.Factory.Definition do
       "effort" => nil,
       "max_agents" => nil,
       "paused" => false,
+      "approval" => false,
       "skill" => nil,
       "position" => %{"x" => x, "y" => y}
     }
@@ -178,6 +179,8 @@ defmodule SymphonyElixir.Factory.Definition do
       "effort" => blank_to_nil(Map.get(stage, "effort")),
       "max_agents" => Map.get(stage, "max_agents"),
       "paused" => Map.get(stage, "paused") == true,
+      # A person approves before an issue leaves this stage.
+      "approval" => Map.get(stage, "approval") == true,
       "position" => normalize_position(Map.get(stage, "position")),
       "skill" => normalize_skill(Map.get(stage, "skill"), stage |> Map.get("id") |> to_s() |> normalize())
     }

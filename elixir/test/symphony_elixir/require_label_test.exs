@@ -37,6 +37,13 @@ defmodule SymphonyElixir.RequireLabelTest do
     assert IssueStage.paused?(issue(["auto-build", "factory/blocked"]), settings)
   end
 
+  test "the approval label is configurable" do
+    settings = settings(%{"approval_label" => " Wait-For-Me "})
+    assert IssueStage.approval_label(settings) == "wait-for-me"
+    assert IssueStage.awaiting_approval?(issue(["wait-for-me"]), settings)
+    assert IssueStage.paused?(issue(["wait-for-me"]), settings)
+  end
+
   test "a blank require_label means no gate" do
     assert settings(%{"require_label" => "  "}).tracker.require_label == nil
   end

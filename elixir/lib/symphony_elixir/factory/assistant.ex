@@ -115,6 +115,8 @@ defmodule SymphonyElixir.Factory.Assistant do
       state and label (or both have no label in the same state). Mark at most one stage per state
       "default": true; it is used for issues in that state with no stage label.
     - The flow needs at least one queue or agent stage and at least one done stage.
+    - "approval": true on an agent stage makes a person approve before the issue leaves it (the agent
+      recommends a move and waits). Use it where the request asks for sign-off, e.g. on a plan.
     - Connections ("transitions") say who moves an issue ("agent" or "human") from one stage to another
       and when ("criteria", one sentence). Include loops back for failures and a way out of blocked stages.
 
@@ -133,7 +135,7 @@ defmodule SymphonyElixir.Factory.Assistant do
 
     Reply with ONLY one JSON object, no prose and no code fences:
     {"summary": "two sentences on the design",
-     "stages": [{"id", "name", "kind", "linear_state", "label" (or null), "default", "instructions", "skill"}],
+     "stages": [{"id", "name", "kind", "linear_state", "label" (or null), "default", "approval", "instructions", "skill"}],
      "transitions": [{"from", "to", "by", "criteria"}]}
     """
   end
@@ -179,7 +181,7 @@ defmodule SymphonyElixir.Factory.Assistant do
         carried = base_stages |> Map.get(id, %{}) |> Map.take(@runtime_fields)
 
         stage
-        |> Map.take(["id", "name", "kind", "linear_state", "label", "default", "instructions"])
+        |> Map.take(["id", "name", "kind", "linear_state", "label", "default", "approval", "instructions"])
         |> Map.merge(carried)
         |> Map.put("skill", draft_skill(stage["skill"]))
       end)

@@ -2095,6 +2095,36 @@ a.brand:hover {
   justify-self: start;
 }
 
+.fx-awaiting {
+  padding: 1px 6px;
+  border: 1px solid rgba(250, 178, 25, 0.55);
+  border-radius: 999px;
+  color: var(--warning);
+  font-size: 0.7rem;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+/* -- approvals in Needs you */
+
+.approval-item {
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.approval-actions {
+  display: flex;
+  flex-wrap: wrap;
+  grid-column: 1 / -1;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.approval-actions .fx-link-btn {
+  margin-right: auto;
+}
+
 /* -- top-bar team picker */
 
 .team-picker {

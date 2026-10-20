@@ -98,6 +98,8 @@ defmodule SymphonyElixir.Config.Schema do
       field(:paused_stages, {:array, :string}, default: ["blocked", "review"])
       # Opt-in label: when set, only issues carrying it are dispatched.
       field(:require_label, :string)
+      # Agents add this label when a stage needs a person to approve the next move.
+      field(:approval_label, :string, default: "needs-approval")
       embeds_many(:projects, TrackerProject, on_replace: :delete)
     end
 
@@ -116,13 +118,15 @@ defmodule SymphonyElixir.Config.Schema do
           :terminal_states,
           :stage_label_prefix,
           :paused_stages,
-          :require_label
+          :require_label,
+          :approval_label
         ],
         empty_values: []
       )
       |> update_change(:kind, &Schema.normalize_optional_string/1)
       |> update_change(:stage_label_prefix, &Schema.normalize_optional_string/1)
       |> update_change(:require_label, &Schema.normalize_optional_string/1)
+      |> update_change(:approval_label, &Schema.normalize_optional_string/1)
       |> validate_required([:stage_label_prefix])
       |> update_change(:project_slug, &Schema.normalize_optional_string/1)
       |> update_change(:assignee, &Schema.normalize_optional_string/1)
