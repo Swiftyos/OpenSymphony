@@ -374,7 +374,15 @@ tracker:
   active_states: [Todo, In Progress]
   stage_label_prefix: factory # label group name
   paused_stages: [blocked, review] # stages that are never dispatched
+  require_label: null # e.g. auto-build: only dispatch issues carrying this label
 ```
+
+`paused_stages` matches stage ids, so if a flow has an agent-run stage called `review`, set it to
+`[blocked]`.
+
+**Opting issues in.** With `require_label: auto-build`, moving an issue to Todo isn't enough: someone
+also has to add the `auto-build` label before an agent picks it up. Removing the label stops the agent
+working on it, like pausing its stage. Labels in a group count by their name (`ai/auto-build`).
 
 When an issue's stage changes between turns (for example `rework` -> `implement`),
 the running agent finishes its turn and Symphony re-dispatches it with a fresh

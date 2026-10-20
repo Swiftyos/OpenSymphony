@@ -10,6 +10,9 @@ tracker:
     - Todo
     - In Progress
   stage_label_prefix: factory
+  # Only dispatch issues carrying this label, so agents work only on what people
+  # opt in. Removing the label stops the agent. Leave unset to dispatch everything.
+  # require_label: auto-build
   # Stages that pause dispatch even while the issue is in an active state.
   paused_stages:
     - blocked

@@ -96,6 +96,8 @@ defmodule SymphonyElixir.Config.Schema do
       field(:terminal_states, {:array, :string}, default: ["Backlog", "Closed", "Cancelled", "Canceled", "Duplicate", "Done"])
       field(:stage_label_prefix, :string, default: "factory")
       field(:paused_stages, {:array, :string}, default: ["blocked", "review"])
+      # Opt-in label: when set, only issues carrying it are dispatched.
+      field(:require_label, :string)
       embeds_many(:projects, TrackerProject, on_replace: :delete)
     end
 
@@ -113,12 +115,14 @@ defmodule SymphonyElixir.Config.Schema do
           :active_states,
           :terminal_states,
           :stage_label_prefix,
-          :paused_stages
+          :paused_stages,
+          :require_label
         ],
         empty_values: []
       )
       |> update_change(:kind, &Schema.normalize_optional_string/1)
       |> update_change(:stage_label_prefix, &Schema.normalize_optional_string/1)
+      |> update_change(:require_label, &Schema.normalize_optional_string/1)
       |> validate_required([:stage_label_prefix])
       |> update_change(:project_slug, &Schema.normalize_optional_string/1)
       |> update_change(:assignee, &Schema.normalize_optional_string/1)

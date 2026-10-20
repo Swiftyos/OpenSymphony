@@ -826,17 +826,29 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp stage_of(%{status: :retrying}), do: "retrying"
 
   defp stage_of(entry) do
-    # The identifier carries the team, whose flow decides the stage.
-    issue = %Issue{identifier: Map.get(entry, :issue_identifier), state: Map.get(entry, :state), labels: Map.get(entry, :labels) || []}
-
-    IssueStage.stage(issue) ||
-      entry |> Map.get(:state) |> to_string() |> String.downcase() |> String.replace(" ", "-")
+    case session_stage(entry) do
+      %{"id" => id} -> id
+      nil -> entry |> Map.get(:state) |> to_string() |> String.downcase() |> String.replace(" ", "-")
+    end
   end
 
+  # The identifier carries the team and the project slug picks a project's own
+  # flow; together they decide which flow, and so which stage, the issue is in.
+  defp session_stage(entry) do
+    IssueStage.stage_definition(%Issue{
+      identifier: Map.get(entry, :issue_identifier),
+      project_slug: Map.get(entry, :project_slug),
+      state: Map.get(entry, :state),
+      labels: Map.get(entry, :labels) || []
+    })
+  end
+
+  defp stage_label(%{status: :retrying}), do: "Retrying"
+
   defp stage_label(entry) do
-    case stage_of(entry) do
-      "" -> "–"
-      stage -> stage |> String.replace("-", " ") |> String.capitalize()
+    case session_stage(entry) do
+      %{"name" => name} -> name
+      nil -> entry |> Map.get(:state) |> to_string() |> then(&if(&1 == "", do: "–", else: &1))
     end
   end
 

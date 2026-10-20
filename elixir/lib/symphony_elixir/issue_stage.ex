@@ -11,7 +11,9 @@ defmodule SymphonyElixir.IssueStage do
 
   An issue is dispatchable when its state is active and its stage kind is
   `queue` or `agent`. Stages of kind `human`, `parked`, or `done`, and labels in
-  `tracker.paused_stages`, are never dispatched.
+  `tracker.paused_stages`, are never dispatched. When `tracker.require_label` is
+  set (e.g. `auto-build`), issues without that label are never dispatched
+  either, and removing it stops a running agent.
   """
 
   alias SymphonyElixir.Config
@@ -94,7 +96,8 @@ defmodule SymphonyElixir.IssueStage do
 
   @doc """
   True when the issue's stage holds it still (human, parked, done, or a label in
-  `tracker.paused_stages`). Running agents in such a stage are stopped.
+  `tracker.paused_stages`), or it lacks `tracker.require_label`. Running agents
+  on such an issue are stopped.
   """
   @spec paused?(Issue.t(), Schema.t() | nil) :: boolean()
   def paused?(issue, settings \\ nil)
@@ -107,13 +110,33 @@ defmodule SymphonyElixir.IssueStage do
       |> Issue.label_names()
       |> Enum.any?(fn label -> is_binary(label) and normalize(label) in Enum.map(paused_stages(settings), &(label_prefix(settings) <> "/" <> &1)) end)
 
-    case stage_definition(issue, settings) do
-      %{"id" => id, "kind" => kind} -> paused_label? or kind not in @dispatchable_kinds or id in paused_stages(settings)
-      nil -> paused_label?
-    end
+    not opted_in?(issue, settings) or
+      case stage_definition(issue, settings) do
+        %{"id" => id, "kind" => kind} -> paused_label? or kind not in @dispatchable_kinds or id in paused_stages(settings)
+        nil -> paused_label?
+      end
   end
 
   def paused?(_issue, _settings), do: false
+
+  @doc """
+  True unless `tracker.require_label` is set and the issue doesn't carry it
+  (case-insensitive; a grouped label such as `ai/auto-build` counts by its name).
+  """
+  @spec opted_in?(Issue.t(), Schema.t()) :: boolean()
+  def opted_in?(%Issue{} = issue, settings) do
+    case settings.tracker.require_label do
+      nil ->
+        true
+
+      required ->
+        required = normalize(required)
+
+        issue
+        |> Issue.label_names()
+        |> Enum.any?(fn label -> is_binary(label) and (normalize(label) == required or String.ends_with?(normalize(label), "/" <> required)) end)
+    end
+  end
 
   @doc """
   True when someone paused new dispatch for this issue's stage from the
