@@ -18,7 +18,7 @@ defmodule SymphonyElixir.FactoryControls do
           effort: String.t() | nil
         }
 
-  @field_map %{"paused" => "paused", "max_agents" => "max_agents", "backend" => "harness", "effort" => "effort"}
+  @field_map %{"paused" => "paused", "approval" => "approval", "max_agents" => "max_agents", "backend" => "harness", "effort" => "effort"}
 
   @spec get(key()) :: stage_controls()
   def get(key) do
@@ -44,7 +44,7 @@ defmodule SymphonyElixir.FactoryControls do
   def paused?(key), do: get(key).paused
 
   @doc """
-  Updates one control (`paused`, `max_agents`, `backend`, `effort`) on a team's stage.
+  Updates one control (`paused`, `approval`, `max_agents`, `backend`, `effort`) on a stage.
   """
   @spec put(key(), String.t(), term(), String.t()) :: {:ok, stage_controls()} | {:error, term()}
   def put(key, field, value, updated_by \\ "dashboard") do

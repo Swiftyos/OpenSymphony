@@ -344,8 +344,37 @@
     this.errorBox.hidden = true;
     slot.appendChild(this.errorBox);
 
+    // The canvas clips the diagram so it can be zoomed and panned in place.
+    this.canvas = el("div", "fx-canvas");
     this.svg = svg("svg", { class: "fx-diagram", role: "img", "aria-label": "Agent factory process diagram" });
-    slot.appendChild(this.svg);
+    this.canvas.appendChild(this.svg);
+    this.canvas.appendChild(this.buildZoomControls());
+    slot.appendChild(this.canvas);
+    this.view = null; // null = fit the whole flow; else {x, y, w, h} in diagram units
+
+    // ⌘/Ctrl + wheel (and trackpad pinch, which arrives as ctrl+wheel) zooms at
+    // the pointer. Once zoomed in, a plain wheel or two-finger scroll pans;
+    // otherwise it scrolls the page as usual.
+    this.svg.addEventListener(
+      "wheel",
+      function (e) {
+        if (e.ctrlKey || e.metaKey) {
+          e.preventDefault();
+          self.zoomAt(self.svgPoint(e), Math.exp(e.deltaY * 0.0025));
+        } else if (self.view) {
+          e.preventDefault();
+          var scale = self.view.w / (self.svg.getBoundingClientRect().width || 1);
+          self.panBy(e.deltaX * scale, e.deltaY * scale);
+        }
+      },
+      { passive: false }
+    );
+    // Dragging the empty background pans.
+    this.svg.addEventListener("pointerdown", function (e) {
+      if (e.target !== self.svg || e.button !== 0) return;
+      self.pan = { x: e.clientX, y: e.clientY, moved: false };
+      self.svg.setPointerCapture(e.pointerId);
+    });
 
     this.drawer = el("div", "fx-drawer");
     this.drawer.hidden = true;
@@ -491,6 +520,7 @@
       select.addEventListener("change", function () {
         self.team = select.value;
         self.selected = null;
+        self.view = null;
         try {
           window.localStorage.setItem("symphony.factory.team", self.team);
         } catch (_e) {}
@@ -609,7 +639,8 @@
     var flow = this.flow();
     var routes = routeAll(definition);
     var box = bounds(definition, routes);
-    root.setAttribute("viewBox", box.x + " " + box.y + " " + box.w + " " + box.h);
+    this.fit = box;
+    this.applyView();
     root.classList.toggle("is-editing", this.mode === "edit");
     root.classList.toggle("has-selection", !!this.selected);
 
@@ -794,7 +825,12 @@
     }
 
     g.addEventListener("pointerdown", function (e) {
-      if (self.mode === "edit") self.startDrag(e, stage.id);
+      if (self.mode === "edit" && e.button === 0) self.startDrag(e, stage.id);
+    });
+    g.addEventListener("contextmenu", function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      self.openStageMenu(e, stage.id);
     });
     g.addEventListener("click", function (e) {
       e.stopPropagation();
@@ -843,6 +879,178 @@
     this.syncHash();
   };
 
+  // ------------------------------------------------------------------ stage menu (right-click)
+
+  Flow.prototype.closeStageMenu = function () {
+    if (this.menu) this.menu.remove();
+    this.menu = null;
+    if (this._menuOff) this._menuOff();
+  };
+
+  Flow.prototype.openStageMenu = function (e, stageId) {
+    var self = this;
+    this.closeStageMenu();
+    var stage = this.stageById(stageId);
+    if (!stage) return;
+    var editing = this.mode === "edit";
+    var allowed = editing || this.canControl();
+    var agentStage = !!DISPATCHABLE[stage.kind];
+
+    var menu = el("div", "fx-menu");
+    menu.setAttribute("role", "menu");
+    menu.appendChild(el("div", "fx-menu-title", stage.name));
+
+    var item = function (label, checked, enabled, hint, onPick) {
+      var b = el("button", "fx-menu-item" + (checked ? " is-checked" : ""));
+      b.type = "button";
+      b.setAttribute("role", checked === null ? "menuitem" : "menuitemcheckbox");
+      if (checked !== null) b.setAttribute("aria-checked", checked ? "true" : "false");
+      b.appendChild(el("span", "fx-menu-check", checked ? "✓" : ""));
+      b.appendChild(el("span", "fx-menu-label", label));
+      if (hint) b.title = hint;
+      b.disabled = !enabled;
+      b.addEventListener("click", function () {
+        self.closeStageMenu();
+        onPick();
+      });
+      menu.appendChild(b);
+      return b;
+    };
+
+    item("✋ Requires human approval", !!stage.approval, allowed && agentStage, agentStage ? "A person approves before issues leave this stage" : "Only agent stages can need approval", function () {
+      self.setStageControl(stage, "approval", !stage.approval, function () {
+        self.opts.toast(stage.name + (stage.approval ? " now needs a person's approval" : " no longer needs approval"), "ok");
+      });
+    });
+    item("Pause dispatch", !!stage.paused, allowed && agentStage, "No new agents start in this stage", function () {
+      self.setStageControl(stage, "paused", !stage.paused);
+    });
+
+    // Harness (and so model) and thinking level, one click each. Issue labels still win.
+    var models = this.data.harness_models || {};
+    var chips = function (title, options, current, field) {
+      var row = el("div", "fx-menu-row");
+      row.appendChild(el("span", "fx-menu-row-title", title));
+      var group = el("div", "fx-menu-chips");
+      options.forEach(function (o) {
+        var b = el("button", "fx-menu-chip" + ((current || null) === o[0] ? " is-on" : ""), o[1]);
+        b.type = "button";
+        b.disabled = !(allowed && agentStage);
+        if (o[2]) b.title = o[2];
+        b.addEventListener("click", function () {
+          self.closeStageMenu();
+          if ((current || null) !== o[0]) self.setStageControl(stage, field, o[0]);
+        });
+        group.appendChild(b);
+      });
+      row.appendChild(group);
+      menu.appendChild(row);
+    };
+    if (agentStage) {
+      chips(
+        "Harness",
+        harnessOptions(this.data.harnesses).map(function (o) {
+          return [o[0], o[1], o[0] ? "Model: " + (models[o[0]] || "default") : "The flow's default harness"];
+        }),
+        stage.harness,
+        "harness"
+      );
+      var model = stage.harness && models[stage.harness];
+      if (model && model !== "default") menu.appendChild(el("p", "fx-menu-note", "Runs " + model));
+      chips("Thinking", effortOptions(), stage.effort, "effort");
+    }
+    item(editing ? "Edit stage" : "Open stage", null, true, null, function () {
+      self.select({ type: "stage", id: stage.id });
+    });
+    if (!allowed) menu.appendChild(el("p", "fx-menu-note", "Only this flow's team members and admins can change it."));
+
+    // Place at the pointer, inside the canvas.
+    var box = this.canvas.getBoundingClientRect();
+    this.canvas.appendChild(menu);
+    var x = Math.min(e.clientX - box.left, box.width - menu.offsetWidth - 6);
+    var y = Math.min(e.clientY - box.top, box.height - menu.offsetHeight - 6);
+    menu.style.left = Math.max(6, x) + "px";
+    menu.style.top = Math.max(6, y) + "px";
+    this.menu = menu;
+    var first = menu.querySelector("button:not([disabled])");
+    if (first) first.focus();
+
+    var onDown = function (ev) {
+      if (!menu.contains(ev.target)) self.closeStageMenu();
+    };
+    var onKey = function (ev) {
+      if (ev.key === "Escape") self.closeStageMenu();
+    };
+    document.addEventListener("pointerdown", onDown, true);
+    document.addEventListener("keydown", onKey);
+    window.addEventListener("blur", onDown);
+    this._menuOff = function () {
+      document.removeEventListener("pointerdown", onDown, true);
+      document.removeEventListener("keydown", onKey);
+      window.removeEventListener("blur", onDown);
+      self._menuOff = null;
+    };
+  };
+
+  // ------------------------------------------------------------------ zoom and pan
+
+  var MIN_ZOOM = 0.4;
+  var MAX_ZOOM = 4;
+
+  Flow.prototype.buildZoomControls = function () {
+    var self = this;
+    var bar = el("div", "fx-zoom");
+    bar.appendChild(button("−", "fx-zoom-btn", function () {
+      self.zoomAt(null, 1.25);
+    }));
+    this.zoomLabel = button("100%", "fx-zoom-btn fx-zoom-level", function () {
+      self.resetView();
+    });
+    this.zoomLabel.title = "Fit the whole flow";
+    bar.appendChild(this.zoomLabel);
+    bar.appendChild(button("+", "fx-zoom-btn", function () {
+      self.zoomAt(null, 0.8);
+    }));
+    bar.querySelectorAll("button")[0].setAttribute("aria-label", "Zoom out");
+    bar.querySelectorAll("button")[2].setAttribute("aria-label", "Zoom in");
+    return bar;
+  };
+
+  Flow.prototype.currentView = function () {
+    return this.view || this.fit || { x: 0, y: 0, w: 1000, h: 400 };
+  };
+
+  // The view keeps the fit's aspect ratio, so the diagram's height never jumps.
+  Flow.prototype.applyView = function () {
+    var v = this.currentView();
+    this.svg.setAttribute("viewBox", v.x + " " + v.y + " " + v.w + " " + v.h);
+    var zoom = this.fit ? Math.round((this.fit.w / v.w) * 100) : 100;
+    if (this.zoomLabel) this.zoomLabel.textContent = this.view ? zoom + "%" : "Fit";
+    this.canvas.classList.toggle("is-zoomed", !!this.view);
+  };
+
+  // factor < 1 zooms in. `at` is a diagram point that stays under the pointer.
+  Flow.prototype.zoomAt = function (at, factor) {
+    if (!this.fit) return;
+    var v = this.currentView();
+    var w = Math.min(Math.max(v.w * factor, this.fit.w / MAX_ZOOM), this.fit.w / MIN_ZOOM);
+    var k = w / v.w;
+    var p = at || { x: v.x + v.w / 2, y: v.y + v.h / 2 };
+    this.view = { x: p.x - (p.x - v.x) * k, y: p.y - (p.y - v.y) * k, w: w, h: v.h * k };
+    this.applyView();
+  };
+
+  Flow.prototype.panBy = function (dx, dy) {
+    var v = this.currentView();
+    this.view = { x: v.x + dx, y: v.y + dy, w: v.w, h: v.h };
+    this.applyView();
+  };
+
+  Flow.prototype.resetView = function () {
+    this.view = null;
+    this.applyView();
+  };
+
   // ------------------------------------------------------------------ editing: pointer
 
   Flow.prototype.svgPoint = function (e) {
@@ -868,7 +1076,17 @@
   };
 
   Flow.prototype.onPointerMove = function (e) {
-    if (this.drag) {
+    if (this.pan) {
+      var dx = e.clientX - this.pan.x;
+      var dy = e.clientY - this.pan.y;
+      if (!this.pan.moved && Math.abs(dx) + Math.abs(dy) < 4) return;
+      this.pan.moved = true;
+      this.dragged = true;
+      var scale = this.currentView().w / (this.svg.getBoundingClientRect().width || 1);
+      this.panBy(-dx * scale, -dy * scale);
+      this.pan.x = e.clientX;
+      this.pan.y = e.clientY;
+    } else if (this.drag) {
       if (Math.abs(e.clientX - this.drag.sx) + Math.abs(e.clientY - this.drag.sy) > 4) this.dragged = true;
       if (!this.dragged) return;
       var p = this.svgPoint(e);
@@ -886,7 +1104,16 @@
 
   Flow.prototype.onPointerUp = function (e) {
     var self = this;
-    if (this.drag) {
+    if (this.pan) {
+      var moved = this.pan.moved;
+      this.pan = null;
+      // A pan isn't a click on the background (which clears the selection).
+      if (moved) {
+        setTimeout(function () {
+          self.dragged = false;
+        }, 0);
+      }
+    } else if (this.drag) {
       this.drag = null;
       // Let the click handler see whether this was a drag.
       setTimeout(function () {
@@ -1165,26 +1392,37 @@
     });
   };
 
+  // One live stage control (view mode), applied immediately and rolled back if
+  // the server refuses it. In edit mode it only changes the draft.
+  Flow.prototype.setStageControl = function (stage, field, value, done) {
+    var self = this;
+    var previous = stage[field];
+    stage[field] = value;
+    this.lastKey = null;
+    this.renderDiagram();
+    this.renderDrawer();
+    if (this.mode === "edit") return;
+    var key = { harness: "backend" }[field] || field;
+    this.opts.push("factory_control", { team: this.team, stage: stage.id, field: key, value: value }, function (reply) {
+      if (reply && reply.ok) {
+        if (done) done();
+        return;
+      }
+      stage[field] = previous;
+      self.lastKey = null;
+      self.renderDiagram();
+      self.renderDrawer();
+      self.opts.toast((reply && reply.error) || "Change failed", "error");
+    });
+  };
+
   // Live stage controls (view mode): one field at a time, applied immediately.
   Flow.prototype.controls = function (drawer, stage) {
     var self = this;
     var enabled = this.canControl();
     var form = el("div", "fx-form");
     var set = function (field, value) {
-      var key = { harness: "backend" }[field] || field;
-      var previous = stage[field];
-      stage[field] = value;
-      self.lastKey = null;
-      self.renderDiagram();
-      self.renderDrawer();
-      self.opts.push("factory_control", { team: self.team, stage: stage.id, field: key, value: value }, function (reply) {
-        if (reply && reply.ok) return;
-        stage[field] = previous;
-        self.lastKey = null;
-        self.renderDiagram();
-        self.renderDrawer();
-        self.opts.toast((reply && reply.error) || "Change failed", "error");
-      });
+      self.setStageControl(stage, field, value);
     };
 
     form.appendChild(

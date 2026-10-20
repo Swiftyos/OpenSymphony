@@ -42,6 +42,8 @@ defmodule SymphonyElixirWeb.FactoryPresenter do
 
     %{
       harnesses: @harnesses,
+      # The model each harness runs (from its config), shown next to the harness.
+      harness_models: Map.new(@harnesses, &{&1, UsageLedger.model_label(&1)}),
       capacity: settings.agent.max_concurrent_agents,
       controls_enabled: controls_enabled?(settings),
       priced: map_size(pricing) > 0,

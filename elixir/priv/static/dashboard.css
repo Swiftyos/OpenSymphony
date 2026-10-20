@@ -356,11 +356,177 @@ pre {
   min-height: 300px;
 }
 
+.fx-canvas {
+  position: relative;
+  overflow: hidden;
+  border-radius: 10px;
+}
+
 .fx-diagram {
   display: block;
   width: 100%;
   height: auto;
   overflow: visible;
+  touch-action: pan-y;
+  cursor: grab;
+}
+
+.fx-diagram:active {
+  cursor: grabbing;
+}
+
+.fx-canvas.is-zoomed .fx-diagram {
+  overflow: hidden;
+  touch-action: none;
+}
+
+.fx-menu {
+  position: absolute;
+  z-index: 20;
+  min-width: 230px;
+  padding: 4px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--raised);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+  animation: fx-fade 90ms ease-out;
+}
+
+.fx-menu-title {
+  padding: 6px 10px 4px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.fx-menu-item {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.86rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.fx-menu-item:hover:not([disabled]),
+.fx-menu-item:focus-visible {
+  background: var(--raised-2);
+  outline: none;
+}
+
+.fx-menu-item[disabled] {
+  color: var(--muted);
+  cursor: default;
+}
+
+.fx-menu-check {
+  width: 14px;
+  color: var(--good-ink);
+  font-weight: 700;
+}
+
+.fx-menu-row {
+  padding: 6px 10px 2px;
+  border-top: 1px solid var(--line);
+  margin-top: 4px;
+}
+
+.fx-menu-row-title {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 650;
+}
+
+.fx-menu-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.fx-menu-chip {
+  padding: 3px 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.fx-menu-chip:hover:not([disabled]),
+.fx-menu-chip:focus-visible {
+  border-color: var(--ink-2);
+  color: var(--ink);
+  outline: none;
+}
+
+.fx-menu-chip.is-on {
+  border-color: var(--ink);
+  background: var(--ink);
+  color: var(--page);
+  font-weight: 650;
+}
+
+.fx-menu-chip[disabled] {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.fx-menu-note {
+  margin: 4px 10px 6px;
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+.fx-zoom {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  display: flex;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--raised);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+}
+
+.fx-zoom-btn {
+  min-width: 30px;
+  padding: 4px 8px;
+  border: 0;
+  background: transparent;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.fx-zoom-btn + .fx-zoom-btn {
+  border-left: 1px solid var(--line);
+}
+
+.fx-zoom-btn:hover,
+.fx-zoom-btn:focus-visible {
+  background: var(--raised-2);
+  color: var(--ink);
+}
+
+.fx-zoom-level {
+  min-width: 52px;
+  font-variant-numeric: tabular-nums;
 }
 
 /* -- edges */

@@ -451,6 +451,12 @@ defmodule SymphonyElixir.FactoryEditorTest do
       assert_reply(view, %{ok: true, controls: %{max_agents: 2}})
       assert FactoryControls.get({"PAY", "merge"}).max_agents == 2
       assert Store.custom?("PAY")
+
+      # The diagram's right-click menu toggles approval the same way.
+      render_hook(view, "factory_control", %{"team" => "PAY", "stage" => "merge", "field" => "approval", "value" => true})
+      assert_reply(view, %{ok: true})
+      assert Definition.stage(Store.get("PAY"), "merge")["approval"] == true
+      assert %{"codex" => _, "claude" => _, "opencode" => _} = FactoryPresenter.payload([], Config.settings!()).harness_models
     end
 
     test "whole flows are drafted with AI for teams and projects, and project flows can be dropped", %{mia: mia} do
