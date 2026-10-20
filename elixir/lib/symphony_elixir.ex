@@ -37,6 +37,8 @@ defmodule SymphonyElixir.Application do
       SymphonyElixir.Factory.Store,
       SymphonyElixir.Users,
       SymphonyElixir.Auth,
+      # Creates any missing Linear labels the flows need, once, in the background.
+      SymphonyElixir.LabelSync,
       SymphonyElixir.Orchestrator,
       SymphonyElixir.HttpServer,
       SymphonyElixir.StatusDashboard,

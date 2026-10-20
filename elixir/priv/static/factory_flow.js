@@ -391,9 +391,13 @@
       if (e.target === self.svg && !self.dragged) self.select(null);
     });
     document.addEventListener("keydown", function (e) {
-      if (self.mode !== "edit" || !self.selected) return;
       var tag = (e.target && e.target.tagName) || "";
-      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (e.target && e.target.isContentEditable)) return;
+      if ((e.key === "t" || e.key === "T") && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        self.toggleCinema();
+        return;
+      }
+      if (self.mode !== "edit" || !self.selected) return;
       if (e.key === "Delete" || e.key === "Backspace") {
         e.preventDefault();
         self.deleteSelected();
@@ -838,13 +842,37 @@
     if (info.running > 0) g.appendChild(svg("rect", { x: -14, y: -14, width: r.w + 28, height: r.h + 28, rx: 26, class: "fx-node-halo" }));
     g.appendChild(svg("rect", { width: r.w, height: r.h, rx: 16, class: "fx-node-box" }));
 
+    // Top-right: the kind glyph, and the approval badge (✋ 3/10, ✋, ✓ trusted).
+    var glyph = stage.kind === "done" ? "✓" : stage.kind === "parked" ? "⏸" : stage.kind === "human" ? "◐" : stage.kind === "queue" ? "≡" : "";
+    var gate = approvalState(this.definition(), stage);
+    var maxName = gate ? 11 : 18;
+
     var label = svg("text", { x: 14, y: 24, class: "fx-node-label" });
-    label.textContent = stage.name.length > 18 ? stage.name.slice(0, 17) + "…" : stage.name;
+    label.textContent = stage.name.length > maxName ? stage.name.slice(0, maxName - 1) + "…" : stage.name;
     g.appendChild(label);
 
     var kind = svg("text", { x: r.w - 14, y: 24, "text-anchor": "end", class: "fx-node-kind fx-node-kind-" + stage.kind });
-    kind.textContent = stage.kind === "done" ? "✓" : stage.kind === "parked" ? "⏸" : stage.kind === "human" ? "◐" : stage.kind === "queue" ? "≡" : "";
+    kind.textContent = glyph;
     g.appendChild(kind);
+
+    if (gate) {
+      var right = r.w - (glyph ? 30 : 10);
+      var badge = svg("g", { class: "fx-gate" + (gate.indexOf("trusted") !== -1 ? " is-trusted" : "") });
+      var badgeText = svg("text", { x: right - 7, y: 24, "text-anchor": "end", class: "fx-gate-text" });
+      badgeText.textContent = gate;
+      var width = 14 + gate.length * 6.2;
+      badge.appendChild(svg("rect", { x: right - width, y: 11, width: width, height: 18, rx: 9, class: "fx-gate-pill" }));
+      badge.appendChild(badgeText);
+      var tip = svg("title", {});
+      tip.textContent =
+        gate.indexOf("trusted") !== -1
+          ? "Earned autonomy: this stage no longer needs approval"
+          : stage.approval
+            ? "A person approves every move out of this stage"
+            : "Needs a person's approval until it has " + autopilotOf(this.definition()).streak + " approvals in a row";
+      badge.appendChild(tip);
+      g.appendChild(badge);
+    }
 
     var count = svg("text", { x: 14, y: 58, class: "fx-node-count" });
     count.textContent = String(info.count);
@@ -857,17 +885,23 @@
       g.appendChild(svg("circle", { cx: r.w - 16 - i * 12, cy: 53, r: 4.5, class: "fx-agent-dot h-" + issue.backend }));
     });
 
+    // Caption under the box: the stage label and its run settings. Only
+    // "dispatch paused" is highlighted; it means no new agents start here.
     var config = [];
-    if (stage.paused) config.push("paused");
-    var gate = approvalState(this.definition(), stage);
-    if (gate) config.push(gate);
+    if (stage.label) config.push(stage.label);
     if (stage.harness) config.push(HARNESS_LABELS[stage.harness] || stage.harness);
     if (stage.effort) config.push(stage.effort);
     if (stage.max_agents) config.push("≤" + stage.max_agents);
-    if (stage.label) config.unshift(stage.label);
-    if (config.length) {
-      var line = svg("text", { x: 14, y: r.h + 14, class: "fx-node-config" + (stage.paused ? " is-paused" : "") });
-      line.textContent = config.join(" · ");
+    if (config.length || stage.paused) {
+      var line = svg("text", { x: 14, y: r.h + 14, class: "fx-node-config" });
+      if (stage.paused) {
+        var pausedSpan = svg("tspan", { class: "fx-node-paused" });
+        pausedSpan.textContent = "⏸ dispatch paused" + (config.length ? " · " : "");
+        line.appendChild(pausedSpan);
+      }
+      var rest = svg("tspan", {});
+      rest.textContent = config.join(" · ");
+      line.appendChild(rest);
       g.appendChild(line);
     }
 
@@ -1073,7 +1107,38 @@
     }));
     bar.querySelectorAll("button")[0].setAttribute("aria-label", "Zoom out");
     bar.querySelectorAll("button")[2].setAttribute("aria-label", "Zoom in");
+    this.cinemaButton = button("⤢", "fx-zoom-btn", function () {
+      self.toggleCinema();
+    });
+    bar.appendChild(this.cinemaButton);
+    this.toggleCinema(readCinema());
     return bar;
+  };
+
+  // Cinema mode: the flow takes the full width and Needs you moves below it,
+  // like a video player's theatre mode. The class lives on <html> so LiveView
+  // re-renders never drop it. Remembered per browser; T toggles it.
+  function readCinema() {
+    try {
+      return window.localStorage.getItem("symphony.cinema") === "1";
+    } catch (_e) {
+      return false;
+    }
+  }
+
+  Flow.prototype.toggleCinema = function (on) {
+    var root = document.documentElement;
+    on = on === undefined ? !root.classList.contains("fx-cinema") : on;
+    root.classList.toggle("fx-cinema", on);
+    if (this.cinemaButton) {
+      this.cinemaButton.textContent = on ? "⤡" : "⤢";
+      this.cinemaButton.setAttribute("aria-label", on ? "Exit cinema mode (T)" : "Cinema mode (T)");
+      this.cinemaButton.title = on ? "Exit cinema mode (T)" : "Cinema mode: make the flow full width (T)";
+      this.cinemaButton.setAttribute("aria-pressed", on ? "true" : "false");
+    }
+    try {
+      window.localStorage.setItem("symphony.cinema", on ? "1" : "0");
+    } catch (_e) {}
   };
 
   Flow.prototype.currentView = function () {
@@ -1791,7 +1856,7 @@
     return wrap;
   }
 
-  // Mirrors Definition.requires_approval?: "✋ approval" (always), "✋ 3/10"
+  // Mirrors Definition.requires_approval?: "✋ always", "✋ 3/10"
   // (earning autonomy), "✓ trusted" (earned it), or "" when no approval applies.
   function autopilotOf(definition) {
     var a = (definition && definition.autopilot) || {};
@@ -1799,8 +1864,8 @@
   }
 
   function approvalState(definition, stage) {
-    if (stage.approval) return "✋ approval";
-    if (!DISPATCHABLE[stage.kind]) return "";
+    if (stage.approval) return "✋ always";
+    if (stage.kind !== "agent") return "";
     var a = autopilotOf(definition);
     if (!a.enabled) return "";
     var n = stage.approval_streak || 0;

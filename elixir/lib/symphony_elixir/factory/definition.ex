@@ -147,7 +147,8 @@ defmodule SymphonyElixir.Factory.Definition do
   @spec requires_approval?(t(), stage() | nil) :: boolean()
   def requires_approval?(_definition, %{"approval" => true}), do: true
 
-  def requires_approval?(definition, %{"kind" => kind} = stage) when kind in @dispatchable do
+  # Earned autonomy covers stages where agents do the work, not queues.
+  def requires_approval?(definition, %{"kind" => "agent"} = stage) do
     case autopilot(definition) do
       %{"enabled" => true, "streak" => needed} -> (stage["approval_streak"] || 0) < needed
       _ -> false

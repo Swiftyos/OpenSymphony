@@ -196,7 +196,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
       ObservabilityPubSub.broadcast_update()
     end
 
-    {:noreply, socket}
+    {:noreply, assign_payload(socket)}
   end
 
   def handle_event("reject_account", %{"id" => id}, socket) do
@@ -205,7 +205,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
       ObservabilityPubSub.broadcast_update()
     end
 
-    {:noreply, socket}
+    {:noreply, assign_payload(socket)}
   end
 
   @impl true
@@ -466,19 +466,19 @@ defmodule SymphonyElixirWeb.DashboardLive do
               <div id="fx-drawer" class="fx-drawer-slot" data-fx="drawer" phx-update="ignore"></div>
               <div class="panel-head">
                 <h2 class="panel-title">Needs you</h2>
-                <span class={["count-pill", attention_count(@payload, @current_user) > 0 && "count-pill-hot"]}>
-                  <%= attention_count(@payload, @current_user) %>
+                <span class={["count-pill", attention_count(@payload, @pending_accounts) > 0 && "count-pill-hot"]}>
+                  <%= attention_count(@payload, @pending_accounts) %>
                 </span>
               </div>
 
-              <div :if={pending_accounts(@current_user) != []} class="attention-group">
+              <div :if={@pending_accounts != []} class="attention-group">
                 <h3 class="attention-title">
                   <span class="attention-icon attention-icon-review" aria-hidden="true">+</span>
                   Pending accounts
-                  <span class="attention-count numeric"><%= length(pending_accounts(@current_user)) %></span>
+                  <span class="attention-count numeric"><%= length(@pending_accounts) %></span>
                 </h3>
                 <p class="attention-more">Only approve people you expect. <a href="/admin/users">Review in Users</a></p>
-                <div :for={account <- pending_accounts(@current_user)} class="attention-item account-request">
+                <div :for={account <- @pending_accounts} class="attention-item account-request">
                   <span class="attention-id"><%= account.username %></span>
                   <span class="attention-text" title={"#{account.email} · requested from #{account[:requested_from] || "unknown"}"}>
                     <%= account.email %>
@@ -502,7 +502,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
               <p :if={@approval_error} class="attention-more" role="alert"><%= @approval_error %></p>
 
-              <%= if attention_count(@payload, @current_user) == 0 do %>
+              <%= if attention_count(@payload, @pending_accounts) == 0 do %>
                 <p class="all-clear">All clear. Nothing is waiting on a human.</p>
               <% else %>
                 <div :if={approvals(@payload, @now) != []} class="attention-group">
@@ -706,6 +706,9 @@ defmodule SymphonyElixirWeb.DashboardLive do
     team = if Enum.any?(choices, &(&1.key == socket.assigns.team_filter)), do: socket.assigns.team_filter
 
     socket
+    # An assign, not a template call: LiveView only re-renders template calls
+    # when their arguments change, so an approved account would never clear.
+    |> assign(:pending_accounts, pending_accounts(user))
     |> assign(:team_choices, choices)
     |> assign(:team_filter, team)
     |> assign(:payload, Visibility.scope_to_team(visible, team))
@@ -764,10 +767,10 @@ defmodule SymphonyElixirWeb.DashboardLive do
     |> Enum.reject(&(&1.items == []))
   end
 
-  defp attention_count(payload, user) do
+  defp attention_count(payload, pending_accounts) do
     payload
     |> attention_groups(DateTime.utc_now())
-    |> Enum.reduce(length(pending_accounts(user)) + length(approvals(payload, DateTime.utc_now())), &(length(&1.items) + &2))
+    |> Enum.reduce(length(pending_accounts) + length(approvals(payload, DateTime.utc_now())), &(length(&1.items) + &2))
   end
 
   defp pending_accounts(user) do

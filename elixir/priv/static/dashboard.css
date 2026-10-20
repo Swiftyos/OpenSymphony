@@ -307,6 +307,23 @@ pre {
   align-items: stretch;
 }
 
+/* Cinema mode: the flow full width, Needs you below it. */
+.fx-cinema .app-shell {
+  width: 100%;
+}
+
+.fx-cinema .factory-main {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.fx-cinema .flow-panel .fx-diagram-slot {
+  min-height: 60vh;
+}
+
+.fx-cinema .attention-panel {
+  max-height: none;
+}
+
 .fx-stats {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -678,8 +695,29 @@ pre {
   font-weight: 600;
 }
 
-.fx-node-config.is-paused {
+.fx-node-paused {
   fill: var(--warning);
+}
+
+.fx-gate-pill {
+  fill: rgba(250, 178, 25, 0.14);
+  stroke: rgba(250, 178, 25, 0.55);
+  stroke-width: 1;
+}
+
+.fx-gate-text {
+  fill: var(--warning);
+  font-size: 10.5px;
+  font-weight: 700;
+}
+
+.fx-gate.is-trusted .fx-gate-pill {
+  fill: rgba(12, 163, 12, 0.14);
+  stroke: rgba(12, 163, 12, 0.55);
+}
+
+.fx-gate.is-trusted .fx-gate-text {
+  fill: var(--good-ink);
 }
 
 .fx-node-icon {

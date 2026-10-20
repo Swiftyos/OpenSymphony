@@ -12,6 +12,8 @@ defmodule SymphonyElixir.Tracker do
   @callback update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
   @callback set_stage(String.t(), String.t(), String.t() | nil, keyword()) :: :ok | {:error, term()}
   @callback ensure_stage_labels(String.t(), [String.t()]) :: {:ok, [String.t()]} | {:error, term()}
+  @callback ensure_labels(String.t(), [String.t()]) :: {:ok, [String.t()]} | {:error, term()}
+  @callback project_team_keys([String.t()]) :: {:ok, %{String.t() => [String.t()]}} | {:error, term()}
 
   @spec fetch_candidate_issues() :: {:ok, [term()]} | {:error, term()}
   def fetch_candidate_issues do
@@ -56,6 +58,19 @@ defmodule SymphonyElixir.Tracker do
   def ensure_stage_labels(team_key, labels) do
     adapter().ensure_stage_labels(team_key, labels)
   end
+
+  @doc """
+  Makes sure a team has these plain labels (it or the workspace), creating any
+  that are missing.
+  """
+  @spec ensure_labels(String.t(), [String.t()]) :: {:ok, [String.t()]} | {:error, term()}
+  def ensure_labels(team_key, names), do: adapter().ensure_labels(team_key, names)
+
+  @doc """
+  The team keys each project (by slug) belongs to.
+  """
+  @spec project_team_keys([String.t()]) :: {:ok, %{String.t() => [String.t()]}} | {:error, term()}
+  def project_team_keys(slugs), do: adapter().project_team_keys(slugs)
 
   @spec adapter() :: module()
   def adapter do

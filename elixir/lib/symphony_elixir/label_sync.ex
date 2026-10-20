@@ -1,0 +1,101 @@
+defmodule SymphonyElixir.LabelSync do
+  @moduledoc """
+  Creates the Linear labels Symphony needs, so nobody has to make them by hand.
+
+  For every configured project it asks Linear which teams the project belongs
+  to, then makes sure each team has:
+
+    * the `<prefix>` label group with a child label for every stage label in the
+      flow the team's issues in that project follow
+    * `tracker.require_label` (e.g. `auto-build`) and `tracker.approval_label`
+      (e.g. `needs-approval`)
+
+  Labels that already exist in the team or workspace are left alone. It runs
+  once at startup; saving a flow in the dashboard syncs that flow's labels too.
+  """
+
+  require Logger
+
+  alias SymphonyElixir.{Config, IssueStage, Tracker}
+  alias SymphonyElixir.Factory.Store
+
+  @doc false
+  @spec child_spec(term()) :: Supervisor.child_spec()
+  def child_spec(_arg), do: %{id: __MODULE__, start: {Task, :start_link, [&boot/0]}, restart: :temporary}
+
+  @doc """
+  Runs `sync/0` at startup when the tracker is Linear (and `:label_sync_on_boot`
+  isn't turned off, as it is in tests).
+  """
+  @spec boot() :: :ok
+  def boot do
+    if Application.get_env(:symphony_elixir, :label_sync_on_boot, true) and Config.settings!().tracker.kind == "linear" do
+      sync()
+    end
+
+    :ok
+  end
+
+  @doc """
+  Ensures the labels for every configured project's teams. Returns the labels
+  created per team.
+  """
+  @spec sync() :: {:ok, %{String.t() => [String.t()]}} | {:error, term()}
+  def sync do
+    settings = Config.settings!()
+    slugs = settings |> Config.linear_project_routes() |> Enum.map(& &1.slug) |> Enum.filter(&is_binary/1)
+    plain = Enum.filter([settings.tracker.require_label, settings.tracker.approval_label], &is_binary/1)
+
+    case Tracker.project_team_keys(slugs) do
+      {:ok, teams_by_project} ->
+        created =
+          teams_by_project
+          |> stage_labels_by_team()
+          |> Map.new(fn {team, labels} -> {team, ensure(team, labels, plain)} end)
+
+        log(created)
+        {:ok, created}
+
+      {:error, reason} ->
+        Logger.warning("Linear label sync skipped: couldn't look up project teams reason=#{inspect(reason)}")
+        {:error, reason}
+    end
+  end
+
+  # Each team needs the stage labels of every flow its issues can follow.
+  defp stage_labels_by_team(teams_by_project) do
+    Enum.reduce(teams_by_project, %{}, fn {slug, teams}, acc ->
+      Enum.reduce(teams, acc, fn team, acc ->
+        labels =
+          Store.get(Store.scope_for(team, slug))["stages"]
+          |> Enum.map(& &1["label"])
+          |> Enum.filter(&is_binary/1)
+
+        Map.update(acc, team, labels, &Enum.uniq(&1 ++ labels))
+      end)
+    end)
+  end
+
+  defp ensure(team, stage_labels, plain) do
+    prefix = IssueStage.label_prefix()
+
+    with {:ok, stage_created} <- ensure_some(stage_labels, &Tracker.ensure_stage_labels(team, &1)),
+         {:ok, plain_created} <- ensure_some(plain, &Tracker.ensure_labels(team, &1)) do
+      stage_created ++ plain_created
+    else
+      {:error, reason} ->
+        Logger.warning("Linear label sync failed team=#{team} prefix=#{prefix} reason=#{inspect(reason)}")
+        []
+    end
+  end
+
+  defp ensure_some([], _ensure), do: {:ok, []}
+  defp ensure_some(labels, ensure), do: ensure.(labels)
+
+  defp log(created) do
+    Enum.each(created, fn
+      {_team, []} -> :ok
+      {team, labels} -> Logger.info("Created Linear labels team=#{team} labels=#{Enum.join(labels, ",")}")
+    end)
+  end
+end

@@ -242,6 +242,88 @@ defmodule SymphonyElixir.Linear.Adapter do
     end
   end
 
+  @plain_labels_query """
+  query SymphonyPlainLabels($teamKey: String!) {
+    teams(filter: {key: {eq: $teamKey}}, first: 1) {
+      nodes {
+        id
+        labels(first: 250) {
+          nodes {
+            name
+          }
+        }
+      }
+    }
+    issueLabels(first: 250, filter: {team: {null: true}}) {
+      nodes {
+        name
+      }
+    }
+  }
+  """
+
+  @doc """
+  Creates plain (ungrouped) team labels that neither the team nor the workspace
+  has yet, e.g. the opt-in and approval labels. Returns the names created.
+  """
+  @spec ensure_labels(String.t(), [String.t()]) :: {:ok, [String.t()]} | {:error, term()}
+  def ensure_labels(team_key, names) when is_binary(team_key) and is_list(names) do
+    with {:ok, response} <- client_module().graphql(@plain_labels_query, %{teamKey: team_key}),
+         {:ok, team_id} <- inventory_team_id(response) do
+      existing =
+        (get_in(response, ["data", "teams", "nodes", Access.at(0), "labels", "nodes"]) || []) ++
+          (get_in(response, ["data", "issueLabels", "nodes"]) || [])
+
+      have = MapSet.new(existing, &String.downcase(&1["name"] || ""))
+
+      names
+      |> Enum.uniq_by(&String.downcase/1)
+      |> Enum.reject(&MapSet.member?(have, String.downcase(&1)))
+      |> Enum.reduce_while({:ok, []}, &create_plain_label(&1, &2, team_id))
+    end
+  end
+
+  defp create_plain_label(name, {:ok, created}, team_id) do
+    case create_label(%{name: name, teamId: team_id}) do
+      {:ok, _id} -> {:cont, {:ok, created ++ [name]}}
+      {:error, reason} -> {:halt, {:error, reason}}
+    end
+  end
+
+  @project_teams_query """
+  query SymphonyProjectTeams($slugs: [String!]!) {
+    projects(filter: {slugId: {in: $slugs}}, first: 50) {
+      nodes {
+        slugId
+        teams(first: 50) {
+          nodes {
+            key
+          }
+        }
+      }
+    }
+  }
+  """
+
+  @doc """
+  The keys of the teams each project (by slug) belongs to.
+  """
+  @spec project_team_keys([String.t()]) :: {:ok, %{String.t() => [String.t()]}} | {:error, term()}
+  def project_team_keys([]), do: {:ok, %{}}
+
+  def project_team_keys(slugs) when is_list(slugs) do
+    case client_module().graphql(@project_teams_query, %{slugs: slugs}) do
+      {:ok, %{"data" => %{"projects" => %{"nodes" => nodes}}}} when is_list(nodes) ->
+        {:ok, Map.new(nodes, &{&1["slugId"], for(%{"key" => key} <- get_in(&1, ["teams", "nodes"]) || [], do: key)})}
+
+      {:ok, response} ->
+        {:error, {:unexpected_response, response}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   defp create_stage_label(label, {:ok, created}, group_id, team_id, prefix) do
     case create_label(%{name: label, parentId: group_id, teamId: team_id}) do
       {:ok, _id} -> {:cont, {:ok, created ++ ["#{prefix}/#{label}"]}}

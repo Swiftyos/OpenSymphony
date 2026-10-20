@@ -31,4 +31,6 @@ config :symphony_elixir,
   factories_dir: nil,
   # ConnTest requests use host "www.example.com"; the guard is tested explicitly.
   enforce_local_host: false,
-  password_iterations: 1_000
+  password_iterations: 1_000,
+  # Tests sync labels explicitly.
+  label_sync_on_boot: false

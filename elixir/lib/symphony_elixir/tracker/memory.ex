@@ -77,6 +77,24 @@ defmodule SymphonyElixir.Tracker.Memory do
     {:ok, []}
   end
 
+  @spec ensure_labels(String.t(), [String.t()]) :: {:ok, [String.t()]}
+  def ensure_labels(team_key, names) do
+    send_event({:memory_tracker_ensure_plain_labels, team_key, names})
+    {:ok, []}
+  end
+
+  # Teams come from the configured issues' identifiers (`PAY-1` -> `PAY`).
+  @spec project_team_keys([String.t()]) :: {:ok, %{String.t() => [String.t()]}}
+  def project_team_keys(slugs) do
+    issues = configured_issues()
+
+    {:ok,
+     Map.new(slugs, fn slug ->
+       teams = for %Issue{project_slug: ^slug} = issue <- issues, team = SymphonyElixir.IssueStage.team(issue), uniq: true, do: team
+       {slug, teams}
+     end)}
+  end
+
   defp issue_entries do
     Enum.filter(configured_issues(), &match?(%Issue{}, &1))
   end

@@ -280,6 +280,16 @@ defmodule SymphonyElixir.AuthTest do
 
       view |> element(~s(button[phx-value-id="#{ada_id}"]), "Approve") |> render_click()
       assert Users.get(ada_id).status == "active"
+      # The request leaves the rail at once.
+      refute render(view) =~ "Pending accounts"
+
+      post(build_conn(), "/signup", %{"username" => "lee", "email" => "lee@acme.test", "password" => @password, "password_confirmation" => @password})
+      send(view.pid, :observability_updated)
+      assert render(view) =~ "Pending accounts"
+      [%{id: lee_id}] = Users.list("pending")
+      view |> element(~s(button[phx-click="reject_account"][phx-value-id="#{lee_id}"])) |> render_click()
+      assert Users.get(lee_id) == nil
+      refute render(view) =~ "Pending accounts"
 
       conn = post(build_conn(), "/login", %{"login" => "ada", "password" => @password})
       assert redirected_to(conn) == "/"
