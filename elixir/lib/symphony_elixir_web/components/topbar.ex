@@ -9,6 +9,8 @@ defmodule SymphonyElixirWeb.Topbar do
 
   attr(:instance_name, :string, default: nil)
   attr(:current_user, :any, required: true)
+  attr(:teams, :list, default: [], doc: "team picker choices (%{key, name}); none hides the picker")
+  attr(:team, :string, default: nil)
   slot(:inner_block)
 
   @spec topbar(map()) :: Phoenix.LiveView.Rendered.t()
@@ -34,6 +36,16 @@ defmodule SymphonyElixirWeb.Topbar do
           <p class="ops-subtitle">Symphony agent factory</p>
         </div>
       </a>
+
+      <form :if={@teams != []} id="team-picker" class="team-picker" phx-change="pick_team" phx-hook="TeamPicker">
+        <label class="team-picker-label" for="team-picker-select">Team</label>
+        <select id="team-picker-select" name="team" class="team-picker-select">
+          <option value="all" selected={is_nil(@team)}>All teams</option>
+          <option :for={t <- @teams} value={t.key} selected={t.key == @team}>
+            {t.key}{if t.name, do: " · #{t.name}"}
+          </option>
+        </select>
+      </form>
 
       <div class="topbar-meta">
         {render_slot(@inner_block)}

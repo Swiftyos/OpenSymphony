@@ -300,6 +300,24 @@
 
   // ------------------------------------------------------------------ flow
 
+  // The default team's flow, unless it's empty and a project's flow has work
+  // (a team whose projects all run their own flows).
+  function issueCount(flow) {
+    return Object.keys((flow && flow.nodes) || {}).reduce(function (n, id) {
+      return n + (flow.nodes[id].count || 0);
+    }, 0);
+  }
+
+  function busiest(data) {
+    var flows = data.flows || {};
+    if (!data.team || issueCount(flows[data.team]) > 0) return data.team;
+    var best = null;
+    (data.teams || []).forEach(function (t) {
+      if (t.kind === "project" && issueCount(flows[t.key]) > (best ? issueCount(flows[best]) : 0)) best = t.key;
+    });
+    return best || data.team;
+  }
+
   function Flow(opts) {
     this.opts = opts;
     this.data = null;
@@ -370,7 +388,7 @@
       try {
         saved = window.localStorage.getItem("symphony.factory.team");
       } catch (_e) {}
-      this.team = [hash && hash[1], saved, data.team, teams[0]].filter(function (t) {
+      this.team = [hash && hash[1], saved, busiest(data), data.team, teams[0]].filter(function (t) {
         return t && teams.indexOf(t) !== -1;
       })[0];
       var stageHash = /stage=([a-z0-9-]+)/.exec(window.location.hash || "");

@@ -2033,6 +2033,41 @@ a.brand:hover {
   justify-self: start;
 }
 
+/* -- top-bar team picker */
+
+.team-picker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 auto 0 24px;
+}
+
+.team-picker-label {
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.team-picker-select {
+  min-width: 150px;
+  padding: 6px 28px 6px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--raised);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.86rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.team-picker-select:focus-visible {
+  outline: 2px solid var(--ink-2);
+  outline-offset: 2px;
+}
+
 /* -- AI flow designer (modal) */
 
 .fx-assist-modal {
@@ -2282,6 +2317,10 @@ a.brand:hover {
   .topbar {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .team-picker {
+    margin: 0;
   }
 
   .topbar-meta {

@@ -23,7 +23,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
     socket =
       socket
       |> assign(:instance_name, SymphonyElixir.Config.instance_name())
-      |> assign(:payload, load_payload(socket.assigns[:current_user]))
+      |> assign(:team_filter, nil)
+      |> assign_payload()
       |> assign(:now, DateTime.utc_now())
 
     if connected?(socket) do
@@ -32,6 +33,13 @@ defmodule SymphonyElixirWeb.DashboardLive do
     end
 
     {:ok, socket}
+  end
+
+  # `?team=PAY` narrows the whole dashboard to one team's work and projects.
+  @impl true
+  def handle_params(params, _uri, socket) do
+    team = params |> Map.get("team") |> then(&(is_binary(&1) && String.upcase(String.trim(&1))))
+    {:noreply, socket |> assign(:team_filter, team || nil) |> assign_payload()}
   end
 
   @impl true
@@ -44,7 +52,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   def handle_info(:observability_updated, socket) do
     {:noreply,
      socket
-     |> assign(:payload, load_payload(socket.assigns.current_user))
+     |> assign_payload()
      |> assign(:now, DateTime.utc_now())}
   end
 
@@ -157,6 +165,11 @@ defmodule SymphonyElixirWeb.DashboardLive do
       end
 
     {:reply, reply, socket}
+  end
+
+  def handle_event("pick_team", %{"team" => team}, socket) do
+    to = if team in ["", "all"], do: "/", else: "/?" <> URI.encode_query(%{"team" => team})
+    {:noreply, push_patch(socket, to: to)}
   end
 
   def handle_event("approve_account", %{"id" => id}, socket) do
@@ -341,7 +354,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   def render(assigns) do
     ~H"""
     <section class="dashboard-shell">
-      <.topbar instance_name={@instance_name} current_user={@current_user}>
+      <.topbar instance_name={@instance_name} current_user={@current_user} teams={@team_choices} team={@team_filter}>
         <span class="status-badge status-badge-live">
           <span class="status-badge-dot"></span>
           Live
@@ -589,13 +602,35 @@ defmodule SymphonyElixirWeb.DashboardLive do
     """
   end
 
-  defp load_payload(user) do
+  # The team picker offers the teams this person can see; an unknown or
+  # hidden team in the URL falls back to all teams.
+  defp assign_payload(socket) do
+    user = socket.assigns[:current_user]
     teams = if user, do: Enum.map(user.teams, & &1.key), else: []
 
-    orchestrator()
-    |> Presenter.state_payload(snapshot_timeout_ms(), teams: teams)
-    |> Visibility.filter_payload(user)
+    visible =
+      orchestrator()
+      |> Presenter.state_payload(snapshot_timeout_ms(), teams: teams)
+      |> Visibility.filter_payload(user)
+
+    choices = team_choices(visible, user)
+    team = if Enum.any?(choices, &(&1.key == socket.assigns.team_filter)), do: socket.assigns.team_filter
+
+    socket
+    |> assign(:team_choices, choices)
+    |> assign(:team_filter, team)
+    |> assign(:payload, Visibility.scope_to_team(visible, team))
   end
+
+  defp team_choices(%{factory: %{teams: entries}}, user) do
+    names = if user, do: Map.new(user.teams, &{&1.key, &1.name}), else: %{}
+
+    entries
+    |> Enum.filter(&(&1[:kind] == "team"))
+    |> Enum.map(&%{key: &1.key, name: &1.name || names[&1.key]})
+  end
+
+  defp team_choices(_payload, _user), do: []
 
   defp orchestrator do
     Endpoint.config(:orchestrator) || SymphonyElixir.Orchestrator
@@ -657,6 +692,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
       |> Enum.filter(&(&1["kind"] == kind))
       |> Enum.flat_map(&get_in(flows, [team, :nodes, &1["id"], :issues]))
     end)
+    # A project that inherits its team's flow shows the same issues as the team.
+    |> Enum.uniq_by(& &1.issue)
   end
 
   defp issues_in_kind(_payload, _kind), do: []

@@ -445,15 +445,16 @@
         priced = true;
       }
     });
-    // Across every team visible to this person. Project flows repeat issues
-    // their teams already count, so they're left out.
+    // Across every team visible to this person. A project that inherits its
+    // team's flow repeats the team's issues, so only projects with their own
+    // flow (whose issues teams leave out) are added.
     var shipped = 0;
     var loops = 0;
     var running = 0;
     var data = this.data;
     var projectKeys = {};
     (data.teams || []).forEach(function (t) {
-      if (t.kind === "project") projectKeys[t.key] = true;
+      if (t.kind === "project" && !t.custom) projectKeys[t.key] = true;
     });
     Object.keys(data.flows || {}).forEach(function (team) {
       if (projectKeys[team]) return;
@@ -660,6 +661,29 @@
     },
     updated: function () {
       sync(this.el, this);
+    }
+  };
+
+  // Top-bar team picker: remembers the last team per browser and restores it
+  // when the dashboard opens without one in the URL.
+  var TEAM_KEY = "symphony.team";
+  window.SymphonyHooks.TeamPicker = {
+    mounted: function () {
+      var select = this.el.querySelector("select");
+      var hook = this;
+      select.addEventListener("change", function () {
+        try {
+          window.localStorage.setItem(TEAM_KEY, select.value);
+        } catch (_e) {}
+      });
+      if (/[?&]team=/.test(window.location.search)) return;
+      var saved = null;
+      try {
+        saved = window.localStorage.getItem(TEAM_KEY);
+      } catch (_e) {}
+      if (saved && saved !== "all" && select.querySelector('option[value="' + saved.replace(/[^A-Za-z0-9_-]/g, "") + '"]')) {
+        hook.pushEvent("pick_team", { team: saved });
+      }
     }
   };
 

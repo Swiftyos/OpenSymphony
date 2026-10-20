@@ -29,6 +29,28 @@ defmodule SymphonyElixirWeb.Visibility do
     end
   end
 
+  @doc """
+  Narrows an already-filtered payload to one team's work: its issues, sessions,
+  spend, its flow and the flows of projects it works in. Unlike
+  `filter_payload/2` this is a view choice, not a permission, so host details
+  and agent accounts stay.
+  """
+  @spec scope_to_team(map(), String.t() | nil) :: map()
+  def scope_to_team(%{error: _} = payload, _team), do: payload
+  def scope_to_team(payload, nil), do: payload
+
+  def scope_to_team(payload, team) when is_binary(team) do
+    teams = MapSet.new([team])
+    visible? = fn identifier -> MapSet.member?(teams, team(identifier)) end
+
+    payload
+    |> Map.update(:running, [], &Enum.filter(&1, fn e -> visible?.(e.issue_identifier) end))
+    |> Map.update(:retrying, [], &Enum.filter(&1, fn e -> visible?.(e.issue_identifier) end))
+    |> Map.update(:projects, [], &team_projects(&1, visible?))
+    |> Map.update(:factory, nil, &restrict_factory(&1, visible?, teams))
+    |> then(fn p -> Map.put(p, :counts, %{running: length(p.running), retrying: length(p.retrying)}) end)
+  end
+
   @spec filter_issue(map(), Auth.User.t() | nil, String.t()) :: {:ok, map()} | :hidden
   def filter_issue(payload, user, identifier) do
     case visible_teams(user) do
@@ -53,6 +75,15 @@ defmodule SymphonyElixirWeb.Visibility do
     |> Map.put(:accounts, [])
     |> Map.update(:factory, nil, &restrict_factory(&1, visible?, teams))
     |> then(fn p -> Map.put(p, :counts, %{running: length(p.running), retrying: length(p.retrying)}) end)
+  end
+
+  # Projects with work but none of it this team's are left out.
+  defp team_projects(projects, visible?) do
+    Enum.flat_map(projects, fn project ->
+      issues = Map.get(project, :issues, [])
+      kept = Enum.filter(issues, &visible?.(&1[:issue_identifier]))
+      if issues != [] and kept == [], do: [], else: [Map.put(project, :issues, kept)]
+    end)
   end
 
   defp restrict_project_issues(project, visible?) do

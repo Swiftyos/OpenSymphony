@@ -312,6 +312,11 @@ defmodule SymphonyElixir.FactoryEditorTest do
       %{ada: ada, mia: mia}
     end
 
+    defp data_json(html) do
+      [_, json] = Regex.run(~r/data-json="([^"]*)"/, html)
+      json |> String.replace("&quot;", "\"") |> String.replace("&amp;", "&") |> String.replace("&#39;", "'") |> Jason.decode!()
+    end
+
     defp session_for(account),
       do: build_conn() |> Plug.Test.init_test_session(%{"user_id" => account.id, "session_version" => Users.get(account.id).session_version})
 
@@ -407,6 +412,30 @@ defmodule SymphonyElixir.FactoryEditorTest do
         System.put_env("PATH", path)
         File.rm_rf!(bin)
       end
+    end
+
+    test "the team picker narrows the dashboard to one team's work and projects", %{ada: ada, mia: mia} do
+      UsageLedger.observe_issue(%Issue{id: "1", identifier: "PAY-1", state: "Todo", project_slug: "checkout"})
+      UsageLedger.observe_issue(%Issue{id: "2", identifier: "WEB-1", state: "Todo", project_slug: "site"})
+
+      {:ok, view, html} = live(session_for(ada), "/")
+      assert html =~ ~s(<option value="all" selected="">All teams</option>)
+      assert html =~ ~s(<option value="WEB">)
+
+      render_change(element(view, "#team-picker"), %{"team" => "PAY"})
+      assert_patch(view, "/?team=PAY")
+      json = view |> element("#factory-data") |> render() |> data_json()
+      assert Enum.map(json["teams"], & &1["key"]) == ["PAY", "project:checkout"]
+
+      render_change(element(view, "#team-picker"), %{"team" => "all"})
+      assert_patch(view, "/")
+
+      # Teams the viewer can't see fall back to all of their own.
+      {:ok, member_view, html} = live(session_for(mia), "/?team=web")
+      assert html =~ ~s(<option value="all" selected="">All teams</option>)
+      refute html =~ ~s(<option value="WEB">)
+      json = member_view |> element("#factory-data") |> render() |> data_json()
+      assert Enum.map(json["teams"], & &1["key"]) == ["PAY", "project:checkout"]
     end
 
     test "AI drafts run in the background and are pushed when ready", %{mia: mia} do
