@@ -472,6 +472,31 @@ defmodule SymphonyElixir.FactoryEditorTest do
       assert render(view) =~ "isn&#39;t in a project this Symphony manages"
     end
 
+    test "the bell lists approvals and the chat panel shows an issue's transcript", %{mia: mia} do
+      template = Definition.default_template()
+      stages = Enum.map(template["stages"], &if(&1["id"] == "review", do: Map.put(&1, "approval", true), else: &1))
+      {:ok, _} = Store.put("PAY", %{template | "stages" => stages}, 0, "mia")
+      held = %Issue{id: "id-PAY-3", identifier: "PAY-3", title: "Held", state: "In Progress", labels: ["factory/merge", "needs-approval"]}
+      UsageLedger.observe_issue(%{held | state: "In Review", labels: []})
+      UsageLedger.observe_issue(held)
+      SymphonyElixir.Transcript.note("PAY-3", "Symphony moved the issue to Merge.")
+      on_exit(&SymphonyElixir.Transcript.reset/0)
+
+      {:ok, view, html} = live(session_for(mia), "/")
+      assert html =~ ~s(class="bell-count numeric")
+      refute html =~ "bell-panel"
+      assert render_click(view, "toggle_bell", %{}) =~ "bell-panel"
+      assert render_click(view, "close_bell", %{}) |> then(&(not (&1 =~ "bell-panel")))
+
+      html = render_click(view, "open_chat", %{"id" => "PAY-3"})
+      assert html =~ "chat-panel"
+      assert html =~ "Symphony moved the issue to Merge."
+      refute render_click(view, "close_chat", %{}) =~ "chat-panel"
+
+      # Issues the viewer can't see don't open.
+      refute render_click(view, "open_chat", %{"id" => "WEB-9"}) =~ "chat-panel"
+    end
+
     test "teams turn earned autonomy on and set the streak", %{mia: mia} do
       {:ok, view, _html} = live(session_for(mia), "/")
       render_hook(view, "factory_autopilot", %{"team" => "PAY", "enabled" => true, "streak" => 5})

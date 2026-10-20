@@ -415,6 +415,11 @@ defmodule SymphonyElixir.FactoryCoverageTest do
       costs = Map.new(payload.usage, &{&1.backend, &1.cost_usd})
       assert costs == %{"claude" => 4.0, "codex" => nil}
 
+      # Usage priced when it was spent keeps that price.
+      spent = %{input_tokens: 1, output_tokens: 1, cost_micros: 2_500_000}
+      UsageLedger.record_tokens(%{issue: issue("PAY-3", "Todo"), backend: "opencode"}, spent)
+      assert Enum.find(FactoryPresenter.payload([], settings).usage, &(&1.backend == "opencode")).cost_usd == 2.5
+
       # Transitions are reported per team, keyed "from>to", even ones the flow doesn't define.
       assert payload.flows["PAY"].edges == %{"todo>done" => 1}
       assert payload.flows["PAY"].nodes["done"].count == 1

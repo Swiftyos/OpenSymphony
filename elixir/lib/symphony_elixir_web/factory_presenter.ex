@@ -9,7 +9,7 @@ defmodule SymphonyElixirWeb.FactoryPresenter do
   """
 
   alias SymphonyElixir.Factory.Store
-  alias SymphonyElixir.{IssueStage, UsageLedger}
+  alias SymphonyElixir.{IssueStage, Pricing, UsageLedger}
 
   # Fixed harness order: color follows the harness, never its rank.
   @harnesses ["codex", "claude", "opencode"]
@@ -134,7 +134,7 @@ defmodule SymphonyElixirWeb.FactoryPresenter do
 
         {id,
          %{
-           issues: issues |> Enum.sort_by(& &1.since_ms, :desc) |> Enum.take(@issues_per_stage) |> Enum.map(&issue_row(&1, running_by_issue)),
+           issues: issues |> Enum.sort_by(& &1.since_ms, :desc) |> Enum.take(@issues_per_stage) |> Enum.map(&issue_row(&1, running_by_issue, definition)),
            count: length(issues),
            running: Enum.count(issues, &Map.has_key?(running_by_issue, &1.issue))
          }}
@@ -148,7 +148,7 @@ defmodule SymphonyElixirWeb.FactoryPresenter do
     %{nodes: nodes, edges: edges}
   end
 
-  defp issue_row(issue, running_by_issue) do
+  defp issue_row(issue, running_by_issue, definition) do
     agent = Map.get(running_by_issue, issue.issue)
 
     %{
@@ -162,7 +162,8 @@ defmodule SymphonyElixirWeb.FactoryPresenter do
       backend: agent && agent.backend,
       awaiting: issue[:awaiting_approval] == true,
       from: issue[:from],
-      to: issue[:to]
+      to: issue[:to],
+      knockbacks: knockbacks(issue, definition)
     }
   end
 
@@ -183,28 +184,26 @@ defmodule SymphonyElixirWeb.FactoryPresenter do
   def controls_enabled?(settings), do: settings.server.controls != false
 
   # Stored URLs can come from anywhere; only https ones are sent to the browser.
+  # How often each stage sent the issue back, e.g. %{"Test" => 2, "Review" => 1}.
+  defp knockbacks(issue, definition), do: SymphonyElixir.IssueReport.rounds(issue[:moves] || [], definition).knockbacks
+
   defp https_url("https://" <> _rest = url), do: url
   defp https_url(_url), do: nil
 
+  # Usage priced when it was spent is used as is. Older usage, recorded before
+  # pricing, is priced at today's rates (cache reads at the cached rate).
+  defp price_row(%{cost_micros: micros} = row, _pricing) when is_integer(micros) and micros > 0,
+    do: Map.put(row, :cost_usd, micros / 1_000_000)
+
   defp price_row(row, pricing) do
-    rates = Map.get(pricing, "#{row.backend}/#{row.model}") || Map.get(pricing, row.backend)
-
     cost =
-      case rates do
-        %{} ->
-          (row.input_tokens * rate(rates, "input_per_mtok") + row.output_tokens * rate(rates, "output_per_mtok")) / 1_000_000
-
-        _ ->
-          nil
+      if map_size(pricing) > 0 do
+        case Pricing.cost_micros(row.backend, row.model, row, DateTime.utc_now(), pricing) do
+          nil -> nil
+          micros -> micros / 1_000_000
+        end
       end
 
     Map.put(row, :cost_usd, cost)
-  end
-
-  defp rate(rates, key) do
-    case Map.get(rates, key) do
-      value when is_number(value) -> value
-      _ -> 0
-    end
   end
 end

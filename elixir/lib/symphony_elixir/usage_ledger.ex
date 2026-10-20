@@ -2,7 +2,7 @@ defmodule SymphonyElixir.UsageLedger do
   @moduledoc """
   Durable, cheap-to-read record of token usage and factory flow.
 
-  Token usage is kept per `{project, team, issue, backend, model}` so the
+  Token usage is kept per `{project, team, issue, backend, model, stage}` so the
   dashboard can slice cost by project, team, or task and split it by harness.
   Flow tracking records each issue's current factory node (state + stage) and
   counts every observed node-to-node transition, which is what the dashboard's
@@ -16,7 +16,7 @@ defmodule SymphonyElixir.UsageLedger do
   use GenServer
   require Logger
 
-  alias SymphonyElixir.{Config, IssueStage}
+  alias SymphonyElixir.{Config, IssueStage, Pricing}
   alias SymphonyElixir.Linear.Issue
 
   @usage_table :symphony_usage_ledger
@@ -25,9 +25,12 @@ defmodule SymphonyElixir.UsageLedger do
   @flush_interval_ms 10_000
   @format_version 1
 
-  # ETS tuple positions for usage rows: {key, input, output, meta}
+  # ETS tuple positions for usage rows: {key, input, output, meta, cached_input, cost_micros}
   @input_pos 2
   @output_pos 3
+  @cached_pos 5
+  @cost_pos 6
+  @max_moves 200
 
   @type node_name :: String.t()
 
@@ -42,14 +45,21 @@ defmodule SymphonyElixir.UsageLedger do
   @spec record_tokens(map(), map()) :: :ok
   def record_tokens(running_entry, token_delta)
 
-  def record_tokens(%{issue: %Issue{} = issue} = running_entry, %{input_tokens: input, output_tokens: output})
+  def record_tokens(%{issue: %Issue{} = issue} = running_entry, %{input_tokens: input, output_tokens: output} = delta)
       when is_integer(input) and is_integer(output) and (input > 0 or output > 0) do
     if ready?() do
       backend = Map.get(running_entry, :backend) || Config.agent_backend()
-      key = {issue.project_slug, team_key(issue.identifier), issue.identifier, backend, model_label(backend)}
+      # The stage the issue is in while the tokens are spent, so cost splits by stage.
+      stage = factory_node(issue)
+      model = usage_model(running_entry, delta, backend)
+      key = {issue.project_slug, team_key(issue.identifier), issue.identifier, backend, model, stage}
       meta = %{title: issue.title, project_name: issue.project_name, url: issue.url}
+      cached = min(Map.get(delta, :cached_input_tokens) || 0, input)
+      cost = usage_cost(backend, model, Map.put(delta, :cached_input_tokens, cached))
 
-      :ets.update_counter(@usage_table, key, [{@input_pos, input}, {@output_pos, output}], {key, 0, 0, meta})
+      counters = [{@input_pos, input}, {@output_pos, output}, {@cached_pos, cached}, {@cost_pos, cost}]
+
+      :ets.update_counter(@usage_table, key, counters, {key, 0, 0, meta, 0, 0})
       :ets.update_element(@usage_table, key, {4, meta})
       mark_dirty()
     end
@@ -58,6 +68,13 @@ defmodule SymphonyElixir.UsageLedger do
   end
 
   def record_tokens(_running_entry, _token_delta), do: :ok
+
+  # The model the harness reported for this usage, else the configured one.
+  defp usage_model(running_entry, delta, backend), do: Map.get(delta, :model) || Map.get(running_entry, :model) || model_label(backend)
+
+  # The harness's own cost when it reports one (Claude Code does); otherwise
+  # priced now, at the rates in force now (OpenRouter prices vary by time of day).
+  defp usage_cost(backend, model, delta), do: Map.get(delta, :cost_micros) || Pricing.cost_micros(backend, model, delta) || 0
 
   @doc """
   Records where an issue currently sits in the factory and counts the transition
@@ -75,17 +92,19 @@ defmodule SymphonyElixir.UsageLedger do
         # Same stage: keep where it came from, and save only if the title or
         # approval flag changed.
         [{^identifier, ^node, since, old}] ->
-          refresh_meta(identifier, node, since, old, Map.put(meta, :from, old[:from]))
+          refresh_meta(identifier, node, since, old, meta |> Map.put(:from, old[:from]) |> Map.put(:moves, old[:moves] || []))
 
-        [{^identifier, previous, _since, _meta}] ->
+        [{^identifier, previous, _since, old}] ->
           # Counted per team and project: their flows can share stage ids.
           key = {team_key(identifier), issue.project_slug, previous, node}
           :ets.update_counter(@edges_table, key, {2, 1}, {key, 0})
-          :ets.insert(@issues_table, {identifier, node, now, Map.put(meta, :from, previous)})
+          # The issue's own move history, in order, for knock-back counts and its report.
+          moves = Enum.take((old[:moves] || []) ++ [[previous, node, now]], -@max_moves)
+          :ets.insert(@issues_table, {identifier, node, now, meta |> Map.put(:from, previous) |> Map.put(:moves, moves)})
           mark_dirty()
 
         [] ->
-          :ets.insert(@issues_table, {identifier, node, now, Map.put(meta, :from, nil)})
+          :ets.insert(@issues_table, {identifier, node, now, meta |> Map.put(:from, nil) |> Map.put(:moves, [])})
           mark_dirty()
       end
     end
@@ -145,6 +164,28 @@ defmodule SymphonyElixir.UsageLedger do
       meta[:from]
     else
       _ -> nil
+    end
+  end
+
+  @doc """
+  One issue's record: its usage rows (per stage, harness, and model) and its
+  move history (`[from, to, at_ms]`, oldest first).
+  """
+  @spec issue_history(String.t()) :: %{usage: [map()], moves: [list()]}
+  def issue_history(identifier) do
+    if ready?() do
+      rows = :ets.tab2list(@usage_table)
+      usage = for {{_p, _t, ^identifier, _b, _m, _s}, _i, _o, _meta, _c, _cost} = row <- rows, do: usage_row(row)
+
+      moves =
+        case :ets.lookup(@issues_table, identifier) do
+          [{^identifier, _node, _since, meta}] -> meta[:moves] || []
+          [] -> []
+        end
+
+      %{usage: usage, moves: moves}
+    else
+      %{usage: [], moves: []}
     end
   end
 
@@ -290,9 +331,9 @@ defmodule SymphonyElixir.UsageLedger do
   end
 
   defp load_usage_row(row) do
-    key = {row["project"], row["team"], row["issue"], row["backend"], row["model"]}
+    key = {row["project"], row["team"], row["issue"], row["backend"], row["model"], row["stage"]}
     meta = %{title: row["title"], project_name: row["project_name"], url: row["url"]}
-    :ets.insert(@usage_table, {key, row["input_tokens"] || 0, row["output_tokens"] || 0, meta})
+    :ets.insert(@usage_table, {key, row["input_tokens"] || 0, row["output_tokens"] || 0, meta, row["cached_input_tokens"] || 0, row["cost_micros"] || 0})
   end
 
   defp edge_row({{team, project, from, to}, count}), do: %{team: team, project: project, from: from, to: to, count: count}
@@ -309,14 +350,16 @@ defmodule SymphonyElixir.UsageLedger do
       team: row["team"],
       url: row["url"],
       awaiting_approval: row["awaiting_approval"] == true,
-      from: row["from"]
+      from: row["from"],
+      moves: for([from, to, at] <- row["moves"] || [], do: [from, to, at])
     }
 
     :ets.insert(@issues_table, {row["issue"], row["node"], row["since_ms"], meta})
   end
 
-  defp usage_row({{project, team, issue, backend, model}, input, output, meta}) do
+  defp usage_row({{project, team, issue, backend, model, stage}, input, output, meta, cached, cost_micros}) do
     %{
+      stage: stage,
       project: project,
       project_name: meta[:project_name],
       team: team,
@@ -326,7 +369,10 @@ defmodule SymphonyElixir.UsageLedger do
       backend: backend,
       model: model,
       input_tokens: input,
-      output_tokens: output
+      output_tokens: output,
+      cached_input_tokens: cached,
+      # Priced when spent; 0 when no price was configured at the time.
+      cost_micros: cost_micros
     }
   end
 
@@ -341,11 +387,12 @@ defmodule SymphonyElixir.UsageLedger do
       team: meta[:team],
       url: meta[:url],
       awaiting_approval: meta[:awaiting_approval] == true,
-      from: meta[:from]
+      from: meta[:from],
+      moves: meta[:moves] || []
     }
   end
 
-  defp project_row({{project, team, issue, _backend, _model}, _in, _out, meta}), do: {project, team, issue, meta[:project_name]}
+  defp project_row({{project, team, issue, _backend, _model, _stage}, _in, _out, meta, _cached, _cost}), do: {project, team, issue, meta[:project_name]}
   defp project_row({issue, _node, _since, meta}), do: {meta[:project], meta[:team], issue, nil}
 
   # Teams with the most issues in the project first.

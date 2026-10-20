@@ -1509,11 +1509,29 @@
       line.appendChild(idEl);
       if (issue.backend) line.appendChild(el("span", "fx-dot h-" + issue.backend));
       line.appendChild(el("span", "fx-issue-title", issue.title || ""));
+      var kb = issue.knockbacks || {};
+      var kbText = Object.keys(kb)
+        .sort()
+        .map(function (name) {
+          return name + " " + kb[name];
+        })
+        .join(" · ");
+      if (kbText) {
+        var kbEl = el("span", "fx-knockbacks", "↩ " + kbText);
+        kbEl.title = "Times each stage sent this issue back";
+        line.appendChild(kbEl);
+      }
       if (issue.awaiting) {
         var next = issue.to && self.stageById(issue.to);
         line.appendChild(el("span", "fx-awaiting", "✋ approve" + (next ? " → " + next.name : "")));
       }
       line.appendChild(el("span", "fx-issue-age", since(issue.since_ms)));
+      var chat = button("💬", "fx-chat-btn", function () {
+        self.opts.push("open_chat", { id: issue.issue }, function () {});
+      });
+      chat.title = "Watch what its agents did";
+      chat.setAttribute("aria-label", "Transcript for " + issue.issue);
+      line.appendChild(chat);
       row.appendChild(line);
 
       // Held for approval: the agent already moved it here.

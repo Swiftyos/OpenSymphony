@@ -874,16 +874,18 @@ defmodule SymphonyElixir.Config.Schema do
         if Enum.all?(rates, &valid_pricing_rate?/1) do
           []
         else
-          [pricing: "#{key} must only set non-negative input_per_mtok / output_per_mtok numbers"]
+          [pricing: "#{key} must set non-negative input_per_mtok / output_per_mtok / cached_input_per_mtok numbers, or openrouter_model"]
         end
 
       {key, _rates} ->
-        [pricing: "#{key} must be a map of input_per_mtok / output_per_mtok"]
+        [pricing: "#{key} must be a map of input_per_mtok / output_per_mtok / cached_input_per_mtok, or openrouter_model"]
     end)
   end
 
+  defp valid_pricing_rate?({"openrouter_model", value}), do: is_binary(value) and String.trim(value) != ""
+
   defp valid_pricing_rate?({rate_key, value}) do
-    rate_key in ["input_per_mtok", "output_per_mtok"] and is_number(value) and value >= 0
+    rate_key in ["input_per_mtok", "output_per_mtok", "cached_input_per_mtok"] and is_number(value) and value >= 0
   end
 
   defp finalize_settings(settings, raw_config, opts) do

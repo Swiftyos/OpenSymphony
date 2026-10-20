@@ -142,11 +142,16 @@ defmodule SymphonyElixir.StageResult do
   defp move(issue, stage, target, definition, summary) do
     approval = Definition.requires_approval?(definition, stage)
     add_labels = if approval, do: [IssueStage.approval_label()], else: []
-    note = if approval, do: "_Moved to #{target["name"]} by Symphony; waiting for a person to approve._", else: "_Moved to #{target["name"]} by Symphony._"
+
+    note =
+      if approval,
+        do: "_Moved to #{target["name"]} by Agent Factory; waiting for a person to approve._",
+        else: "_Moved to #{target["name"]} by Agent Factory._"
 
     with :ok <- Tracker.create_comment(issue.id, "## #{stage["name"]}\n\n#{String.trim(summary)}\n\n#{note}"),
          :ok <- Tracker.set_stage(issue.id, target["linear_state"], target["label"], add_labels: add_labels) do
       Logger.info("Symphony moved #{issue.identifier} from=#{stage["id"]} to=#{target["id"]} approval=#{approval}")
+      finished(issue, target, definition)
       {:moved, target}
     else
       {:error, reason} ->
@@ -154,6 +159,19 @@ defmodule SymphonyElixir.StageResult do
         {:rejected, "Symphony accepted your result but couldn't update Linear (#{inspect(reason)}). Write the result file again to retry."}
     end
   end
+
+  @doc """
+  Posts the final report when a move (held or not) lands in a done stage. The
+  ledger is told about the move first, so the report includes it.
+  """
+  @spec finished(Issue.t(), map(), map()) :: :ok
+  def finished(issue, %{"kind" => "done"} = target, definition) do
+    SymphonyElixir.UsageLedger.observe_issue(%{issue | state: target["linear_state"], labels: []})
+    SymphonyElixir.IssueReport.post(issue, definition)
+    :ok
+  end
+
+  def finished(_issue, _target, _definition), do: :ok
 
   # Keep a record of every result; a rejected one must not be processed again.
   defp set_aside(file, outcome) do

@@ -88,6 +88,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp codex_message_handler(recipient, issue) do
     fn message ->
+      SymphonyElixir.Transcript.record(issue.identifier, message)
       send_codex_update(recipient, issue, message)
     end
   end
@@ -102,6 +103,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp agent_message_handler(recipient, issue) do
     fn message ->
+      SymphonyElixir.Transcript.record(issue.identifier, message)
       send_agent_update(recipient, issue, message)
     end
   end
@@ -293,9 +295,16 @@ defmodule SymphonyElixir.AgentRunner do
   # without one, the agent keeps working while the issue stays in its stage.
   defp after_turn(issue, workspace, issue_state_fetcher) do
     case StageResult.process(issue, workspace) do
-      {:moved, _target} -> {:done, issue}
-      {:rejected, feedback} -> {:retry, feedback}
-      :none -> issue |> continue_with_issue?(issue_state_fetcher) |> hold_unapproved_move(issue)
+      {:moved, target} ->
+        SymphonyElixir.Transcript.note(issue.identifier, "Agent Factory moved the issue to #{target["name"]}.")
+        {:done, issue}
+
+      {:rejected, feedback} ->
+        SymphonyElixir.Transcript.note(issue.identifier, "Agent Factory didn't accept the result: " <> feedback)
+        {:retry, feedback}
+
+      :none ->
+        issue |> continue_with_issue?(issue_state_fetcher) |> hold_unapproved_move(issue)
     end
   end
 
@@ -311,7 +320,7 @@ defmodule SymphonyElixir.AgentRunner do
     if moved_out? && Definition.requires_approval?(definition, from) && not IssueStage.awaiting_approval?(moved) do
       Logger.warning("Agent moved #{issue_context(moved)} from=#{from["id"]} to=#{to["id"]} itself; holding it for approval")
       Tracker.set_stage(moved.id, moved.state, to["label"], add_labels: [IssueStage.approval_label()])
-      note = "_Symphony: the agent moved this from #{from["name"]} to #{to["name"]} itself. Held for a person to approve._"
+      note = "_Agent Factory: the agent moved this from #{from["name"]} to #{to["name"]} itself. Held for a person to approve._"
       Tracker.create_comment(moved.id, note)
     end
 

@@ -80,10 +80,10 @@ defmodule SymphonyElixir.ConfigCoverageSchemaTest do
 
     test "rejects negative or unknown rate keys" do
       message = parse_error(%{"pricing" => %{"claude" => %{"input_per_mtok" => -1}}})
-      assert message =~ "claude must only set non-negative input_per_mtok / output_per_mtok numbers"
+      assert message =~ "claude must set non-negative input_per_mtok / output_per_mtok / cached_input_per_mtok numbers, or openrouter_model"
 
       message = parse_error(%{"pricing" => %{"codex" => %{"bogus_rate" => 1}}})
-      assert message =~ "codex must only set non-negative"
+      assert message =~ "codex must set non-negative"
     end
 
     test "rejects non-map pricing entries" do

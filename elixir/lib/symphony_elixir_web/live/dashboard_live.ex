@@ -12,9 +12,11 @@ defmodule SymphonyElixirWeb.DashboardLive do
   import SymphonyElixirWeb.Topbar
   require Logger
 
-  alias SymphonyElixir.{Auth, Config, FactoryControls, IssueStage, Orchestrator, Tracker, UsageLedger, Users}
+  alias SymphonyElixir.{Auth, Config, FactoryControls, IssueStage, Orchestrator, Tracker, Transcript}
   alias SymphonyElixir.Factory.{Assistant, Definition, Store}
   alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.UsageLedger
+  alias SymphonyElixir.Users
   alias SymphonyElixirWeb.{Endpoint, FactoryPresenter, ObservabilityPubSub, Presenter, UserAuth, Visibility}
   @runtime_tick_ms 1_000
 
@@ -25,6 +27,9 @@ defmodule SymphonyElixirWeb.DashboardLive do
       |> assign(:instance_name, SymphonyElixir.Config.instance_name())
       |> assign(:team_filter, nil)
       |> assign(:approval_error, nil)
+      |> assign(:bell_open, false)
+      |> assign(:chat_issue, nil)
+      |> assign(:chat_entries, [])
       |> assign_payload()
       |> assign(:now, DateTime.utc_now())
 
@@ -185,6 +190,18 @@ defmodule SymphonyElixirWeb.DashboardLive do
     {:reply, reply, socket}
   end
 
+  # The chat-style transcript of an issue's agents, if the viewer can see it.
+  def handle_event("open_chat", %{"id" => identifier}, socket) when is_binary(identifier) do
+    if Visibility.filter_issue(%{}, socket.assigns.current_user, identifier) == :hidden,
+      do: {:noreply, socket},
+      else: {:noreply, assign(socket, chat_issue: identifier, chat_entries: Transcript.entries(identifier))}
+  end
+
+  def handle_event("close_chat", _params, socket), do: {:noreply, assign(socket, chat_issue: nil, chat_entries: [])}
+
+  def handle_event("toggle_bell", _params, socket), do: {:noreply, assign(socket, :bell_open, !socket.assigns.bell_open)}
+  def handle_event("close_bell", _params, socket), do: {:noreply, assign(socket, :bell_open, false)}
+
   def handle_event("pick_team", %{"team" => team}, socket) do
     to = if team in ["", "all"], do: "/", else: "/?" <> URI.encode_query(%{"team" => team})
     {:noreply, push_patch(socket, to: to)}
@@ -258,6 +275,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
       if verdict == :sent_back, do: record_move(issue.id, socket.assigns.current_user, target)
       labels = issue.labels |> replace_stage_label(target["label"]) |> Enum.reject(&(String.downcase(&1) == approval))
       UsageLedger.observe_issue(%{issue | state: target["linear_state"], labels: labels})
+      if verdict == :approved, do: SymphonyElixir.StageResult.finished(issue, target, definition)
 
       Orchestrator.request_refresh()
       ObservabilityPubSub.broadcast_update()
@@ -275,6 +293,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
       record_move(issue.id, socket.assigns.current_user, target)
       labels = issue.labels |> replace_stage_label(target["label"]) |> Enum.reject(&(String.downcase(&1) == approval))
       UsageLedger.observe_issue(%{issue | state: target["linear_state"], labels: labels})
+      SymphonyElixir.StageResult.finished(issue, target, IssueStage.definition(issue))
 
       Orchestrator.request_refresh()
       ObservabilityPubSub.broadcast_update()
@@ -325,7 +344,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp record_move(issue_id, user, target) do
     where = if target["label"], do: "#{target["name"]} (#{target["linear_state"]} · #{IssueStage.label_prefix()}/#{target["label"]})", else: "#{target["name"]} (#{target["linear_state"]})"
 
-    body = "**Symphony:** #{escape_markdown(user.name)} (@#{escape_markdown(user.username)}) moved this to **#{escape_markdown(where)}** from the dashboard."
+    body = "**Agent Factory:** #{escape_markdown(user.name)} (@#{escape_markdown(user.username)}) moved this to **#{escape_markdown(where)}** from the dashboard."
 
     case Tracker.create_comment(issue_id, body) do
       :ok ->
@@ -428,6 +447,43 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <%= @payload.counts.running %>/<%= @payload.capacity.max_concurrent_agents %> agents
         </span>
         <span class="meta-item numeric"><%= polling_label(@payload[:polling]) %></span>
+        <div :if={!@payload[:error]} class="bell" phx-click-away="close_bell">
+          <button
+            type="button"
+            class={["bell-button", approvals(@payload, @now) != [] && "has-items"]}
+            phx-click="toggle_bell"
+            aria-expanded={to_string(@bell_open)}
+            aria-label={"#{length(approvals(@payload, @now))} waiting for your approval"}
+            title="Waiting for your approval"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15L6 16Z" /><path d="M10 20a2 2 0 0 0 4 0" /></svg>
+            <span :if={approvals(@payload, @now) != []} class="bell-count numeric"><%= length(approvals(@payload, @now)) %></span>
+          </button>
+          <div :if={@bell_open} class="bell-panel" role="menu">
+            <p class="bell-title">Waiting for your approval</p>
+            <p :if={approvals(@payload, @now) == []} class="bell-empty">Nothing is waiting. Approvals show up here.</p>
+            <div :for={item <- approvals(@payload, @now)} class="bell-item">
+              <div class="bell-item-head">
+                <a :if={item.href} class="attention-id" href={item.href} target="_blank" rel="noopener"><%= item.id %></a>
+                <span :if={!item.href} class="attention-id"><%= item.id %></span>
+                <span class="bell-item-title" title={item.text}><%= item.text %></span>
+                <span class="attention-age numeric"><%= item.age %></span>
+              </div>
+              <p class="approval-move"><%= item.from_name || "?" %> → <strong><%= item.stage %></strong></p>
+              <div class="approval-actions">
+                <a :if={item.href} class="fx-link-btn" href={item.href} target="_blank" rel="noopener">Read the ticket ↗</a>
+                <%= if Auth.can_move_issue?(@current_user, item.id, item.project) do %>
+                  <button type="button" class="fx-action" phx-click="send_back_issue" phx-value-id={item.issue_id} disabled={is_nil(item.from_name)}>
+                    ↩ Send back
+                  </button>
+                  <button type="button" class="fx-action is-primary" phx-click="approve_issue" phx-value-id={item.issue_id}>
+                    ✓ Approve
+                  </button>
+                <% end %>
+              </div>
+            </div>
+          </div>
+        </div>
         <a class="meta-link" href="/api/v1/state">API</a>
         <a class="meta-link" href="/metrics">Metrics</a>
       </.topbar>
@@ -519,6 +575,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                     <p class="approval-move"><%= item.from_name || "?" %> → <strong><%= item.stage %></strong></p>
                     <div class="approval-actions">
                       <a :if={item.href} class="fx-link-btn" href={item.href} target="_blank" rel="noopener">Read the ticket ↗</a>
+                      <button type="button" class="fx-link-btn" phx-click="open_chat" phx-value-id={item.id}>💬 Transcript</button>
                       <%= if Auth.can_move_issue?(@current_user, item.id, item.project) do %>
                         <button type="button" class="fx-action" phx-click="send_back_issue" phx-value-id={item.issue_id} disabled={is_nil(item.from_name)}>
                           ↩ Send back
@@ -595,6 +652,9 @@ defmodule SymphonyElixirWeb.DashboardLive do
                         </a>
                         <span class="issue-title" title={entry.issue_title}><%= entry.issue_title || "Untitled issue" %></span>
                         <span class="issue-project"><%= project_label(entry) %></span>
+                        <button type="button" class="chat-open" phx-click="open_chat" phx-value-id={entry.issue_identifier}>
+                          💬 Watch the agent
+                        </button>
                       </div>
                     </td>
                     <td>
@@ -606,6 +666,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                         <span><%= harness_label(entry.backend) %></span>
                         <span class="muted"><%= format_effort(entry.effort) %></span>
                       </div>
+                      <div :if={entry[:model] && entry[:model] != "default"} class="muted model-cell" title="Model"><%= entry[:model] %></div>
                       <div class="session-cell">
                         <span class="muted"><%= account_label(entry) %></span>
                         <button
@@ -695,6 +756,24 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </details>
         </footer>
       <% end %>
+      <aside :if={@chat_issue} class="chat-panel" aria-label={"Agent transcript for #{@chat_issue}"} phx-window-keydown="close_chat" phx-key="Escape">
+        <header class="chat-head">
+          <div>
+            <h2 class="chat-title">💬 <%= @chat_issue %></h2>
+            <p class="chat-sub">What its agents said and did, newest at the bottom. Updates live.</p>
+          </div>
+          <button type="button" class="chat-close" phx-click="close_chat" aria-label="Close transcript">✕</button>
+        </header>
+        <div id={"chat-log-#{@chat_issue}"} class="chat-log" phx-hook="ChatScroll">
+          <p :if={@chat_entries == []} class="chat-empty">
+            Nothing yet. Entries appear as soon as an agent works on this issue (since Symphony last started).
+          </p>
+          <div :for={entry <- @chat_entries} class={"chat-entry chat-#{entry.kind}"}>
+            <span class="chat-meta"><%= chat_kind(entry.kind) %> · <%= Calendar.strftime(entry.at, "%H:%M:%S") %></span>
+            <div class="chat-text"><%= entry.text %></div>
+          </div>
+        </div>
+      </aside>
     </section>
     """
   end
@@ -714,6 +793,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
     team = if Enum.any?(choices, &(&1.key == socket.assigns.team_filter)), do: socket.assigns.team_filter
 
     socket
+    |> assign(:chat_entries, Transcript.entries(socket.assigns[:chat_issue]))
     # An assign, not a template call: LiveView only re-renders template calls
     # when their arguments change, so an approved account would never clear.
     |> assign(:pending_accounts, pending_accounts(user))
@@ -774,6 +854,13 @@ defmodule SymphonyElixirWeb.DashboardLive do
     ]
     |> Enum.reject(&(&1.items == []))
   end
+
+  defp chat_kind("agent"), do: "Agent"
+  defp chat_kind("thinking"), do: "Thinking"
+  defp chat_kind("tool"), do: "Ran"
+  defp chat_kind("error"), do: "Error"
+  defp chat_kind("symphony"), do: "Agent Factory"
+  defp chat_kind(kind), do: kind
 
   defp attention_count(payload, pending_accounts) do
     payload

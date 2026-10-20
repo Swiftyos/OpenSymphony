@@ -121,6 +121,7 @@ defmodule SymphonyElixirWeb.Presenter do
       project_name: Map.get(entry, :project_name),
       labels: Map.get(entry, :labels, []),
       backend: Map.get(entry, :backend),
+      model: Map.get(entry, :model) || SymphonyElixir.UsageLedger.model_label(Map.get(entry, :backend)),
       effort: Map.get(entry, :effort),
       worker_host: Map.get(entry, :worker_host),
       workspace_path: Map.get(entry, :workspace_path),

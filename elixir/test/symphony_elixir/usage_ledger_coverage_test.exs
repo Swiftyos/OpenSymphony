@@ -31,6 +31,7 @@ defmodule SymphonyElixir.UsageLedgerCoverageTest do
   test "public API is a no-op while the ledger tables do not exist" do
     assert UsageLedger.snapshot() == %{usage: [], flow: %{edges: [], issues: []}}
     assert UsageLedger.projects() == %{}
+    assert UsageLedger.issue_history("PAY-1") == %{usage: [], moves: []}
     assert UsageLedger.reset() == :ok
     assert UsageLedger.observe_issue(%{identifier: "PAY-1"}) == :ok
     assert UsageLedger.record_tokens(%{issue: issue("PAY-1", "Todo")}, %{input_tokens: 1, output_tokens: 1}) == :ok

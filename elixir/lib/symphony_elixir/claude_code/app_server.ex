@@ -450,12 +450,14 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
     )
   end
 
-  defp assistant_part_payload(%{"type" => "tool_use", "name" => name}, usage, session_id)
+  defp assistant_part_payload(%{"type" => "tool_use", "name" => name} = tool_use, usage, session_id)
        when is_binary(name) do
     part_payload(
       %{
         "type" => "tool",
         "tool" => name,
+        # What the tool was asked to do, for the dashboard's transcript.
+        "input" => tool_use |> Map.get("input", %{}) |> Jason.encode!() |> String.slice(0, 2_000),
         "state" => %{"status" => "running"}
       },
       usage,

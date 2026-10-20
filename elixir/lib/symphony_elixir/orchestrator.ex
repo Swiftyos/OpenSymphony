@@ -1603,6 +1603,7 @@ defmodule SymphonyElixir.Orchestrator do
         codex_last_reported_input_tokens: max(last_reported_input, token_delta.input_reported),
         codex_last_reported_output_tokens: max(last_reported_output, token_delta.output_reported),
         codex_last_reported_total_tokens: max(last_reported_total, token_delta.total_reported),
+        codex_last_reported_cached_tokens: max(Map.get(running_entry, :codex_last_reported_cached_tokens, 0), token_delta.cached_reported),
         turn_count: turn_count_for_codex_update(turn_count, running_entry.session_id, update)
       }),
       token_delta
@@ -1649,7 +1650,11 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp integrate_agent_update(running_entry, %{event: event, timestamp: timestamp} = update) do
-    token_delta = extract_agent_token_delta(running_entry, update)
+    token_delta =
+      if Map.get(running_entry, :backend) == "claude",
+        do: claude_token_delta(running_entry, update),
+        else: extract_agent_token_delta(running_entry, update)
+
     agent_input_tokens = Map.get(running_entry, :agent_input_tokens, 0)
     agent_output_tokens = Map.get(running_entry, :agent_output_tokens, 0)
     agent_total_tokens = Map.get(running_entry, :agent_total_tokens, 0)
@@ -1672,11 +1677,68 @@ defmodule SymphonyElixir.Orchestrator do
         agent_last_reported_input_tokens: max(last_reported_input, token_delta.input_reported),
         agent_last_reported_output_tokens: max(last_reported_output, token_delta.output_reported),
         agent_last_reported_total_tokens: max(last_reported_total, token_delta.total_reported),
-        turn_count: turn_count_for_update(turn_count, running_entry.session_id, update)
+        turn_count: turn_count_for_update(turn_count, running_entry.session_id, update),
+        claude_last_cost_micros: Map.get(token_delta, :cost_reported, Map.get(running_entry, :claude_last_cost_micros, 0)),
+        model: Map.get(token_delta, :model) || Map.get(running_entry, :model)
       }),
       token_delta
     }
   end
+
+  # Claude Code reports usage per assistant message (not a running total) and
+  # leaves cache reads out of input_tokens. Its end-of-turn result has the
+  # turn's whole usage, and total_cost_usd, the session's running API-priced
+  # cost. So only turn results count: input includes cache reads and writes,
+  # cached is the cache reads, and cost is the increase in total_cost_usd.
+  defp claude_token_delta(running_entry, %{event: :turn_completed} = update) do
+    result = if is_map(update[:payload]), do: update[:payload], else: %{}
+    usage = if is_map(update[:usage]), do: update[:usage], else: Map.get(result, "usage") || %{}
+    count = fn key -> integer_like(Map.get(usage, key)) || 0 end
+
+    cached = count.("cache_read_input_tokens")
+    input = count.("input_tokens") + cached + count.("cache_creation_input_tokens")
+    output = count.("output_tokens")
+    total_micros = cost_micros(Map.get(result, "total_cost_usd"))
+    last_micros = Map.get(running_entry, :claude_last_cost_micros, 0)
+    # A smaller total means a new Claude process (a new session): count all of it.
+    cost = if is_integer(total_micros), do: total_micros - if(total_micros >= last_micros, do: last_micros, else: 0)
+
+    %{
+      input_tokens: input,
+      output_tokens: output,
+      total_tokens: input + output,
+      cached_input_tokens: cached,
+      cost_micros: cost,
+      model: claude_model(result),
+      cost_reported: total_micros || last_micros,
+      input_reported: Map.get(running_entry, :agent_last_reported_input_tokens, 0),
+      output_reported: Map.get(running_entry, :agent_last_reported_output_tokens, 0),
+      total_reported: Map.get(running_entry, :agent_last_reported_total_tokens, 0)
+    }
+  end
+
+  defp claude_token_delta(running_entry, _update) do
+    %{
+      input_tokens: 0,
+      output_tokens: 0,
+      total_tokens: 0,
+      input_reported: Map.get(running_entry, :agent_last_reported_input_tokens, 0),
+      output_reported: Map.get(running_entry, :agent_last_reported_output_tokens, 0),
+      total_reported: Map.get(running_entry, :agent_last_reported_total_tokens, 0)
+    }
+  end
+
+  # The model that did most of the turn's work (Claude Code lists every model it used).
+  defp claude_model(%{"modelUsage" => %{} = usage}) when map_size(usage) > 0 do
+    usage
+    |> Enum.max_by(fn {_model, stats} -> if(is_map(stats), do: Map.get(stats, "outputTokens", 0), else: 0) end)
+    |> elem(0)
+  end
+
+  defp claude_model(_result), do: nil
+
+  defp cost_micros(usd) when is_number(usd), do: round(usd * 1_000_000)
+  defp cost_micros(_usd), do: nil
 
   defp agent_server_pid_for_update(_existing, %{agent_server_pid: pid})
        when is_binary(pid),
@@ -2024,23 +2086,32 @@ defmodule SymphonyElixir.Orchestrator do
         usage,
         :codex_last_reported_total_tokens,
         &get_codex_token_usage/2
+      ),
+      # Cache reads are part of input and cost far less, so they're tracked apart.
+      compute_token_delta(
+        running_entry,
+        :cached,
+        usage,
+        :codex_last_reported_cached_tokens,
+        &get_codex_token_usage/2
       )
     }
     |> Tuple.to_list()
-    |> then(fn [input, output, total] ->
+    |> then(fn [input, output, total, cached] ->
       %{
         input_tokens: input.delta,
         output_tokens: output.delta,
         total_tokens: total.delta,
+        cached_input_tokens: cached.delta,
         input_reported: input.reported,
         output_reported: output.reported,
-        total_reported: total.reported
+        total_reported: total.reported,
+        cached_reported: cached.reported
       }
     end)
   end
 
   defp extract_agent_token_delta(running_entry, %{event: _, timestamp: _} = update) do
-    running_entry = running_entry || %{}
     usage = extract_agent_token_usage(update)
 
     {
@@ -2413,6 +2484,15 @@ defmodule SymphonyElixir.Orchestrator do
       !is_nil(integer_like(value))
     end)
   end
+
+  defp get_codex_token_usage(usage, :cached),
+    do:
+      payload_get(usage, [
+        "cachedInputTokens",
+        "cached_input_tokens",
+        :cachedInputTokens,
+        :cached_input_tokens
+      ])
 
   defp get_codex_token_usage(usage, :input),
     do:

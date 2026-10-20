@@ -39,7 +39,7 @@ defmodule SymphonyElixir.StageResultTest do
     assert {:moved, %{"id" => "review"}} = StageResult.process(issue, workspace)
     assert_receive {:memory_tracker_comment, "id-PAY-1", body}
     assert body =~ "## Implement\n\nOpened PR #4."
-    assert body =~ "_Moved to In Review by Symphony._"
+    assert body =~ "_Moved to In Review by Agent Factory._"
     assert_receive {:memory_tracker_stage_update, "id-PAY-1", "In Review", nil}
     assert [<<"accepted-", _::binary>>] = kept(workspace)
   end

@@ -9,7 +9,11 @@
 
   var SVG_NS = "http://www.w3.org/2000/svg";
   var HARNESS_LABELS = { codex: "Codex", claude: "Claude Code", opencode: "OpenCode" };
-  var GROUP_LABELS = { project: "Project", team: "Team", issue: "Task" };
+  var GROUP_LABELS = { project: "Project", team: "Team", stage: "Stage", model: "Model", issue: "Task" };
+
+  // Stage ids to names, from every flow on the page (stage ids are shared
+  // across flows when they mean the same thing).
+  var stageNames = {};
   var MAX_ROWS = 12;
 
   // ---------------------------------------------------------------- helpers
@@ -127,7 +131,7 @@
 
     var explorer = slot("explorer");
     var controls = el("div", "fx-controls");
-    this.groupSeg = this.segmented(["project", "team", "issue"], GROUP_LABELS, function (value) {
+    this.groupSeg = this.segmented(["project", "team", "stage", "model", "issue"], GROUP_LABELS, function (value) {
       self.state.group = value;
       self.persist();
       self.renderExplorer();
@@ -212,6 +216,11 @@
 
   Panel.prototype.setData = function (data) {
     this.data = data;
+    Object.keys(data.definitions || {}).forEach(function (key) {
+      (data.definitions[key].stages || []).forEach(function (st) {
+        stageNames[st.id] = st.name;
+      });
+    });
     if (!this.state.metric) this.state.metric = data.priced ? "cost" : "tokens";
     this.flow.setData(data);
     this.renderExplorer();
@@ -322,12 +331,16 @@
 
   function groupKey(row, group) {
     if (group === "team") return row.team || "—";
+    if (group === "stage") return row.stage || "—";
+    if (group === "model") return (row.backend || "?") + "|" + (row.model || "default");
     if (group === "issue") return row.issue || "—";
     return row.project || "unassigned";
   }
 
   function groupLabel(row, group) {
     if (group === "team") return { label: row.team || "No team", sub: "" };
+    if (group === "stage") return { label: row.stage ? stageNames[row.stage] || row.stage : "Before stages were tracked", sub: "" };
+    if (group === "model") return { label: row.model || "default", sub: row.backend || "" };
     if (group === "issue") return { label: row.issue || "Unknown", sub: row.title || "" };
     return { label: row.project_name || row.project || "Unassigned", sub: row.project_name ? row.project : "" };
   }
@@ -661,6 +674,20 @@
     },
     updated: function () {
       sync(this.el, this);
+    }
+  };
+
+  // Agent transcript: stay pinned to the newest entry unless the reader has
+  // scrolled up to read something older.
+  window.SymphonyHooks.ChatScroll = {
+    mounted: function () {
+      this.el.scrollTop = this.el.scrollHeight;
+    },
+    beforeUpdate: function () {
+      this.pinned = this.el.scrollHeight - this.el.scrollTop - this.el.clientHeight < 40;
+    },
+    updated: function () {
+      if (this.pinned) this.el.scrollTop = this.el.scrollHeight;
     }
   };
 
