@@ -765,6 +765,20 @@
     }
   };
 
+  // A dot-matrix number from data-value (traces and metrics KPIs).
+  window.SymphonyHooks.DotMatrix = {
+    mounted: function () {
+      this.draw();
+    },
+    updated: function () {
+      this.draw();
+    },
+    draw: function () {
+      this.el.textContent = "";
+      this.el.appendChild(dotMatrix(this.el.dataset.value || ""));
+    }
+  };
+
   // Chat composer: Enter sends, Shift+Enter is a new line, the box grows with
   // what is typed and empties once the message is accepted.
   window.SymphonyHooks.ChatComposer = {

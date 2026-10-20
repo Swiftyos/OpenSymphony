@@ -64,6 +64,7 @@ defmodule SymphonyElixirWeb.Router do
     live_session :signed_in, on_mount: {SymphonyElixirWeb.UserAuth, :require_user} do
       live("/", DashboardLive, :index)
       live("/admin/users", UsersLive, :index)
+      live("/insights", InsightsLive, :index)
     end
   end
 

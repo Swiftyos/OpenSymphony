@@ -48,6 +48,7 @@ defmodule SymphonyElixirWeb.ChatPanel do
           </p>
         </div>
         <div class="cx-head-actions">
+          <a class="cx-icon" href={"/insights?issue=#{@issue}"} title="Traces and metrics for this issue">≋</a>
           <a :if={@session && @session[:issue_url]} class="cx-icon" href={@session.issue_url} target="_blank" rel="noopener" title="Open in Linear">↗</a>
           <button type="button" class="cx-icon" phx-click="toggle_chat_size" title={if @expanded, do: "Narrow", else: "Widen"}>
             {if @expanded, do: "⇥", else: "⇤"}
