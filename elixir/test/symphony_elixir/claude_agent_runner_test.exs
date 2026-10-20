@@ -94,6 +94,103 @@ defmodule SymphonyElixir.ClaudeAgentRunnerTest do
     end
   end
 
+  describe "dashboard messages and the transcript" do
+    setup do
+      SymphonyElixir.AgentInbox.reset()
+      SymphonyElixir.Transcript.reset()
+
+      on_exit(fn ->
+        SymphonyElixir.AgentInbox.reset()
+        SymphonyElixir.Transcript.reset()
+      end)
+
+      :ok
+    end
+
+    test "queued messages are prepended to the next turn prompt" do
+      %{issue: issue, trace_file: trace_file} = runner_setup!("success", 3)
+      {:ok, message} = SymphonyElixir.AgentInbox.send_message(issue.identifier, "Please keep the API stable", "Mia")
+
+      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: fn _ -> {:ok, [%{issue | state: "Done"}]} end)
+
+      [prompt] = trace_prompts(trace_file)
+      assert prompt =~ "Message from Mia via the Symphony dashboard"
+      assert prompt =~ "Please keep the API stable"
+      assert prompt =~ "End of dashboard messages ========\n\nYou are an agent for this repository."
+
+      assert %{status: "delivered", delivery: "next_turn"} = SymphonyElixir.AgentInbox.get(issue.identifier, message.id)
+
+      assert [%{kind: "user", status: "delivered"}, %{kind: "turn", turn: 1, backend: "claude"}, %{kind: "agent", text: "Runner turn 1"}] =
+               SymphonyElixir.Transcript.entries(issue.identifier)
+    end
+
+    test "a message sent during the last turn gets one more turn to answer it" do
+      %{issue: issue, trace_file: trace_file} = runner_setup!("success", 1)
+
+      fetcher = fn _ids ->
+        count = Process.get(:inbox_fetches, 0) + 1
+        Process.put(:inbox_fetches, count)
+        if count == 1, do: {:ok, _} = SymphonyElixir.AgentInbox.send_message(issue.identifier, "Did you run the linter?", "Ada")
+        {:ok, [issue]}
+      end
+
+      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: fetcher)
+
+      assert [first, second] = trace_prompts(trace_file)
+      refute first =~ "Did you run the linter?"
+      assert second =~ "Message from Ada via the Symphony dashboard"
+      assert second =~ "continuation turn #2 of 2"
+      assert Process.get(:inbox_fetches) == 2
+    after
+      Process.delete(:inbox_fetches)
+    end
+
+    test "Claude tool calls, results and thinking become structured transcript entries" do
+      %{issue: issue} = runner_setup!("tools", 1)
+      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: fn _ -> {:ok, [%{issue | state: "Done"}]} end)
+
+      assert [
+               %{kind: "turn"},
+               %{kind: "thinking", text: "Check the tests first"},
+               %{kind: "command", command: "mix test", exit_code: 1, status: "failed", body: "1 failure", backend: "claude"},
+               %{kind: "edit", files: [%{path: "lib/a.ex", additions: 2, deletions: 1}], status: "completed"},
+               %{kind: "agent", text: "Fixed the failing test."}
+             ] = SymphonyElixir.Transcript.entries(issue.identifier)
+    end
+  end
+
+  defp runner_setup!(scenario, max_turns) do
+    test_root = temp_root!("inbox")
+    trace_env = "SYMP_TEST_CLAUDE_TRACE_#{System.unique_integer([:positive])}"
+    scenario_env = "SYMP_TEST_CLAUDE_SCENARIO_#{System.unique_integer([:positive])}"
+    on_exit(fn -> File.rm_rf(test_root) end)
+    on_exit(fn -> Enum.each([trace_env, scenario_env], &System.delete_env/1) end)
+
+    workspace_root = Path.join(test_root, "workspaces")
+    trace_file = Path.join(test_root, "claude-runner.trace")
+    launcher = write_fake_claude_launcher!(test_root, trace_env, scenario_env)
+    File.mkdir_p!(workspace_root)
+    System.put_env(trace_env, trace_file)
+    System.put_env(scenario_env, scenario)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      agent_backend: "claude",
+      workspace_root: workspace_root,
+      hook_after_create: "printf '# test\\n' > README.md",
+      claude_command: launcher,
+      max_turns: max_turns
+    )
+
+    identifier = "MT-INBOX-#{System.unique_integer([:positive])}"
+    %{issue: issue_fixture("issue-" <> identifier, identifier, "Answer messages"), trace_file: trace_file}
+  end
+
+  defp trace_prompts(trace_file) do
+    for "JSON:" <> json <- String.split(File.read!(trace_file), "\n", trim: true) do
+      json |> Jason.decode!() |> get_in(["message", "content"])
+    end
+  end
+
   defp issue_fixture(id, identifier, title) do
     %Issue{
       id: id,
@@ -150,6 +247,12 @@ defmodule SymphonyElixir.ClaudeAgentRunnerTest do
             printf '%s\\n' "{\\"type\\":\\"system\\",\\"subtype\\":\\"init\\",\\"session_id\\":\\"$session_id\\"}"
             printf '%s\\n' "{\\"type\\":\\"assistant\\",\\"message\\":{\\"content\\":[{\\"type\\":\\"text\\",\\"text\\":\\"Runner turn $turn\\"}],\\"usage\\":{\\"input\\":8,\\"output\\":2,\\"reasoning\\":1}}}"
             printf '%s\\n' "{\\"type\\":\\"result\\",\\"subtype\\":\\"success\\",\\"session_id\\":\\"$session_id\\",\\"uuid\\":\\"runner-result-$turn\\",\\"usage\\":{\\"input\\":8,\\"output\\":2,\\"reasoning\\":1,\\"total\\":11}}"
+            ;;
+          tools)
+            printf '%s\\n' '{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"Check the tests first"},{"type":"tool_use","id":"tu1","name":"Bash","input":{"command":"mix test"}},{"type":"tool_use","id":"tu2","name":"Edit","input":{"file_path":"lib/a.ex","old_string":"a","new_string":"b\\nc"}}]}}'
+            printf '%s\\n' '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","is_error":true,"content":"Exit code 1\\n1 failure"},{"type":"tool_result","tool_use_id":"tu2","content":[{"type":"text","text":"edited"}]}]}}'
+            printf '%s\\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"Fixed the failing test."}]}}'
+            printf '%s\\n' "{\\"type\\":\\"result\\",\\"subtype\\":\\"success\\",\\"session_id\\":\\"$session_id\\",\\"uuid\\":\\"runner-result-$turn\\"}"
             ;;
           *)
             printf '%s\\n' "{\\"type\\":\\"result\\",\\"subtype\\":\\"error\\",\\"session_id\\":\\"$session_id\\",\\"is_error\\":true,\\"message\\":\\"unexpected scenario\\"}"

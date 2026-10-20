@@ -5,6 +5,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
 
+  alias SymphonyElixir.AgentInbox
   alias SymphonyElixir.AgentRoute
   alias SymphonyElixir.AppServer
   alias SymphonyElixir.ClaudeCode.Tooling, as: ClaudeCodeTooling
@@ -19,6 +20,7 @@ defmodule SymphonyElixir.AgentRunner do
   alias SymphonyElixir.SessionStore
   alias SymphonyElixir.StageResult
   alias SymphonyElixir.Tracker
+  alias SymphonyElixir.Transcript
   alias SymphonyElixir.Workspace
 
   @type worker_host :: String.t() | nil
@@ -81,15 +83,22 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp run_backend_turns(workspace, issue, update_recipient, opts, worker_host, route) do
-    case route.backend do
-      "codex" -> run_codex_turns(workspace, issue, update_recipient, opts, worker_host, route)
-      _ -> run_agent_turns(workspace, issue, update_recipient, opts, worker_host, route)
+    # Lets dashboard messages (SymphonyElixir.AgentInbox) find this run.
+    AgentInbox.register_runner(issue, route.backend)
+
+    try do
+      case route.backend do
+        "codex" -> run_codex_turns(workspace, issue, update_recipient, opts, worker_host, route)
+        _ -> run_agent_turns(workspace, issue, update_recipient, opts, worker_host, route)
+      end
+    after
+      AgentInbox.unregister_runner(issue.identifier)
     end
   end
 
   defp codex_message_handler(recipient, issue) do
     fn message ->
-      SymphonyElixir.Transcript.record(issue.identifier, message)
+      Transcript.record(issue.identifier, message, backend: "codex")
       send_codex_update(recipient, issue, message)
     end
   end
@@ -102,9 +111,9 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp send_codex_update(_recipient, _issue, _message), do: :ok
 
-  defp agent_message_handler(recipient, issue) do
+  defp agent_message_handler(recipient, issue, backend) do
     fn message ->
-      SymphonyElixir.Transcript.record(issue.identifier, message)
+      Transcript.record(issue.identifier, message, backend: backend)
       send_agent_update(recipient, issue, message)
     end
   end
@@ -167,7 +176,7 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
-    prompt = build_codex_turn_prompt(issue, opts, turn_number, max_turns)
+    prompt = turn_prompt(issue, build_codex_turn_prompt(issue, opts, turn_number, max_turns), turn_number, "codex")
 
     with {:ok, turn_session} <-
            CodexAppServer.run_turn(
@@ -203,9 +212,8 @@ defmodule SymphonyElixir.AgentRunner do
           )
 
         {:continue, refreshed_issue} ->
-          Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
-
-          :ok
+          {recipient, fetcher} = {codex_update_recipient, issue_state_fetcher}
+          last_codex_turn(app_session, workspace, refreshed_issue, recipient, opts, fetcher, turn_number, max_turns)
 
         {:done, _refreshed_issue} ->
           :ok
@@ -280,7 +288,8 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp do_run_agent_turns(app_session, workspace, issue, agent_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
-    prompt = build_agent_turn_prompt(issue, opts, turn_number, max_turns)
+    backend = Keyword.get(opts, :backend)
+    prompt = turn_prompt(issue, build_agent_turn_prompt(issue, opts, turn_number, max_turns), turn_number, backend)
 
     with {:ok, turn_session} <-
            AppServer.run_turn(
@@ -288,7 +297,7 @@ defmodule SymphonyElixir.AgentRunner do
              prompt,
              issue,
              backend: Keyword.get(opts, :backend),
-             on_message: agent_message_handler(agent_update_recipient, issue)
+             on_message: agent_message_handler(agent_update_recipient, issue, backend)
            ) do
       Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
 
@@ -316,9 +325,8 @@ defmodule SymphonyElixir.AgentRunner do
           )
 
         {:continue, refreshed_issue} ->
-          Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
-
-          :ok
+          {recipient, fetcher} = {agent_update_recipient, issue_state_fetcher}
+          last_agent_turn(app_session, workspace, refreshed_issue, recipient, opts, fetcher, turn_number, max_turns)
 
         {:done, _refreshed_issue} ->
           :ok
@@ -337,16 +345,50 @@ defmodule SymphonyElixir.AgentRunner do
       "Continue from where you left off: don't redo work you've finished, and finish the stage as its instructions describe."
   end
 
+  # Every turn starts with a transcript marker; dashboard messages that are
+  # still queued are delivered here, ahead of the turn's own prompt.
+  defp turn_prompt(issue, prompt, turn_number, backend) do
+    Transcript.turn_started(issue.identifier, %{turn: turn_number, stage: IssueStage.stage(issue), backend: backend})
+    AgentInbox.prompt_section(AgentInbox.take_queued(issue.identifier)) <> prompt
+  end
+
+  # At agent.max_turns the run hands back to the orchestrator, which dispatches
+  # the issue again. If people sent messages during the last turn, run one more
+  # turn (once per run) so the agent answers them now.
+  defp last_codex_turn(app_session, workspace, issue, recipient, opts, fetcher, turn, max_turns) do
+    case bonus_turn_opts(issue, opts) do
+      nil -> :ok
+      next -> do_run_codex_turns(app_session, workspace, issue, recipient, next, fetcher, turn + 1, max_turns + 1)
+    end
+  end
+
+  defp last_agent_turn(app_session, workspace, issue, recipient, opts, fetcher, turn, max_turns) do
+    case bonus_turn_opts(issue, opts) do
+      nil -> :ok
+      next -> do_run_agent_turns(app_session, workspace, issue, recipient, next, fetcher, turn + 1, max_turns + 1)
+    end
+  end
+
+  defp bonus_turn_opts(issue, opts) do
+    if Keyword.get(opts, :inbox_bonus_turn) != true and AgentInbox.queued?(issue.identifier) do
+      Logger.info("Running one more turn for #{issue_context(issue)} to deliver dashboard messages")
+      opts |> Keyword.delete(:result_feedback) |> Keyword.put(:inbox_bonus_turn, true)
+    else
+      Logger.info("Reached agent.max_turns for #{issue_context(issue)} with issue still active; returning control to orchestrator")
+      nil
+    end
+  end
+
   # Symphony moves the issue: a result file the agent wrote decides the move;
   # without one, the agent keeps working while the issue stays in its stage.
   defp after_turn(issue, workspace, issue_state_fetcher) do
     case StageResult.process(issue, workspace) do
       {:moved, target} ->
-        SymphonyElixir.Transcript.note(issue.identifier, "Agent Factory moved the issue to #{target["name"]}.")
+        Transcript.note(issue.identifier, "Agent Factory moved the issue to #{target["name"]}.")
         {:done, issue}
 
       {:rejected, feedback} ->
-        SymphonyElixir.Transcript.note(issue.identifier, "Agent Factory didn't accept the result: " <> feedback)
+        Transcript.note(issue.identifier, "Agent Factory didn't accept the result: " <> feedback)
         {:retry, feedback}
 
       :none ->

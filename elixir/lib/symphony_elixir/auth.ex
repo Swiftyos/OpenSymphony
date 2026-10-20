@@ -249,6 +249,15 @@ defmodule SymphonyElixir.Auth do
   end
 
   @doc """
+  Whether the user may send a message to the agent working on an issue (by
+  identifier) from the dashboard: the same people who may move it. `nil` is an
+  API-token client, which has full access.
+  """
+  @spec can_message_agent?(User.t() | nil, String.t() | nil) :: boolean()
+  def can_message_agent?(nil, _identifier), do: true
+  def can_message_agent?(user, identifier), do: can_move?(user, identifier)
+
+  @doc """
   Whether the user may change factory-wide stage controls and approve accounts.
   """
   @spec can_control?(User.t() | nil) :: boolean()

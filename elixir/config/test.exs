@@ -25,6 +25,7 @@ config :symphony_elixir,
 # Keep the usage ledger in memory during tests; never touch ~/.symphony.
 config :symphony_elixir,
   usage_ledger_path: nil,
+  agent_inbox_path: nil,
   factory_controls_path: nil,
   secret_key_base_path: nil,
   users_path: nil,

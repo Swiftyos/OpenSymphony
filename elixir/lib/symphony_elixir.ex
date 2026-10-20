@@ -36,6 +36,8 @@ defmodule SymphonyElixir.Application do
       SymphonyElixir.UsageLedger,
       SymphonyElixir.SessionStore,
       SymphonyElixir.Transcript,
+      {Registry, keys: :unique, name: SymphonyElixir.AgentInbox.Registry},
+      SymphonyElixir.AgentInbox,
       SymphonyElixir.Pricing,
       SymphonyElixir.Factory.Store,
       SymphonyElixir.Users,

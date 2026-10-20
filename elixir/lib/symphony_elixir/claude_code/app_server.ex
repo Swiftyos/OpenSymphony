@@ -397,6 +397,10 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
         emit_assistant_updates(on_message, session, payload)
         {:continue, true}
 
+      {:ok, %{"type" => "user"} = payload} ->
+        emit_tool_results(on_message, session, payload)
+        {:continue, true}
+
       {:ok, %{"type" => "system", "subtype" => "init"} = payload} ->
         maybe_log_session_mismatch(session.session_id, payload["session_id"])
         {:continue, true}
@@ -430,6 +434,42 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
     end)
   end
 
+  # Tool results come back as `user` messages; the transcript pairs each with
+  # its tool_use by id.
+  defp emit_tool_results(on_message, session, payload) do
+    for %{"type" => "tool_result", "tool_use_id" => id} = result <- assistant_content_items(payload), is_binary(id) do
+      part = %{
+        "type" => "tool_result",
+        "callID" => id,
+        "output" => tool_result_output(result["content"]),
+        "is_error" => result["is_error"] == true
+      }
+
+      emit_message(
+        on_message,
+        "message.part.updated",
+        %{session_id: session.session_id, payload: part_payload(part, nil, session.session_id)},
+        session.metadata
+      )
+    end
+
+    :ok
+  end
+
+  defp tool_result_output(content) when is_binary(content), do: String.slice(content, 0, 20_000)
+
+  defp tool_result_output(content) when is_list(content) do
+    content
+    |> Enum.map_join("\n", fn
+      %{"type" => "text", "text" => text} when is_binary(text) -> text
+      %{"type" => type} -> "[#{type}]"
+      _ -> ""
+    end)
+    |> tool_result_output()
+  end
+
+  defp tool_result_output(_content), do: ""
+
   defp assistant_content_items(%{"message" => %{"content" => content}}) when is_list(content), do: content
   defp assistant_content_items(_payload), do: []
 
@@ -446,6 +486,13 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
       session_id
     )
   end
+
+  defp assistant_part_payload(%{"type" => "thinking", "thinking" => text}, usage, session_id) when is_binary(text),
+    do: assistant_part_payload(%{"type" => "reasoning", "text" => text}, usage, session_id)
+
+  # Redacted thinking carries no readable text.
+  defp assistant_part_payload(%{"type" => "redacted_thinking"}, usage, session_id),
+    do: part_payload(%{"type" => "step-start"}, usage, session_id)
 
   defp assistant_part_payload(%{"type" => type, "text" => text}, usage, session_id)
        when type in ["thinking", "reasoning"] and is_binary(text) do
@@ -465,8 +512,10 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
       %{
         "type" => "tool",
         "tool" => name,
+        "callID" => tool_use["id"],
         # What the tool was asked to do, for the dashboard's transcript.
         "input" => tool_use |> Map.get("input", %{}) |> Jason.encode!() |> String.slice(0, 2_000),
+        "args" => tool_args(tool_use["input"]),
         "state" => %{"status" => "running"}
       },
       usage,
@@ -484,6 +533,16 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
       session_id
     )
   end
+
+  # Large values (a file written in full) are cut so events stay small.
+  defp tool_args(%{} = input) do
+    Map.new(input, fn
+      {key, value} when is_binary(value) -> {key, String.slice(value, 0, 20_000)}
+      pair -> pair
+    end)
+  end
+
+  defp tool_args(_input), do: %{}
 
   defp part_payload(part, usage, session_id) do
     part =

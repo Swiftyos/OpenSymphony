@@ -4,12 +4,13 @@ defmodule SymphonyElixir.Codex.AppServer do
   """
 
   require Logger
-  alias SymphonyElixir.{Accounts, Codex.DynamicTool, Codex.TraceLog, Config, Sandbox, SSH, Telemetry}
+  alias SymphonyElixir.{Accounts, AgentInbox, Codex.DynamicTool, Codex.TraceLog, Config, Sandbox, SSH, Telemetry}
 
   @initialize_id 1
   @thread_start_id 2
   @turn_start_id 3
   @thread_resume_id 4
+  @steer_id_prefix "symphony-steer:"
   @port_line_bytes 1_048_576
   @max_stream_log_bytes 1_000
   @non_interactive_tool_input_answer "This is a non-interactive session. Operator input is unavailable."
@@ -105,6 +106,18 @@ defmodule SymphonyElixir.Codex.AppServer do
         Logger.info("Codex session started for #{issue_context(issue)} session_id=#{session_id}")
         TraceLog.put_context(trace_context(issue, session_id, thread_id, turn_id, turn_number))
 
+        loop_ctx = %{
+          tool_executor: tool_executor,
+          auto_approve_requests: auto_approve_requests,
+          issue: issue,
+          thread_id: thread_id,
+          turn_id: turn_id,
+          steering: MapSet.new()
+        }
+
+        # Dashboard messages for this issue now reach this process to steer the turn.
+        AgentInbox.codex_turn(issue, %{thread_id: thread_id, turn_id: turn_id})
+
         try do
           emit_message(
             on_message,
@@ -117,7 +130,7 @@ defmodule SymphonyElixir.Codex.AppServer do
             metadata
           )
 
-          case await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
+          case await_turn_completion(port, on_message, loop_ctx) do
             {:ok, result} ->
               Logger.info("Codex session completed for #{issue_context(issue)} session_id=#{session_id}")
 
@@ -145,6 +158,7 @@ defmodule SymphonyElixir.Codex.AppServer do
               {:error, reason}
           end
         after
+          AgentInbox.codex_turn(issue, nil)
           TraceLog.clear_context()
         end
 
@@ -413,42 +427,80 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
-    receive_loop(
-      port,
-      on_message,
-      Config.settings!().codex.turn_timeout_ms,
-      "",
-      tool_executor,
-      auto_approve_requests
-    )
+  defp await_turn_completion(port, on_message, ctx) do
+    receive_loop(port, on_message, Config.settings!().codex.turn_timeout_ms, "", ctx)
   end
 
-  defp receive_loop(port, on_message, timeout_ms, pending_line, tool_executor, auto_approve_requests) do
+  # `ctx` carries the tool executor, approval mode, and the active turn (for
+  # `turn/steer`). Dashboard messages arrive as `{:agent_inbox, message_id}`.
+  defp receive_loop(port, on_message, timeout_ms, pending_line, ctx) do
     receive do
       {^port, {:data, {:eol, chunk}}} ->
         complete_line = pending_line <> to_string(chunk)
-        handle_incoming(port, on_message, complete_line, timeout_ms, tool_executor, auto_approve_requests)
+        handle_incoming(port, on_message, complete_line, timeout_ms, ctx)
 
       {^port, {:data, {:noeol, chunk}}} ->
-        receive_loop(
-          port,
-          on_message,
-          timeout_ms,
-          pending_line <> to_string(chunk),
-          tool_executor,
-          auto_approve_requests
-        )
+        receive_loop(port, on_message, timeout_ms, pending_line <> to_string(chunk), ctx)
 
       {^port, {:exit_status, status}} ->
         {:error, {:port_exit, status}}
+
+      {:agent_inbox, message_id} when is_binary(message_id) ->
+        receive_loop(port, on_message, timeout_ms, pending_line, steer(port, ctx, message_id))
     after
       timeout_ms ->
         {:error, :turn_timeout}
     end
   end
 
-  defp handle_incoming(port, on_message, data, timeout_ms, tool_executor, auto_approve_requests) do
+  defp steer(port, %{issue: %{identifier: identifier}, turn_id: turn_id} = ctx, message_id)
+       when is_binary(identifier) and is_binary(turn_id) do
+    with false <- MapSet.member?(ctx.steering, message_id),
+         %{status: "queued"} = message <- AgentInbox.get(identifier, message_id) do
+      send_message(port, %{
+        "id" => @steer_id_prefix <> message_id,
+        "method" => "turn/steer",
+        "params" => %{
+          "threadId" => ctx.thread_id,
+          "expectedTurnId" => turn_id,
+          "input" => [%{"type" => "text", "text" => AgentInbox.steer_text(message)}]
+        }
+      })
+
+      %{ctx | steering: MapSet.put(ctx.steering, message_id)}
+    else
+      _ -> ctx
+    end
+  end
+
+  defp steer(_port, ctx, _message_id), do: ctx
+
+  # The steer response arrives among the turn's notifications. On an error
+  # (the turn ended, or another turn is active) the message stays queued for
+  # the next turn prompt.
+  defp handle_steer_response(message_id, payload, ctx) do
+    case payload do
+      %{"result" => %{}} ->
+        Logger.info("Steered Codex turn with a dashboard message #{issue_context(ctx.issue)} message_id=#{message_id}")
+        AgentInbox.mark_delivered(ctx.issue.identifier, message_id, "steered")
+
+      other ->
+        reason = inspect(other["error"] || other, limit: 5)
+        Logger.info("Codex turn/steer failed #{issue_context(ctx.issue)} message_id=#{message_id}: #{reason}")
+    end
+
+    %{ctx | steering: MapSet.delete(ctx.steering, message_id)}
+  end
+
+  defp track_turn(ctx, %{"method" => "turn/started", "params" => %{"turn" => %{"id" => turn_id}}})
+       when is_binary(turn_id) do
+    if turn_id != ctx.turn_id, do: AgentInbox.codex_turn(ctx.issue, %{thread_id: ctx.thread_id, turn_id: turn_id})
+    %{ctx | turn_id: turn_id}
+  end
+
+  defp track_turn(ctx, _payload), do: ctx
+
+  defp handle_incoming(port, on_message, data, timeout_ms, ctx) do
     payload_string = to_string(data)
 
     case Jason.decode(payload_string) do
@@ -482,16 +534,10 @@ defmodule SymphonyElixir.Codex.AppServer do
 
       {:ok, %{"method" => method} = payload}
       when is_binary(method) ->
-        handle_turn_method(
-          port,
-          on_message,
-          payload,
-          payload_string,
-          method,
-          timeout_ms,
-          tool_executor,
-          auto_approve_requests
-        )
+        handle_turn_method(port, on_message, payload, payload_string, method, timeout_ms, track_turn(ctx, payload))
+
+      {:ok, %{"id" => @steer_id_prefix <> message_id} = payload} ->
+        receive_loop(port, on_message, timeout_ms, "", handle_steer_response(message_id, payload, ctx))
 
       {:ok, payload} ->
         emit_message(
@@ -504,7 +550,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           metadata_from_message(port, payload)
         )
 
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+        receive_loop(port, on_message, timeout_ms, "", ctx)
 
       {:error, _reason} ->
         log_non_json_stream_line(payload_string, "turn stream")
@@ -521,7 +567,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           )
         end
 
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+        receive_loop(port, on_message, timeout_ms, "", ctx)
     end
   end
 
@@ -538,16 +584,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     )
   end
 
-  defp handle_turn_method(
-         port,
-         on_message,
-         payload,
-         payload_string,
-         method,
-         timeout_ms,
-         tool_executor,
-         auto_approve_requests
-       ) do
+  defp handle_turn_method(port, on_message, payload, payload_string, method, timeout_ms, ctx) do
     metadata = metadata_from_message(port, payload)
 
     case maybe_handle_approval_request(
@@ -557,8 +594,8 @@ defmodule SymphonyElixir.Codex.AppServer do
            payload_string,
            on_message,
            metadata,
-           tool_executor,
-           auto_approve_requests
+           ctx.tool_executor,
+           ctx.auto_approve_requests
          ) do
       :input_required ->
         emit_message(
@@ -571,7 +608,7 @@ defmodule SymphonyElixir.Codex.AppServer do
         {:error, {:turn_input_required, payload}}
 
       :approved ->
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+        receive_loop(port, on_message, timeout_ms, "", ctx)
 
       :approval_required ->
         emit_message(
@@ -605,7 +642,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           )
 
           Logger.debug("Codex notification: #{inspect(method)}")
-          receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+          receive_loop(port, on_message, timeout_ms, "", ctx)
         end
     end
   end

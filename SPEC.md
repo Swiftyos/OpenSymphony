@@ -1270,6 +1270,44 @@ Note:
 
 - Workspaces are intentionally preserved after successful runs.
 
+### 10.8 Operator Messages to a Running Agent (Optional Extension)
+
+Implementations with a dashboard may let a person send a message to the agent working on an issue.
+
+Message record:
+
+- `id`, `issue_identifier` (and `issue_id` when a run is known), `author` (display string), `text`
+  (non-empty, capped, e.g. 8,000 characters), `at`
+- `status`: `queued` or `delivered`; `delivered_at`; `delivery`: `steered` or `next_turn`
+
+Delivery rules:
+
+- If a Codex turn is active for the issue, deliver at once with app-server `turn/steer`:
+  `{"threadId": <thread>, "expectedTurnId": <active turn id>, "input": [{"type": "text", "text": ...}]}`.
+  The active turn id comes from the `turn/start` response (and `turn/started` notifications). The
+  process that owns the app-server stream sends the request, and the response (`{"turnId": ...}`)
+  may arrive interleaved with turn notifications, so it must be matched by request id. Mark the
+  message `steered` only on a successful response; on an error (no active turn, turn id mismatch)
+  leave it queued.
+- Otherwise (another backend, between turns, or no run) keep it queued and prepend it, clearly
+  delimited and attributed, to the next turn prompt any agent runs for that issue; then mark it
+  `next_turn`.
+- Do not inject mid-turn into backends whose turn boundary is a user message (Claude Code
+  `stream-json`: every user line starts a new turn with its own `result`).
+- When a run would stop at `agent.max_turns` with messages still queued, an implementation may run
+  one extra turn so the agent can answer; it must not loop indefinitely.
+- Messages may be lost on restart unless persisted; persisting queued ones is recommended.
+
+### 10.9 Structured Transcript (Optional Extension)
+
+Implementations may keep a per-issue, chat-style transcript built from finished agent events
+(streaming deltas skipped). Recommended entry fields: `at`, `kind`, a plain `text` rendering, and
+optional `title`, `body`, `command`, `exit_code`, `duration_ms`, `files` (`path`, `kind`,
+`additions`, `deletions`), `author`, `status`, `tool`, `backend`, `turn`. Recommended kinds:
+`user` (operator messages), `agent`, `thinking`, `command`, `edit`, `tool`, `turn` (a turn
+starting), `symphony` (orchestrator notes), `error`. Actions with a start and an end (a command, a
+tool call and its result) should be one entry updated in place, matched by item or tool-use id.
+
 ## 11. Issue Tracker Integration Contract (Linear-Compatible)
 
 ### 11.1 Required Operations
@@ -1374,6 +1412,9 @@ instructions for:
 - first run (`attempt` null or absent)
 - continuation run after a successful prior session
 - retry after error/timeout/stall
+
+If the operator-messages extension (Section 10.8) is implemented, queued messages are prepended to
+the rendered turn prompt, outside the template, in a delimited section naming their authors.
 
 ### 12.4 Failure Semantics
 
@@ -1640,11 +1681,21 @@ Minimum endpoints:
     }
     ```
 
+- `GET /api/v1/issues/<issue_identifier>/messages` and
+  `POST /api/v1/issues/<issue_identifier>/messages` (optional, Section 10.8)
+  - `GET` returns `{"issue_identifier": ..., "messages": [...]}`, oldest first.
+  - `POST` takes a JSON body `{"text": "..."}` and returns `201` with `{"message": {...}}`;
+    `422` for an empty or too-long message.
+  - Viewers who may not see the issue get `404`; viewers who may see but not act on it get `403`
+    on `POST`. Require a JSON content type on `POST` so cookie-authenticated cross-site form posts
+    cannot send messages.
+
 API design notes:
 
 - The JSON shapes above are the recommended baseline for interoperability and debugging ergonomics.
 - Implementations may add fields, but should avoid breaking existing fields within a version.
-- Endpoints should be read-only except for operational triggers like `/refresh`.
+- Endpoints should be read-only except for operational triggers like `/refresh` and explicit
+  operator actions like sending an agent message.
 - Unsupported methods on defined routes should return `405 Method Not Allowed`.
 - API errors should use a JSON envelope such as `{"error":{"code":"...","message":"..."}}`.
 - If the dashboard is a client-side app, it should consume this API rather than duplicating state
@@ -2225,6 +2276,8 @@ Use the same validation profiles as Section 17:
   exposes the baseline endpoints/error semantics in Section 13.7 if shipped.
 - Optional `linear_graphql` client-side tool extension exposes raw Linear GraphQL access through the
   app-server session using configured Symphony auth.
+- Optional operator messages to running agents (Section 10.8) and a structured per-issue transcript
+  (Section 10.9).
 - TODO: Persist retry queue and session metadata across process restarts.
 - TODO: Make observability settings configurable in workflow front matter without prescribing UI
   implementation details.

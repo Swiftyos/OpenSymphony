@@ -274,8 +274,8 @@ projects:
 - If a later reload fails, Symphony keeps running with the last known good config and logs the
   reload error until the file is fixed.
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard, Prometheus
-  metrics, and JSON API at `/`, `/metrics`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and
-  `/api/v1/refresh`.
+  metrics, and JSON API at `/`, `/metrics`, `/api/v1/state`, `/api/v1/<issue_identifier>`,
+  `/api/v1/refresh`, and `/api/v1/issues/<issue_identifier>/messages`.
 
 ## Backend support
 
@@ -525,6 +525,33 @@ Open `http://127.0.0.1:<server.port>/`. The page is laid out in the order an ope
   runtime, latest update, and tokens.
 - **Spend**: cost or tokens grouped by project, team (the Linear key, for example `PAY`), or
   task, split by harness. Hover a bar for input and output tokens, or switch to the table view.
+
+### Transcripts and messaging an agent
+
+Each issue has a chat-style transcript of what its agents did: their messages and thinking,
+the commands they ran (with output, exit code, and duration), the files they edited (with
+added and removed line counts), other tool calls, a marker at the start of each turn, and
+Symphony's own stage moves. It's kept in memory (the newest 400 entries per issue) and built
+the same way for Codex, Claude Code, and OpenCode.
+
+You can also send a message to the agent working on an issue. Anyone who may move the issue
+can send one (admins, the local operator, and members of the issue's team); guests can read
+them but not send. How a message reaches the agent:
+
+- **Codex, during a turn**: it's sent into the running turn right away (app-server
+  `turn/steer`), and shows as "steered".
+- **Otherwise** (Claude Code, OpenCode, Codex between turns, or no agent running): it waits
+  and is put at the top of the next turn prompt any agent runs for that issue, and shows as
+  "next turn". If a run is about to stop at `agent.max_turns` with messages waiting, it runs
+  one more turn so the agent can answer. Claude Code is never interrupted mid-turn: in
+  `stream-json` mode every user message starts a new turn.
+
+Messages that haven't reached an agent yet are saved to `~/.symphony/inbox.json`, so a restart
+doesn't lose them. The API: `GET /api/v1/issues/<identifier>/messages` lists an issue's
+messages, and `POST` to the same path with a JSON body `{"text": "..."}` sends one (`404` if
+you can't see the issue, `403` if you can't move it, `422` for an empty or over-8,000-character
+message). In Elixir, `SymphonyElixir.AgentInbox.send_message/3` and `messages/1` do the same,
+and `SymphonyElixir.Transcript.entries/1` returns the transcript.
 
 ### Flows per team and project, and steering them
 

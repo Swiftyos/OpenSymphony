@@ -39,6 +39,8 @@ The experimental Elixir implementation currently supports:
   `factory/*` labels, so no custom workflow states are needed.
 - Isolated per-issue git clones, with optional per-issue Docker sandboxes (`sandbox.kind: docker`).
 - A live dashboard that shows and steers the factory, with cost tracking by project, team, task, and harness.
+- Per-issue agent transcripts (messages, commands, edits, thinking), and messages to the agent
+  working on an issue, delivered into a running Codex turn or at the start of the next turn.
 
 If you want to try those features, start with [elixir/README.md](elixir/README.md), which now
 documents backend support, multi-project setup, and label-routing behavior in detail.
