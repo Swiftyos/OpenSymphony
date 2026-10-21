@@ -280,7 +280,8 @@ Notes:
 
 By default `agent.launcher` is `local`: each agent run is an in-process task, so restarting
 Symphony also stops its runs. Set the launcher to `process` to make each run a separate OS
-process that survives a controller restart:
+process that survives a controller restart (or to `kubernetes` for runner pods, see
+"Kubernetes runner pods" below):
 
 ```yaml
 agent:
@@ -695,8 +696,12 @@ script and environment that build the workspace the way the controller clones
 one from its cache (`git init`, fetch `+refs/remotes/origin/*:refs/remotes/origin/*`
 from the mirror, resume `symphony/<issue>` when it exists or branch from
 `origin/<target_branch>`). The token travels in `http.extraHeader` through
-`GIT_CONFIG_*` environment variables, never in a URL or `.git/config`. Wiring
-that clone into workspace creation waits for the Kubernetes launcher.
+`GIT_CONFIG_*` environment variables, never in a URL or `.git/config`. The
+controller attaches the mirror to every run's spec at dispatch when it has the
+repo's cache; a runner whose host has no cache of the repo (a Kubernetes pod)
+builds its workspace this way, with `origin` set to the repo's real remote so
+pushes use the agent's GitHub credentials. A host with the cache keeps cloning
+from it.
 
 ### Scheduling
 
@@ -741,15 +746,18 @@ Symphony's own Linear writes after an agent stage result are safe to retry.
 
 ### Kubernetes runner pods
 
-The Kubernetes launcher runs each issue in its own runner pod instead of as a task (or
-process) on the controller host. It renders the pod itself, because the GKE admission
+The Kubernetes launcher (`agent.launcher: kubernetes`) runs each issue in its own runner
+pod instead of as a task (or process) on the controller host. It renders the pod itself, because the GKE admission
 policy admits only one shape: gVisor, the `symphony-runner` service account without a
 token, the `agents-sandbox` pool selector and toleration, non-root containers that drop
 `ALL`, and only per-run Secrets and ConfigMaps named `run-<run-id>` mounted.
 
 ```yaml
 agent:
+  launcher: kubernetes
   kubernetes:
+    # Required: how runner pods reach the controller (runner API and git mirror).
+    controller_url: http://symphony-controller.symphony.svc:4000
     namespace: symphony-runs          # default
     runner_image: europe-north1-docker.pkg.dev/PROJECT/symphony/symphony:REVISION
     agent_tools_image: europe-north1-docker.pkg.dev/PROJECT/symphony/symphony-agent-tools:REVISION
@@ -764,6 +772,9 @@ agent:
     agent_tools_size_limit: 1Gi       # agent CLI emptyDir sizeLimit
     ephemeral_storage_request: 2Gi    # "" omits; Kueue must cover ephemeral-storage
     ephemeral_storage_limit: 24Gi
+    agent_tools_ephemeral_storage_request: 256Mi  # agent-tools init container; "" omits
+    finished_pod_retention_ms: 3600000  # finished pods are kept 1h for their logs
+    janitor_interval_ms: 300000       # how often finished pods and orphaned Secrets are swept
     # Existing Secrets injected by name; per-run GitHub App tokens are a follow-up.
     secret_env:
       - {env: ANTHROPIC_API_KEY, secret: symphony-anthropic, key: api-key}
@@ -778,9 +789,18 @@ a Secret. Images and the rest of the section are only needed when this launcher 
 pod mounts its workspace `emptyDir` at `workspace.root`, so on GKE set that to a container
 path (`/workspace`) rather than a host path. The controller reads its service account token
 from a projected volume on every request; its Deployment must project one, because automount
-is off. The pod layout, what is
-still missing (watcher integration, git mirror clone URL, per-run GitHub App tokens, a pod
-janitor) and the protocol are in [`docs/durable-runs.md`](docs/durable-runs.md) (Phase 3).
+is off.
+
+Each pod is watched like a process run: the runner's `finished` event ends the run, a pod
+that fails or disappears without one is retried (with the pod's failure reason, such as
+`OOMKilled (exit code 137)`), and a restarted controller adopts the pods that are still
+running. When a run ends its Secret and ConfigMap are deleted and the pod is kept for its
+logs; a janitor deletes finished pods after `finished_pod_retention_ms` and Secrets left
+without a pod. The pod's runner clones its workspace from the controller's git mirror.
+The controller's Role needs `list` on pods and secrets for the janitor, besides
+create/get/delete/patch. The pod layout, what is still missing (per-run GitHub App
+tokens, a pod watch instead of per-run polling, environments rendered on the pod) and the
+protocol are in [`docs/durable-runs.md`](docs/durable-runs.md) (Phase 3).
 
 ### State in Postgres
 

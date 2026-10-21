@@ -178,11 +178,27 @@ Kubernetes they move behind a tool gateway.
      GitHub in the request. Responses stream chunked with an idle timeout
      (`git_mirror.idle_timeout_ms`), git is killed on timeout or disconnect, and
      `git_mirror.max_concurrent` caps concurrent upload-packs (`503` when full).
-     The controller adds `git_mirror_url` and `target_branch` to the spec with
-     `RunSpec.attach_git_mirror/2`; the runner builds its workspace with
-     `SymphonyElixir.GitMirror.clone_commands/3` (init, fetch
+     At dispatch the controller adds `git_mirror_url` and `target_branch` to
+     every run's spec with `RunSpec.attach_git_mirror/2` when it has the
+     cache of the issue's repo. A runner whose host has no cache of that repo
+     (a pod) builds its workspace with
+     `SymphonyElixir.GitMirror.clone_commands/3` from
+     `Workspace.create_for_issue(..., git_mirror: spec)`: init, fetch
      `refs/remotes/origin/*` from the mirror, resume or create the issue
-     branch).
+     branch. The run token is only in that script's `GIT_CONFIG_*`
+     environment (`http.extraHeader`), never in argv or `.git/config`, and
+     `origin` is the repo's real remote, so pushes go to GitHub with the
+     agent's own credentials. A host with the cache (the VM, a process
+     runner) keeps cloning from it and ignores the mirror. The mirror serves
+     only the issue's home repo, so a mirror workspace gets no reference
+     repos (`.symphony/repos`).
+   - **Controller URL.** A pod cannot use the controller's loopback address.
+     The launcher's optional `controller_url/1` callback names the URL its
+     runs use: `agent.kubernetes.controller_url` (for example
+     `http://symphony-controller.symphony.svc:4000`, required to render a
+     pod) for Kubernetes, `http://127.0.0.1:<port>` for the others. The spec's
+     `controller_url` and `git_mirror_url` are built from it. Pod egress is
+     DNS, the controller's port (runner API and git mirror) and 443.
    Built:
    - `SymphonyElixir.Kube` is the API client (create/get/delete a pod; create/patch/delete
      a Secret or ConfigMap) over the in-cluster service account or explicit credentials,
@@ -207,7 +223,7 @@ Kubernetes they move behind a tool gateway.
      ```
 
      The kubelet rotates that token; the client reads it per request. A 401/403 that
-     lasts more than five minutes makes the run's monitor exit
+     lasts more than five minutes makes the run's watcher exit
      `{:pod_monitor_unauthorized, reason}` instead of retrying forever.
    - `SymphonyElixir.RunLauncher.Kubernetes.PodSpec` renders the run's Secret, ConfigMap
      and pod to the shape the GKE admission policy enforces: `gvisor`, the
@@ -238,17 +254,23 @@ Kubernetes they move behind a tool gateway.
      - **Kueue.** The pod carries `kueue.x-k8s.io/queue-name: <queue_name>` (default
        `symphony`, the LocalQueue in `symphony-runs`) so Kueue admits it and counts it
        against the ClusterQueue. Until admitted it stays Pending behind Kueue's scheduling
-       gate, possibly for a long time when the queue is full; the monitor never times out
+       gate, possibly for a long time when the queue is full; the watcher never times out
        a Pending pod. `activeDeadlineSeconds` still applies once it runs. Kueue rejects a
        workload that requests a resource its ClusterQueue does not cover, so the
        ClusterQueue must cover `ephemeral-storage` (or Kueue must exclude it) while the
        ephemeral-storage request is set.
      - The agent CLIs come from the `symphony-agent-tools` init container at
-       `/opt/symphony`.
-   - `SymphonyElixir.RunLauncher.Kubernetes` creates the Secret and the ConfigMap, then
-     the pod, returns `"k8s:<namespace>/<pod>"`, polls the pod every 5s from a
-     lightweight monitor process, and implements `alive?/1` (pod exists and is
-     Pending/Running) and `stop/1` (delete pod, Secret and ConfigMap).
+       `/opt/symphony`. It requests `agent_tools_ephemeral_storage_request`
+       (`256Mi`) of ephemeral storage explicitly instead of relying on the
+       namespace's LimitRange default.
+     - **References.** The pod mounts only its own `run-<run-id>` Secret and
+       ConfigMap; the only other Secrets it names are `secret_env`'s
+       `secretKeyRef`s, which must be on the infra's allowlist of shared
+       Secrets.
+   - `SymphonyElixir.RunLauncher.Kubernetes` (`agent.launcher: kubernetes`) implements
+     `start_process/2`, so `RunLauncher.start/3` and the orchestrator's dispatch hand it
+     the run spec like the process launcher. It creates the Secret and the ConfigMap,
+     then the pod, and returns the run's `RunWatcher` and `"k8s:<namespace>/<pod>"`.
      - A Secret or ConfigMap that already exists (`409`, left by an attempt that crashed
        before its pod) is deleted and created again.
      - Once the pod is created, the Secret and ConfigMap are merge-patched with an
@@ -257,41 +279,69 @@ Kubernetes they move behind a tool gateway.
        failed patch is logged, not fatal.
      - A pod create that fails without an HTTP answer (a timeout) reads the pod back
        first: if it exists the run continues; if not, the Secret and ConfigMap are
-       removed; if the read fails too, the pod is deleted as well.
-     - The monitor is interim: it exits `:normal`, `{:pod_failed, reason}`,
-       `:pod_lost` or `{:pod_monitor_unauthorized, reason}` for the current behaviour's
-       monitor, until the process launcher's watcher lands. The failure reason is the
-       pod's own (`DeadlineExceeded`, `Evicted`), else the runner container's terminated
-       reason and exit code (`OOMKilled (exit code 137)`). On a terminal phase it
-       deletes the run's Secret and ConfigMap; the pod stays for its logs.
-     - **API load.** One GET per run every 5s is 200 GET/s at 1000 concurrent runs. A
-       single pod watch (or informer) over the `app.kubernetes.io/name=symphony-runner`
-       label should replace the per-run poll before runs scale that far; a follow-up
-       note marks the poll interval in the launcher.
-   - `agent.kubernetes` config: namespace, images, CPU/memory requests and limits,
-     ephemeral storage and `emptyDir` size limits, `run_as_user`, `queue_name`,
-     `active_deadline_seconds` (default 6h), and `secret_env` references to existing
-     Secrets. The images are required only when the launcher renders a pod.
+       removed; if the read fails too, the pod is deleted as well. A watcher that cannot
+       start (another already holds the run) removes the pod and its objects.
+   - **Watcher.** The pod is watched by the step 4 `RunWatcher`, so its end reaches the
+     orchestrator exactly like a process run's. `RunLauncher` has an optional
+     `status/1` callback: `:alive` (Pending/Running), `{:gone, reason}`,
+     `{:unknown, reason}` or `{:unauthorized, reason}`; launchers without it are
+     checked through `alive?/1`.
+     - The runner's `finished` event (which flows over `/runner/v1`) ends the watcher
+       with that reason, as for a process run. A pod that Succeeded or disappeared
+       without one ends it with `:runner_lost` after the grace (10s), and a Failed pod
+       with `{:pod_failed, reason}`: the pod's own reason (`DeadlineExceeded`,
+       `Evicted`), else the runner container's terminated reason and exit code
+       (`OOMKilled (exit code 137)`).
+     - An API error or an `Unknown` phase is retried at the next poll without starting
+       the lost clock; a 401/403 for five minutes exits
+       `{:pod_monitor_unauthorized, reason}`. A Pending pod is never timed out.
+     - **Adoption.** `recover_runs/1` adopts a registered pod whose status is anything
+       but gone: a pod that cannot be checked at boot is adopted too, and its watcher
+       decides. A finished run is known from the registry's `finished` reason, which the
+       controller writes before it acknowledges the event; the runner exits only after
+       that acknowledgement, so a Succeeded pod always has it. (The `outbox.jsonl`
+       fallback of process runs reads a local file a pod does not have.)
+     - **Cleanup.** A run that ended by itself, or a dead run found at boot, is
+       *released* (`release/1`): its Secret (the run token) and ConfigMap are deleted
+       and the pod is kept for its logs. `stop/1` (cancellation, a lost or stalled
+       watcher) deletes the pod as well unless it has already finished.
+   - **Janitor.** `SymphonyElixir.RunLauncher.Kubernetes.Janitor` sweeps every
+     `agent.kubernetes.janitor_interval_ms` (5 min) while the launcher is Kubernetes. It
+     lists `app.kubernetes.io/name=symphony-runner` pods and Secrets
+     (`Kube.list_pods/3`, `Kube.list_secrets/3`), deletes finished pods whose last
+     container finished more than `finished_pod_retention_ms` (1h) ago, and deletes
+     `run-*` Secrets (and the ConfigMap of the same name) that have no pod and are
+     older than ten minutes (a launch creates its Secret just before its pod).
+   - **API load.** Each run's watcher GETs its pod every 5s: 200 GET/s at 1000
+     concurrent runs. A single pod watch (or informer) over the
+     `app.kubernetes.io/name=symphony-runner` label should feed the watchers before runs
+     scale that far; a follow-up note marks it in the launcher.
+   - `agent.kubernetes` config: namespace, images, `controller_url`, CPU/memory
+     requests and limits, ephemeral storage and `emptyDir` size limits,
+     `agent_tools_ephemeral_storage_request`, `run_as_user`, `queue_name`,
+     `active_deadline_seconds` (default 6h), `finished_pod_retention_ms` (1h),
+     `janitor_interval_ms` (5 min), and `secret_env` references to existing Secrets.
+     The images and `controller_url` are required only when the launcher renders a pod.
    - **RBAC.** The controller Role needs `patch` on `secrets` and `configmaps` for the
-     ownerReferences (create/get/delete are already granted).
+     ownerReferences, and `list` on `pods` and `secrets` for the janitor
+     (create/get/delete are already granted).
    Remaining:
-   - **Watcher integration.** The interim poller should become the step 4 `RunWatcher`, so
-     a pod's completion reaches the orchestrator exactly like a process run and a
-     controller restart adopts live pods.
-   - **Runner clone from the git mirror.** The controller endpoint and
-     `RunSpec.attach_git_mirror/2` are built (see "Repo access" above); the pod's runner
-     must still build its workspace with `GitMirror.clone_commands/3` instead of the
-     host checkout.
    - **GitHub App tokens.** Per-run installation tokens are not in place yet; `secret_env`
      passes static named credentials. A minter will produce a per-run token and add it to
      the run Secret. There is a TODO at the rendering hook for this.
-   - **Janitor.** Nothing removes completed/failed pods yet. Their Secret and ConfigMap
-     are cleaned on a terminal phase, by `stop/1`, or by garbage collection with the pod,
-     but old pods need a separate sweep.
    - **Pod watch.** Replace the per-run poll with one watch or informer (see API load
      above).
-   - **Dispatch wiring.** `RunLauncher.Kubernetes` is self-contained against the current
-     behaviour; selecting it for dispatch is left until both branches merge.
+   - **Environments on the pod.** The spec's resolved `environment` (image, resources,
+     service sidecars, setup) is not rendered into the pod yet; the runner image and
+     `agent.kubernetes` resources are used.
+   - **Reference repos in a pod.** The mirror serves only the issue's home repo, so a
+     multi-repo project's other repos are not checked out in a runner pod.
+   - **Recovery detail.** A run found dead at boot is retried as interrupted even when
+     its pod Failed; the pod's failure reason only reaches the retry when the watcher
+     sees it.
+   - **Cluster validation.** Everything here is tested against `Req.Test` stubs; the
+     first runs on GKE should check the RBAC above, Kueue admission and the controller
+     Service URL.
 
 ## GitHub App token hardening
 
