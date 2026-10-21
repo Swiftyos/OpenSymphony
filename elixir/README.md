@@ -677,9 +677,46 @@ environment from ssh stdin before the agent starts. With a token, the repo cache
 over https, so the host needs no `gh` login. If minting fails, Symphony logs the
 reason and falls back to the host's `gh` login as before.
 
-Runs that outlive a token can get a fresh one from
-`SymphonyElixir.GitHubApp.token_for_run/2`; the runner-side refresh endpoint is
-still a documented hook in `docs/durable-runs.md`.
+### Runners (`agent.launcher: process` or `kubernetes`)
+
+The App private key never leaves the controller. At launch the controller mints
+a token for the run's home repository only (the configured permissions; a
+multi-repo project's reference repos get nothing writable, and a pod reads them
+through the read-only git mirror) and hands it over:
+
+- **Pods** get it in the run Secret `run-<id>`: `GH_TOKEN`, the
+  `GIT_CONFIG_*` extraHeader, `GIT_TERMINAL_PROMPT` and
+  `SYMPHONY_GITHUB_TOKEN_EXPIRES_AT`, one key each, read by `secretKeyRef`
+  (after `secret_env`, so they win over a static `GH_TOKEN`). The spec only
+  carries `github_host`.
+- **Process runners** get it in an owner-only `github-token.json` next to
+  their spec (a `systemd-run` unit does not inherit the controller's
+  environment). The runner reads and deletes it, and is started without
+  `GITHUB_APP_PRIVATE_KEY` in its environment.
+
+The runner then keeps the token fresh: when less than 15 minutes are left it
+calls `POST /runner/v1/runs/:run_id/github-token`. The endpoint checks the run
+token and epoch like the other runner endpoints, resolves the home repo from
+the run registry (so a run can only get its own repo's token), is limited to
+10 requests per run per 10 minutes, and answers `{token, expires_at, host}`.
+Agent CLIs can stay up across turns, so the runner does not pass the token in
+their environment. It writes it to files under the run's state directory,
+outside the workspace, and points its own environment (which every hook, agent
+and git process inherits) at them:
+
+- a git credential helper (`<run dir>/github/git-credential`, configured only
+  for `https://<host>` through `GIT_CONFIG_*`, after a reset of other helpers
+  for that host) prints the current token, so a refresh reaches the next `git
+  push`, even in the middle of a long turn;
+- `GH_CONFIG_DIR` points at a `hosts.yml` whose `oauth_token` is rewritten
+  in place, and `GH_TOKEN`/`GITHUB_TOKEN` are removed so `gh` reads it.
+
+Files are owner-only and replaced atomically. A fenced or finished run stops
+refreshing; other failures are retried with backoff. A runner config file
+(the pod's ConfigMap) with a literal PEM private key, or `secret_env` passing
+`GITHUB_APP_PRIVATE_KEY`, is refused: give the controller the key through
+`$GITHUB_APP_PRIVATE_KEY`. An agent on an ssh worker host behind a runner does
+not get a token.
 
 Without `github_app`, behaviour is unchanged. Token-shaped strings are redacted
 (including `Authorization: Basic`/`Bearer` values) from logs, structured log
@@ -834,7 +871,8 @@ agent:
     agent_tools_ephemeral_storage_request: 256Mi  # agent-tools init container; "" omits
     finished_pod_retention_ms: 3600000  # finished pods are kept 1h for their logs
     janitor_interval_ms: 300000       # how often finished pods and orphaned Secrets are swept
-    # Existing Secrets injected by name; per-run GitHub App tokens are a follow-up.
+    # Existing Secrets injected by name. With github_app, each pod also gets its
+    # own short-lived token in its run Secret (see "GitHub App tokens").
     secret_env:
       - {env: ANTHROPIC_API_KEY, secret: symphony-anthropic, key: api-key}
       - {env: GITHUB_TOKEN, secret: symphony-github, key: token}
@@ -857,9 +895,8 @@ running. When a run ends its Secret and ConfigMap are deleted and the pod is kep
 logs; a janitor deletes finished pods after `finished_pod_retention_ms` and Secrets left
 without a pod. The pod's runner clones its workspace from the controller's git mirror.
 The controller's Role needs `list` on pods and secrets for the janitor, besides
-create/get/delete/patch. The pod layout, what is still missing (per-run GitHub App
-tokens, a pod watch instead of per-run polling, environments rendered on the pod) and the
-protocol are in [`docs/durable-runs.md`](docs/durable-runs.md) (Phase 3).
+create/get/delete/patch. The pod layout, what is still missing (a pod watch instead
+of per-run polling, environments rendered on the pod) and the protocol are in [`docs/durable-runs.md`](docs/durable-runs.md) (Phase 3).
 
 ### State in Postgres
 

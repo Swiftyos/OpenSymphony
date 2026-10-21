@@ -30,7 +30,8 @@ to the controller only through a **run host** interface:
 - In-process (`RunHost.Local`): today's calls. Used by the `local` launcher and in tests.
 - Over HTTP (`RunHost.Remote`): `POST /runner/v1/runs/:id/events` (batched, at-least-once,
   deduplicated by `(run_id, attempt, seq)`), `GET /runner/v1/runs/:id/commands?after=` (long
-  poll), `GET/PUT/DELETE /runner/v1/runs/:id/session`. Each run has a bearer token (an HMAC of
+  poll), `GET/PUT/DELETE /runner/v1/runs/:id/session`, and, with `github_app`,
+  `POST /runner/v1/runs/:id/github-token` (see "GitHub App token hardening"). Each run has a bearer token (an HMAC of
   run id and epoch under a controller secret). A request with a stale epoch gets `409`, and the
   runner stops: that is the fencing.
 
@@ -96,6 +97,8 @@ Kubernetes they move behind a tool gateway.
      - *Events:* are deduplicated by `seq` and turned into today's orchestrator messages and
        `Transcript` calls. A `finished` event (`normal` or an error) goes to the run's watcher
        (step 4).
+     - *GitHub token:* `POST .../github-token` mints the run's home-repo installation token,
+       rate limited per run.
    Done: `SymphonyElixir.RunToken` (HMAC run tokens), `SymphonyElixir.RunSpec`
    (`runs/<run_id>/spec.json`), `SymphonyElixir.RunEvents` (base64 Erlang-term payloads),
    `SymphonyElixirWeb.RunnerAuth` and `SymphonyElixirWeb.RunnerController` (the
@@ -360,9 +363,6 @@ Kubernetes they move behind a tool gateway.
      watchers fall back to a GET per check. No extra RBAC is needed for per-run metrics:
      runners report their own usage, so `metrics.k8s.io` is not used.
    Remaining:
-   - **GitHub App tokens.** Per-run installation tokens are not in place yet; `secret_env`
-     passes static named credentials. A minter will produce a per-run token and add it to
-     the run Secret. There is a TODO at the rendering hook for this.
    - **Per-run usage under gVisor.** The runner reads its cgroup v2, then cgroup v1, then
      `/proc`. Check which one gVisor answers (`symphony_run_usage_reports_total{source}`)
      on the first GKE runs. If it is `proc` and that proves inaccurate, the fallback is the
@@ -630,15 +630,59 @@ service:
 
 ## GitHub App token hardening
 
-With `github_app` configured, a runner gets a short-lived installation token
-limited to its issue's repository. The controller writes only the run's normal
-spec; the token is not persisted in `spec.json`, logs, or transcripts.
+With `github_app` configured, a run gets a short-lived installation token
+limited to its issue's home repository. The App private key stays in the
+controller.
 
-- The token is delivered in the agent's process environment (`GH_TOKEN`, plus
-  a `GIT_CONFIG_*` `http.<host>.extraHeader`). It is never put in argv,
-  `.git/config`, or workspace scripts, and token-shaped strings (`ghs_`,
-  `ghp_`, `github_pat_`, JWTs, PEM private keys, `Basic`/`Bearer`
-  authorization values) are redacted from logger output and transcripts.
+- **In-process runs** (`agent.launcher: local`) get the token in the agent's
+  process environment (`GH_TOKEN`, plus a `GIT_CONFIG_*`
+  `http.<host>.extraHeader`), minted when the agent starts.
+- **Runners** (`process`, `kubernetes`): the launcher mints the token
+  (`SymphonyElixir.GitHubApp.RunCredentials`) and sets the spec's
+  `github_host`; the spec never holds the token. A pod gets it in its run
+  Secret as `GH_TOKEN`, `GIT_CONFIG_COUNT`/`KEY_0`/`VALUE_0`,
+  `GIT_TERMINAL_PROMPT` and `SYMPHONY_GITHUB_TOKEN_EXPIRES_AT`, each a
+  `secretKeyRef`; a process runner gets an owner-only `github-token.json`
+  next to its spec, deleted by the runner once read (and by `RunSpec.delete/1`
+  if it never was). A process runner is spawned without
+  `GITHUB_APP_PRIVATE_KEY`; a pod's ConfigMap with a literal PEM key, or
+  `secret_env` naming `GITHUB_APP_PRIVATE_KEY`, is refused. A mint that fails
+  at launch is logged and the run starts anyway; the runner asks for its
+  first token.
+- **Refresh.** `POST /runner/v1/runs/:run_id/github-token` (run token, epoch
+  and `finished` checks from `RunnerAuth`; 10 requests per run per 10 minutes,
+  then `429` with `Retry-After`) returns `{token, expires_at, host}` for the
+  run's home repo, resolved from the run registry's issue (labels included),
+  so a run token can only obtain its own repo's token. `404
+  github_app_not_configured` without `github_app`; `502 token_unavailable`
+  when GitHub refuses. The controller's token cache answers with a token that
+  has at least 50 minutes left.
+- **Runner side** (`SymphonyElixir.GitHubApp.RunnerToken`). The keeper starts
+  before the agent and refreshes when less than 15 minutes are left (at once
+  for a token that expired while the pod was Pending in Kueue). A `409`
+  (fenced or finished) or `404` stops it; other failures back off from 30s to
+  five minutes. An environment variable cannot change under a running agent
+  CLI, so the token lives in files under `<run dir>/github/` (0700, files
+  0600, atomic replace), and the runner rewrites its own OS environment once,
+  at start, for every hook, agent and git process it spawns:
+  - `GIT_CONFIG_*` loses the launch header and gains
+    `credential.https://<host>.helper` (an empty value to reset other helpers
+    for that host, then `git-credential`, a script that `cat`s the current
+    `token` file and holds no secret). git asks the helper on every
+    authenticated request, so a refresh reaches the next push even inside a
+    long turn. Only the GitHub host is configured.
+  - `GH_CONFIG_DIR` points at `github/gh/hosts.yml`, whose `oauth_token` is
+    rewritten on refresh; `GH_TOKEN`, `GITHUB_TOKEN` and the enterprise
+    variants are removed because `gh` prefers them over its config.
+  - `GitHubApp.env_pairs/2` returns nothing while the keeper runs, so no
+    static header shadows the helper.
+  The files are outside the workspace (never committed) and nothing is
+  written to `.git/config` or argv. The trade-off: any process in the run can
+  read the current token, which is no wider than the environment variable it
+  replaces. An agent on an ssh worker host behind a runner gets no token.
+- Token-shaped strings (`ghs_`, `ghp_`, `github_pat_`, JWTs, PEM private
+  keys, `Basic`/`Bearer` authorization values) are redacted from logger
+  output (the controller's and the runner's `runner.log`) and transcripts.
 - On an ssh worker host the agent's environment (the token, the Linear API key,
   account credentials) is not in the ssh command line: the remote shell reads
   one escaped line per variable from ssh stdin (`IFS= read -r NAME`), exports
@@ -650,12 +694,8 @@ spec; the token is not persisted in `spec.json`, logs, or transcripts.
   reach the agent, and only for its home repo.
 - Agents get a token with at least 50 minutes left (a cached token closer to
   expiry is replaced); workspace syncs accept one with five minutes left.
-- `SymphonyElixir.GitHubApp.token_for_run/2` resolves a fresh token from a run
-  spec. **TODO:** expose it as a `/runner/v1/runs/:run_id/github-token`
-  endpoint, authenticated like the other runner endpoints, so a run that
-  outlives its token can refresh the environment for later turns. Until then a
-  run that outlives its token fails its authenticated git/`gh` operations and
-  is retried; the retry mints a fresh token.
+  Tokens are cached per repository, so runs of the same repo share one until
+  it nears expiry; a run's token is not revoked when it ends.
 - Permissions are an allowlist (`contents`, `pull_requests`, `metadata`,
   `issues`, `checks`, `statuses`; `read` or `write`), checked at config load
   and again for every token request, so a compromised run cannot change CI
