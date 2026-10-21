@@ -120,7 +120,9 @@ defmodule SymphonyElixir.Runner do
               account: account,
               route: route,
               issue_config: issue_config,
-              workspace_root: spec.workspace_root
+              workspace_root: spec.workspace_root,
+              # A runner without the repo cache (a pod) clones from the controller's mirror.
+              git_mirror: spec
             )
           end)
 

@@ -5,8 +5,9 @@ defmodule SymphonyElixir.Workspace do
 
   require Logger
   alias SymphonyElixir.Capacity.Metrics
-  alias SymphonyElixir.{Config, GitHubApp, IssueConfig, PathSafety, ProjectWorkflow, RepoCacheLock, Sandbox, SSH}
+  alias SymphonyElixir.{Config, GitHubApp, GitMirror, IssueConfig, PathSafety, ProjectWorkflow, RepoCacheLock}
   alias SymphonyElixir.Config.Schema
+  alias SymphonyElixir.{RunSpec, Sandbox, SSH}
   alias SymphonyElixirWeb.PrometheusMetrics
 
   @remote_workspace_marker "__SYMPHONY_WORKSPACE__"
@@ -18,12 +19,27 @@ defmodule SymphonyElixir.Workspace do
 
   @type worker_host :: String.t() | nil
 
+  @doc """
+  Creates (or reuses) the issue's workspace and checks out its repo.
+
+  Options: `:settings`, `:project_route` and `:workspace_root` (a runner passes
+  those from its run spec), and `:git_mirror`, a `SymphonyElixir.RunSpec` with
+  a `git_mirror_url`. A local workspace whose repo cache does not exist on this
+  host (a runner pod) is then cloned from the controller's mirror with
+  `SymphonyElixir.GitMirror.clone_commands/3`, authenticated with the run
+  token in the git environment, and its `origin` is the repo's real remote,
+  so pushes go to GitHub with the agent's own credentials. Where the cache
+  exists the workspace is cloned from it as before, and the mirror is unused.
+  The project's reference repos are not checked out in a mirror workspace: the
+  mirror serves only the issue's home repo.
+  """
   @spec create_for_issue(map() | String.t() | nil, worker_host(), keyword()) ::
           {:ok, Path.t()} | {:error, term()}
   def create_for_issue(issue_or_identifier, worker_host \\ nil, opts \\ []) do
     issue_context = issue_context(issue_or_identifier)
     project_route = Keyword.get(opts, :project_route)
     workspace_root = Keyword.get(opts, :workspace_root)
+    git_mirror = Keyword.get(opts, :git_mirror)
 
     try do
       safe_id = safe_identifier(issue_context.issue_identifier)
@@ -42,6 +58,7 @@ defmodule SymphonyElixir.Workspace do
                project_route,
                workspace_root
              ),
+           mirror = mirror_source(git_mirror, issue_context, worker_host, settings, project_route, workspace_root),
            :ok <-
              initialize_new_workspace(
                workspace,
@@ -50,9 +67,13 @@ defmodule SymphonyElixir.Workspace do
                worker_host,
                settings,
                project_route,
-               workspace_root
+               workspace_root,
+               mirror
              ) do
-        sync_reference_repos(workspace, issue_context, worker_host, settings, project_route, workspace_root)
+        if is_nil(mirror) do
+          sync_reference_repos(workspace, issue_context, worker_host, settings, project_route, workspace_root)
+        end
+
         {:ok, workspace}
       end
     rescue
@@ -367,18 +388,25 @@ defmodule SymphonyElixir.Workspace do
          worker_host,
          settings,
          project_route,
-         workspace_root
+         workspace_root,
+         mirror
        ) do
-    with :ok <-
-           maybe_bootstrap_workspace_repo(
-             workspace,
-             issue_context,
-             created?,
-             worker_host,
-             settings,
-             project_route,
-             workspace_root
-           ),
+    bootstrap =
+      if mirror do
+        maybe_clone_from_mirror(workspace, issue_context, created?, settings, project_route, mirror)
+      else
+        maybe_bootstrap_workspace_repo(
+          workspace,
+          issue_context,
+          created?,
+          worker_host,
+          settings,
+          project_route,
+          workspace_root
+        )
+      end
+
+    with :ok <- bootstrap,
          :ok <- maybe_run_after_create_hook(workspace, issue_context, created?, worker_host, settings) do
       :ok
     else
@@ -512,6 +540,56 @@ defmodule SymphonyElixir.Workspace do
          "git -C \"$target\" checkout --quiet --force --detach \"origin/$target_branch\""
        ])
     |> Enum.join("\n")
+  end
+
+  # The mirror applies to a local workspace whose home repo has no cache on
+  # this host, when the spec's mirror serves that repo (its URL ends with the
+  # repo's cache key; a multi-repo issue whose home is another repo is not
+  # served). Returns the spec and repo to clone, or nil.
+  defp mirror_source(%RunSpec{git_mirror_url: url} = spec, issue_context, nil, settings, project_route, workspace_root)
+       when is_binary(url) do
+    with %{display: _display} = repo_source <- project_repo_source_for_issue(issue_context, settings, project_route),
+         true <- String.ends_with?(url, "/" <> GitMirror.repo_key(repo_source)),
+         root = workspace_root_for_issue(issue_context, settings, workspace_root),
+         false <- File.dir?(repo_cache_path(root, repo_source)) do
+      %{spec: spec, repo_source: repo_source}
+    else
+      _ -> nil
+    end
+  end
+
+  defp mirror_source(_git_mirror, _issue_context, _worker_host, _settings, _project_route, _workspace_root), do: nil
+
+  defp maybe_clone_from_mirror(_workspace, _issue_context, false, _settings, _project_route, _mirror), do: :ok
+
+  defp maybe_clone_from_mirror(workspace, issue_context, true, settings, project_route, %{spec: spec, repo_source: repo_source}) do
+    target_branch = spec.target_branch || project_default_branch_for_issue(issue_context, settings, project_route)
+    spec = %{spec | target_branch: target_branch, issue: spec.issue || %{identifier: issue_context.issue_identifier}}
+    timeout_ms = hooks_timeout_ms(settings)
+
+    Logger.info(
+      "Cloning workspace repo from the git mirror #{issue_log_context(issue_context)} workspace=#{workspace} repo=#{repo_source.display} branch=#{issue_branch_name(issue_context)} base_branch=#{target_branch || "origin-default"}"
+    )
+
+    # The run token is only in the environment of this one script; origin is
+    # the real remote, which the agent pushes to with its own credentials.
+    {:ok, %{script: script, env: env}} = GitMirror.clone_commands(spec, workspace, origin_url: repo_source.clone_url)
+
+    case instrument_git_operation("workspace_create", fn -> run_local_script(script, timeout_ms, env) end) do
+      {:ok, {_output, 0}} ->
+        :ok
+
+      {:ok, {output, status}} ->
+        Logger.warning(
+          "Workspace clone from the git mirror failed #{issue_log_context(issue_context)} workspace=#{workspace} repo=#{repo_source.display} status=#{status} output=#{inspect(sanitize_hook_output_for_log(output))}"
+        )
+
+        {:error, {:workspace_mirror_clone_failed, repo_source.display, status, output}}
+
+      nil ->
+        Logger.warning("Workspace clone from the git mirror timed out #{issue_log_context(issue_context)} workspace=#{workspace} repo=#{repo_source.display} timeout_ms=#{timeout_ms}")
+        {:error, {:workspace_mirror_clone_timeout, repo_source.display, timeout_ms}}
+    end
   end
 
   defp maybe_bootstrap_workspace_repo(_workspace, _issue_context, false, _worker_host, _settings, _project_route, _workspace_root),

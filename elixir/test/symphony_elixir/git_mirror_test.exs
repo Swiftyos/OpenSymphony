@@ -226,6 +226,88 @@ defmodule SymphonyElixir.GitMirrorTest do
     end
   end
 
+  describe "a runner's workspace from the mirror" do
+    test "a runner without the repo cache clones from the mirror and pushes to the real remote" do
+      context = mirror_context!()
+      endpoint = Support.start_endpoint!()
+      token = RunToken.sign(context.run_id, 1)
+      # No target branch in the spec: the route's (none) then main/master.
+      spec = %{mirror_spec(context, endpoint, token) | target_branch: nil}
+      runner_root = Path.join(Config.workspace_root_for_route(context.repo.route, context.settings), "runner")
+
+      log =
+        capture_log(fn ->
+          assert {:ok, workspace} =
+                   Workspace.create_for_issue(context.issue, nil, settings: context.settings, workspace_root: runner_root, git_mirror: spec)
+
+          send(self(), {:workspace, workspace})
+        end)
+
+      assert_received {:workspace, workspace}
+      assert log =~ "Cloning workspace repo from the git mirror"
+      refute File.dir?(Workspace.repo_cache_path(runner_root, context.repo_source))
+      assert File.read!(Path.join(workspace, "README.md")) == "base\n"
+      assert current_branch(workspace) == "symphony/PI-1"
+      assert git_config(workspace, "remote.origin.url") == context.repo_source.clone_url
+      refute File.read!(Path.join([workspace, ".git", "config"])) =~ token
+
+      # The workspace exists now: a later run reuses it without cloning.
+      log =
+        capture_log(fn ->
+          assert {:ok, ^workspace} =
+                   Workspace.create_for_issue(context.issue, nil, settings: context.settings, workspace_root: runner_root, git_mirror: spec)
+        end)
+
+      refute log =~ "from the git mirror"
+    end
+
+    test "where the cache exists, or the mirror serves another repo, the workspace is cloned as before" do
+      context = mirror_context!()
+      endpoint = Support.start_endpoint!()
+      spec = mirror_spec(context, endpoint, RunToken.sign(context.run_id, 1))
+      issue = %{context.issue | identifier: "PI-7"}
+
+      log =
+        capture_log(fn ->
+          assert {:ok, _workspace} =
+                   Workspace.create_for_issue(issue, nil, settings: context.settings, git_mirror: spec)
+
+          other = %{spec | git_mirror_url: spec.git_mirror_url <> "-other"}
+          runner_root = Path.join(Config.workspace_root_for_route(context.repo.route, context.settings), "runner-other")
+
+          opts = [settings: context.settings, workspace_root: runner_root, git_mirror: other]
+          assert {:ok, _workspace} = Workspace.create_for_issue(%{issue | identifier: "PI-8"}, nil, opts)
+        end)
+
+      refute log =~ "from the git mirror"
+    end
+
+    test "a failed or timed-out mirror clone fails the workspace and discards it" do
+      context = mirror_context!()
+      endpoint = Support.start_endpoint!()
+      spec = %{mirror_spec(context, endpoint, RunToken.sign(context.run_id, 1)) | target_branch: "nope", issue: nil}
+      runner_root = Path.join(Config.workspace_root_for_route(context.repo.route, context.settings), "runner")
+      workspace = Path.join(runner_root, "PI-1")
+
+      log =
+        capture_log(fn ->
+          assert {:error, {:workspace_mirror_clone_failed, _repo, 43, output}} =
+                   Workspace.create_for_issue(context.issue, nil, settings: context.settings, workspace_root: runner_root, git_mirror: spec)
+
+          assert output =~ "Target branch not found on the mirror: nope"
+          refute File.exists?(workspace)
+
+          settings = %{context.settings | hooks: %{context.settings.hooks | timeout_ms: 1}}
+
+          assert {:error, {:workspace_mirror_clone_timeout, _repo, 1}} =
+                   Workspace.create_for_issue(context.issue, nil, settings: settings, workspace_root: runner_root, git_mirror: spec)
+        end)
+
+      assert log =~ "Workspace clone from the git mirror failed"
+      assert log =~ "Workspace clone from the git mirror timed out"
+    end
+  end
+
   describe "upload-pack process" do
     test "advertises refs and answers a request" do
       context = mirror_context!()

@@ -70,7 +70,8 @@ defmodule SymphonyElixir.AgentRunner do
            Workspace.create_for_issue(issue, worker_host,
              settings: issue_config.settings,
              project_route: issue_config.project_route,
-             workspace_root: Keyword.get(opts, :workspace_root)
+             workspace_root: Keyword.get(opts, :workspace_root),
+             git_mirror: Keyword.get(opts, :git_mirror)
            ) do
       run_in_workspace(workspace, issue, host, opts, worker_host, route, issue_config)
     end
