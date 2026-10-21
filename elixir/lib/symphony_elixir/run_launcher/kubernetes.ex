@@ -24,7 +24,12 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes do
   Other details:
 
   - The ConfigMap holds the controller's effective config file (`symphony.yml`
-    or `WORKFLOW.md`), which the runner is started with.
+    or `WORKFLOW.md`), which the runner is started with. A file with a literal
+    PEM private key in it is refused: the GitHub App key must reach the
+    controller through `$GITHUB_APP_PRIVATE_KEY`, never a runner.
+  - With `github_app`, the run's installation token (home repo only) is minted
+    here and put in the run Secret; see
+    `SymphonyElixir.GitHubApp.RunCredentials`.
   - A Secret or ConfigMap left over from a crashed attempt (`409`) is deleted
     and created again.
   - Once the pod exists, the Secret and ConfigMap get an ownerReference to it,
@@ -45,6 +50,7 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes do
   alias SymphonyElixir.Capacity.Metrics
   alias SymphonyElixir.Config
   alias SymphonyElixir.Config.Schema
+  alias SymphonyElixir.GitHubApp.RunCredentials
   alias SymphonyElixir.Kube
   alias SymphonyElixir.RunLauncher.Kubernetes.PodSpec
   alias SymphonyElixir.RunLauncher.Kubernetes.PodWatch
@@ -55,6 +61,7 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes do
 
   @prefix "k8s:"
   @terminal_phases ["Succeeded", "Failed"]
+  @private_key_pattern ~r/BEGIN [A-Z ]*PRIVATE KEY/
 
   @doc """
   Starts the run's Secret, ConfigMap, pod and watcher.
@@ -65,14 +72,15 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes do
   `:lost_grace_ms` and `:unauthorized_timeout_ms`, and any
   `SymphonyElixir.Kube` options (`:base_url`, `:token`,
   `:service_account_dir`, `:req_options`), which the watcher's pod checks use
-  too.
+  too. `:github_app` options go to the token mint (`:plug`, `:cache`).
   """
   @impl true
   @spec start_process(RunSpec.t(), keyword()) :: {:ok, pid(), String.t()} | {:error, term()}
   def start_process(%RunSpec{} = spec, opts \\ []) do
     with {:ok, settings} <- settings(opts),
          {:ok, runner_config} <- runner_config(opts),
-         {:ok, rendered} <- PodSpec.render(spec, settings, runner_config),
+         {spec, github} = RunCredentials.attach(spec, settings, Keyword.get(opts, :github_app, [])),
+         {:ok, rendered} <- PodSpec.render(spec, settings, runner_config, github: github),
          {:ok, client} <- Kube.client(opts),
          :ok <- create_run_objects(rendered, client),
          {:ok, watcher} <- start_watcher(spec, rendered, opts) do
@@ -306,8 +314,13 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes do
     path = Keyword.get_lazy(opts, :config_path, &controller_config_path/0)
 
     case File.read(path) do
-      {:ok, content} -> {:ok, %{file_name: config_file_name(path), content: content}}
-      {:error, reason} -> {:error, {:runner_config, path, reason}}
+      {:ok, content} ->
+        if String.match?(content, @private_key_pattern),
+          do: {:error, {:runner_config, path, :contains_private_key}},
+          else: {:ok, %{file_name: config_file_name(path), content: content}}
+
+      {:error, reason} ->
+        {:error, {:runner_config, path, reason}}
     end
   end
 

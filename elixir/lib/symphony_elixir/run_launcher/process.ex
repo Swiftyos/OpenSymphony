@@ -25,6 +25,12 @@ defmodule SymphonyElixir.RunLauncher.Process do
   `stop/1` waits up to 20s for the process to exit; callers that must not block
   (the orchestrator) run it in a task.
 
+  With `github_app`, the run's installation token (home repo only) is minted
+  before the runner starts and written owner-only to `github-token.json` next
+  to the spec (`SymphonyElixir.GitHubApp.RunCredentials`); the runner takes it
+  from there and refreshes it through the controller. The runner is started
+  without `GITHUB_APP_PRIVATE_KEY` in its environment.
+
   A `SymphonyElixir.RunWatcher` is started for the run; the orchestrator
   monitors that watcher. See `docs/durable-runs.md`.
   """
@@ -34,6 +40,8 @@ defmodule SymphonyElixir.RunLauncher.Process do
   require Logger
 
   alias SymphonyElixir.Config
+  alias SymphonyElixir.Config.Schema
+  alias SymphonyElixir.GitHubApp.RunCredentials
   alias SymphonyElixir.RunSpec
   alias SymphonyElixir.RunWatcher
 
@@ -42,6 +50,8 @@ defmodule SymphonyElixir.RunLauncher.Process do
   # The start time of a runner already gone when its pid was read.
   @gone_start "gone"
   @setsid_fallback "perl -e 'setpgrp; exec @ARGV'"
+  # The runner never gets the App private key, even on the controller's host.
+  @runner_env [{"GITHUB_APP_PRIVATE_KEY", nil}]
 
   @impl true
   def start(%RunSpec{} = spec, opts), do: start_process(spec, opts)
@@ -55,7 +65,10 @@ defmodule SymphonyElixir.RunLauncher.Process do
 
   @impl true
   def start_process(%RunSpec{} = spec, opts \\ []) do
+    {spec, github} = github_credentials(spec, opts)
+
     with {:ok, spec_path} <- RunSpec.write(spec),
+         :ok <- RunCredentials.write_file(spec_path, github),
          {:ok, command} <- render_command(command_template(opts), spec, spec_path, opts),
          {:ok, ref} <- spawn_process(detach_command(command, opts), spec.run_id),
          {:ok, watcher_pid} <-
@@ -127,6 +140,17 @@ defmodule SymphonyElixir.RunLauncher.Process do
       {:ok, symphony} -> symphony
       :error -> escript_name() || System.get_env("SYMPHONY_BIN")
     end
+  end
+
+  defp github_credentials(spec, opts) do
+    settings =
+      case Keyword.get_lazy(opts, :settings, &Config.settings/0) do
+        %Schema{} = settings -> settings
+        {:ok, %Schema{} = settings} -> settings
+        _other -> nil
+      end
+
+    if settings, do: RunCredentials.attach(spec, settings, Keyword.get(opts, :github_app, [])), else: {spec, nil}
   end
 
   defp safe_configured_command do
@@ -205,7 +229,7 @@ defmodule SymphonyElixir.RunLauncher.Process do
         {:error, :missing_systemd_unit}
 
       unit ->
-        case System.cmd("sh", ["-c", command], stderr_to_stdout: true) do
+        case System.cmd("sh", ["-c", command], stderr_to_stdout: true, env: @runner_env) do
           {_output, 0} -> {:ok, "systemd:" <> unit}
           {output, status} -> {:error, {:launch_failed, status, String.slice(output, 0, 1_000)}}
         end
@@ -220,7 +244,7 @@ defmodule SymphonyElixir.RunLauncher.Process do
     # output goes to its log, so a runner that fails at once can be explained.
     wrapper = command <> " </dev/null >>" <> shell_escape(log) <> " 2>&1 & echo $!"
 
-    case System.cmd("sh", ["-c", wrapper], stderr_to_stdout: true) do
+    case System.cmd("sh", ["-c", wrapper], stderr_to_stdout: true, env: @runner_env) do
       {output, 0} ->
         case Integer.parse(String.trim(output)) do
           {pid, ""} when pid > 0 -> started_ref(pid)

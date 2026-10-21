@@ -136,6 +136,7 @@ defmodule SymphonyElixirWeb.Router do
     post("/inbox/:message_id/delivered", RunnerController, :inbox_delivered)
     post("/codex_turn", RunnerController, :codex_turn)
     get("/commands", RunnerController, :commands)
+    post("/github-token", RunnerController, :github_token)
   end
 
   scope "/", SymphonyElixirWeb do

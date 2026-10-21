@@ -18,14 +18,18 @@ defmodule SymphonyElixirWeb.RunnerController do
   alias SymphonyElixir.AgentInbox
   alias SymphonyElixir.AgentMetrics
   alias SymphonyElixir.Capacity.RunUsage
+  alias SymphonyElixir.Config
+  alias SymphonyElixir.GitHubApp.RunCredentials
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.RunEvents
   alias SymphonyElixir.RunnerCommands
   alias SymphonyElixir.RunRegistry
+  alias SymphonyElixir.RunSpec
   alias SymphonyElixir.RunWatcher
   alias SymphonyElixir.SessionStore
   alias SymphonyElixir.Transcript
   alias SymphonyElixirWeb.Endpoint
+  alias SymphonyElixirWeb.RateLimit
 
   @max_wait_ms 25_000
   @default_wait_ms 20_000
@@ -119,6 +123,47 @@ defmodule SymphonyElixirWeb.RunnerController do
       end)
 
     json(conn, %{commands: commands})
+  end
+
+  @doc """
+  A fresh GitHub App installation token for the run's home repository only,
+  with `github_app.permissions`: `{"token", "expires_at", "host"}`. The run's
+  issue is the one in the run registry, so a run token can never get a token
+  for another run's repository. `404 github_app_not_configured` without
+  `github_app`, `429` past the per-run limit, `502 token_unavailable` when
+  GitHub refuses. Cached tokens with at least 50 minutes left are reused.
+  """
+  @spec github_token(Conn.t(), map()) :: Conn.t()
+  def github_token(%Conn{assigns: %{run_id: run_id, run: run}} = conn, _params) do
+    with :ok <- RateLimit.check(:runner_github_token, run_id),
+         {:ok, settings} <- Config.settings(),
+         {:ok, body} <- RunCredentials.refresh(run_spec(run_id, run), settings) do
+      json(conn, body)
+    else
+      {:error, retry_after} when is_integer(retry_after) ->
+        conn
+        |> Conn.put_resp_header("retry-after", Integer.to_string(retry_after))
+        |> error(429, "rate_limited")
+
+      {:error, :github_app_not_configured} ->
+        error(conn, 404, "github_app_not_configured")
+
+      {:error, reason} ->
+        Logger.warning("GitHub App token refresh failed run_id=#{run_id} reason=#{inspect(reason, limit: 5)}")
+        error(conn, 502, "token_unavailable")
+    end
+  end
+
+  # The registry's issue (labels included) picks the home repo exactly as the
+  # launch did.
+  defp run_spec(run_id, run) do
+    metadata = Map.get(run, :metadata) || %{}
+
+    issue =
+      metadata[:issue] ||
+        %{id: nil, identifier: metadata[:identifier], project_slug: metadata[:project_slug], labels: metadata[:labels] || []}
+
+    %RunSpec{run_id: run_id, epoch: run.epoch, issue: issue}
   end
 
   defp apply_events(conn, run_id, events) do

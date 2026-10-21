@@ -17,9 +17,17 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodSpec do
   runner sets the agents' own variables explicitly; these are what anything
   else in the pod (hooks, tools) inherits. No exporter header or credential is
   ever rendered: the collector holds those.
+
+  With a per-run GitHub App token (`SymphonyElixir.GitHubApp.RunCredentials`)
+  the Secret also holds the runner's git and `gh` environment (`GH_TOKEN`,
+  `GIT_CONFIG_*` with the `http.<host>.extraHeader`, `GIT_TERMINAL_PROMPT`
+  and the token's expiry), one key per variable, and the runner container
+  reads each through a `secretKeyRef`; the token is never a literal in the
+  pod spec or its arguments.
   """
 
   alias SymphonyElixir.Config.Schema
+  alias SymphonyElixir.GitHubApp.RunCredentials
   alias SymphonyElixir.RunSpec
   alias SymphonyElixir.RunTrace
 
@@ -58,10 +66,13 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodSpec do
   started with. A missing image or controller URL is an error here, not in the
   general schema, so an install that doesn't use this launcher never has to
   configure one.
+
+  Option `:github` is the run's GitHub App credentials (or nil).
   """
-  @spec render(RunSpec.t(), Schema.t(), runner_config()) :: {:ok, map()} | {:error, term()}
-  def render(%RunSpec{} = spec, %Schema{} = settings, %{file_name: file_name, content: content}) do
+  @spec render(RunSpec.t(), Schema.t(), runner_config(), keyword()) :: {:ok, map()} | {:error, term()}
+  def render(%RunSpec{} = spec, %Schema{} = settings, %{file_name: file_name, content: content}, opts \\ []) do
     kube = settings.agent.kubernetes
+    github_env = RunCredentials.env(Keyword.get(opts, :github))
 
     with :ok <- validate_config(kube) do
       name = resource_name(spec.run_id)
@@ -75,9 +86,9 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodSpec do
          namespace: namespace,
          name: name,
          ref: "k8s:#{namespace}/#{name}",
-         secret: secret(spec, metadata),
+         secret: secret(spec, metadata, github_env),
          config_map: config_map(metadata, file_name, content),
-         pod: pod(kube, name, metadata, workspace_root, file_name, telemetry_env(spec, settings))
+         pod: pod(kube, name, metadata, workspace_root, file_name, telemetry_env(spec, settings), Enum.map(github_env, &elem(&1, 0)))
        }}
     end
   end
@@ -115,6 +126,10 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodSpec do
       # A pod cannot reach the controller's loopback address.
       blank?(kube.controller_url) ->
         {:error, {:invalid_kubernetes_config, "agent.kubernetes.controller_url is required"}}
+
+      # The App private key stays with the controller; runners get tokens.
+      Enum.any?(List.wrap(kube.secret_env), &(secret_env_value(&1, "env") == "GITHUB_APP_PRIVATE_KEY")) ->
+        {:error, {:invalid_kubernetes_config, "agent.kubernetes.secret_env must not pass GITHUB_APP_PRIVATE_KEY to runner pods"}}
 
       true ->
         :ok
@@ -163,13 +178,13 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodSpec do
     if label == "", do: "unknown", else: label
   end
 
-  defp secret(spec, metadata) do
+  defp secret(spec, metadata, github_env) do
     %{
       "apiVersion" => "v1",
       "kind" => "Secret",
       "metadata" => metadata,
       "type" => "Opaque",
-      "stringData" => %{"spec.json" => Jason.encode!(RunSpec.to_map(spec))}
+      "stringData" => Map.new(github_env) |> Map.put("spec.json", Jason.encode!(RunSpec.to_map(spec)))
     }
   end
 
@@ -182,7 +197,7 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodSpec do
     }
   end
 
-  defp pod(kube, name, metadata, workspace_root, config_file_name, telemetry_env) do
+  defp pod(kube, name, metadata, workspace_root, config_file_name, telemetry_env, github_env_names) do
     %{
       "apiVersion" => "v1",
       "kind" => "Pod",
@@ -227,7 +242,7 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodSpec do
             "name" => "runner",
             "image" => kube.runner_image,
             "args" => ["runner", @spec_dir <> "/spec.json", @config_dir <> "/" <> config_file_name, @guardrail_flag],
-            "env" => env(kube.secret_env) ++ telemetry_env,
+            "env" => env(kube.secret_env) ++ github_env(name, github_env_names) ++ telemetry_env,
             "securityContext" => container_security_context(),
             "volumeMounts" => [
               %{"name" => @tools_volume, "mountPath" => @tools_dir},
@@ -292,8 +307,14 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodSpec do
     }
   end
 
-  # Follow-up: per-run GitHub App installation tokens belong in the run Secret once
-  # the minter lands; add them here as secretKeyRef entries alongside secret_env.
+  # After secret_env, so a static GH_TOKEN an install still passes there is
+  # overridden by the run's own token.
+  defp github_env(secret_name, names) do
+    Enum.map(names, fn env_name ->
+      %{"name" => env_name, "valueFrom" => %{"secretKeyRef" => %{"name" => secret_name, "key" => env_name}}}
+    end)
+  end
+
   defp env(secret_env) when is_list(secret_env) do
     [
       %{

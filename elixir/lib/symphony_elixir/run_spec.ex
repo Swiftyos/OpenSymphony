@@ -20,6 +20,12 @@ defmodule SymphonyElixir.RunSpec do
   `otlp_protocol` a runner pod exports to instead of the configured ones (nil
   when it uses those). Only these string keys are kept; it never holds
   credentials.
+
+  `github_host` is the git host (`github.com`, or a GitHub Enterprise host) when
+  the controller has `github_app` configured; it tells the runner to keep a
+  per-run installation token fresh (`SymphonyElixir.GitHubApp.RunnerToken`). The
+  token itself is never in the spec: a pod gets it from its run Secret and a
+  process runner from `github-token.json` next to the spec.
   """
 
   alias SymphonyElixir.{Config, GitMirror, HttpServer}
@@ -44,7 +50,8 @@ defmodule SymphonyElixir.RunSpec do
     :git_mirror_url,
     :target_branch,
     :token,
-    :telemetry
+    :telemetry,
+    :github_host
   ]
 
   @issue_fields [
@@ -105,7 +112,8 @@ defmodule SymphonyElixir.RunSpec do
           git_mirror_url: String.t() | nil,
           target_branch: String.t() | nil,
           token: String.t() | nil,
-          telemetry: %{optional(String.t()) => String.t() | nil} | nil
+          telemetry: %{optional(String.t()) => String.t() | nil} | nil,
+          github_host: String.t() | nil
         }
 
   @doc "The run's directory under the state root."
@@ -115,6 +123,13 @@ defmodule SymphonyElixir.RunSpec do
   @doc "Where this run's spec is written."
   @spec path(String.t()) :: Path.t()
   def path(run_id) when is_binary(run_id), do: Path.join(dir(run_id), "spec.json")
+
+  @doc """
+  Where a process runner's initial GitHub App token is handed over: next to the
+  spec, owner-only. The runner reads and deletes it at start.
+  """
+  @spec github_token_path(Path.t()) :: Path.t()
+  def github_token_path(spec_path) when is_binary(spec_path), do: Path.join(Path.dirname(spec_path), "github-token.json")
 
   @doc "The spec as the JSON document written to `spec.json`."
   @spec to_map(t()) :: map()
@@ -155,11 +170,15 @@ defmodule SymphonyElixir.RunSpec do
 
   @doc """
   Deletes the run's spec once the run has ended or been stopped: it holds the
-  run token. The rest of the run dir (`outbox.jsonl`, `runner.log`) is kept.
+  run token. A GitHub App token file the runner never picked up, and the
+  runner's own credential files (`github/`), go too. The rest of the run dir
+  (`outbox.jsonl`, `runner.log`) is kept.
   """
   @spec delete(String.t()) :: :ok
   def delete(run_id) when is_binary(run_id) do
     _ = File.rm(path(run_id))
+    _ = File.rm(github_token_path(path(run_id)))
+    _ = File.rm_rf(Path.join(dir(run_id), "github"))
     :ok
   end
 

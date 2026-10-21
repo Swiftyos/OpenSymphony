@@ -16,7 +16,10 @@ defmodule SymphonyElixirWeb.RateLimit do
     signup: {5, 60 * 60_000},
     reset: {10, 60 * 60_000},
     # The MCP endpoint, per client IP; generous for busy agents.
-    mcp: {600, 60_000}
+    mcp: {600, 60_000},
+    # GitHub App token refreshes, per run (`check/2`): a runner needs about one
+    # an hour, plus retries with backoff.
+    runner_github_token: {10, 10 * 60_000}
   }
 
   @spec init(atom()) :: atom()
@@ -37,6 +40,18 @@ defmodule SymphonyElixirWeb.RateLimit do
   end
 
   def call(conn, _action), do: conn
+
+  @doc """
+  Counts one request for `key` (e.g. a run id) against `action`'s limit.
+  Returns `:ok`, or `{:error, retry_after_seconds}` once the window's limit is
+  passed.
+  """
+  @spec check(atom(), term()) :: :ok | {:error, pos_integer()}
+  def check(action, key) when is_map_key(@limits, action) do
+    {limit, window_ms} = Map.fetch!(@limits, action)
+
+    if hit(action, key, window_ms) > limit, do: {:error, div(window_ms, 1000)}, else: :ok
+  end
 
   @doc false
   @spec reset() :: :ok

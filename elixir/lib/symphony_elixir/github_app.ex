@@ -109,8 +109,9 @@ defmodule SymphonyElixir.GitHubApp do
   The token a run needs, resolved from its issue's project route.
 
   Returns `{:ok, nil}` when `github_app` is not configured, so callers can keep
-  the old shared-credential behaviour unchanged. This is the hook a runner can
-  call to refresh a token it outlived; see `docs/durable-runs.md`.
+  the old shared-credential behaviour unchanged. The controller uses it at
+  launch and behind `POST /runner/v1/runs/:run_id/github-token`; see
+  `SymphonyElixir.GitHubApp.RunCredentials` and `docs/durable-runs.md`.
   """
   @spec token_for_run(RunSpec.t(), keyword()) :: {:ok, token() | nil} | {:error, term()}
   def token_for_run(%RunSpec{issue: issue} = _spec, opts \\ []) do
@@ -138,12 +139,17 @@ defmodule SymphonyElixir.GitHubApp do
 
   The token has at least 50 minutes left. Option `:base_env` is the
   environment the agent inherits (see `git_env/2`).
+
+  In a runner with per-run tokens (`SymphonyElixir.GitHubApp.RunnerToken`)
+  this is `[]` too: the agent inherits the runner's credential-helper
+  environment, whose token is refreshed in place, and a static header here
+  would take precedence over it and expire.
   """
   @spec env_pairs(map() | nil, keyword()) :: [{String.t(), String.t()}]
   def env_pairs(issue, opts \\ []) do
     settings = Keyword.get(opts, :settings) || Config.settings!()
 
-    if configured?(settings) do
+    if configured?(settings) and not SymphonyElixir.GitHubApp.RunnerToken.active?() do
       case Config.project_repo_source_for_issue(issue, settings) do
         %{kind: :github_slug, raw: repo} -> token_env(repo, settings, opts)
         _ -> []

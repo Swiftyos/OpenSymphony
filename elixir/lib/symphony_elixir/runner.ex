@@ -19,6 +19,7 @@ defmodule SymphonyElixir.Runner do
   alias SymphonyElixir.AgentRunner
   alias SymphonyElixir.Capacity.UsageReporter
   alias SymphonyElixir.Config
+  alias SymphonyElixir.GitHubApp.RunnerToken
   alias SymphonyElixir.IssueConfig
   alias SymphonyElixir.RunHost.Remote
   alias SymphonyElixir.RunnerCommandPoller
@@ -32,20 +33,50 @@ defmodule SymphonyElixir.Runner do
   @doc "Runs the spec, returning `:ok` or an error; never raises for a failed run."
   @spec run(Path.t()) :: :ok | {:error, term()}
   def run(spec_path) do
-    with {:ok, spec} <- RunSpec.read(Path.expand(spec_path)),
+    spec_path = Path.expand(spec_path)
+
+    with {:ok, spec} <- RunSpec.read(spec_path),
          :ok <- start_application() do
       started = ensure_runner_processes()
       # A pod's collector replaces the configured endpoints for this node.
       :ok = Telemetry.put_otlp_override(RunTrace.spec_otlp_override(spec.telemetry))
 
       try do
-        run_spec(spec)
+        with_github_token(spec, spec_path, fn -> run_spec(spec) end)
       after
         Telemetry.put_otlp_override(nil)
         stop_started(started)
       end
     end
   end
+
+  # With `github_app` on the controller, the run's installation token is kept
+  # fresh for the whole run, and git and `gh` read it from files (see
+  # `SymphonyElixir.GitHubApp.RunnerToken`). Without it nothing changes.
+  defp with_github_token(%RunSpec{github_host: host} = spec, spec_path, fun) when is_binary(host) and host != "" do
+    opts = [
+      run_id: spec.run_id,
+      controller_url: spec.controller_url,
+      run_token: spec.token,
+      host: host,
+      initial: RunnerToken.initial_credentials(spec_path)
+    ]
+
+    case RunnerToken.start(Keyword.merge(opts, Application.get_env(:symphony_elixir, :runner_github_token_options, []))) do
+      {:ok, pid} ->
+        try do
+          fun.()
+        after
+          RunnerToken.stop(pid)
+        end
+
+      {:error, reason} ->
+        Logger.warning("GitHub App token keeper did not start run_id=#{spec.run_id} reason=#{inspect(reason, limit: 5)}")
+        fun.()
+    end
+  end
+
+  defp with_github_token(_spec, _spec_path, fun), do: fun.()
 
   defp start_application do
     Application.put_env(:symphony_elixir, :app_mode, :runner)
