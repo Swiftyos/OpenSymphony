@@ -918,8 +918,56 @@ By default Symphony keeps its state in owner-only files under `~/.symphony`: ses
 - **Flows.** Flows are rescanned from the table every couple of seconds, as they are from disk, so a flow saved by another instance is picked up the same way.
 - **Pool size** comes from `SYMPHONY_DATABASE_POOL_SIZE` (default 10).
 - **Not moved yet.** Managed account credentials (`accounts.store_root`) stay on disk, because the agent CLIs read them from there.
-- **Moving existing state.** Nothing is copied automatically. To keep the current files, insert each one as a row: `key` is its path relative to `~/.symphony`, `body` its contents.
+- **Moving existing state.** Nothing is copied automatically; `symphony state export` and `symphony state import` move it (see below).
 - **Tests.** The store's tests are tagged `:postgres` and run when `SYMPHONY_TEST_DATABASE_URL` points at a database (`ecto://postgres@localhost/symphony_test`). Coverage only reaches its threshold with them, so CI starts a Postgres service.
+
+### Moving state from a VM to Postgres
+
+`symphony state export` packs a file-store controller's state into a `.tar.gz`, and `symphony state import` writes one into the configured store: Postgres when `SYMPHONY_DATABASE_URL` is set, otherwise files under `--state-dir <dir>` (one of the two is required). Both take `-` for stdout/stdin, so state can stream from a VM straight into a Kubernetes pod.
+
+```bash
+symphony state export <state-dir> <out.tar.gz|->
+symphony state import <archive.tar.gz|-> [--dry-run] [--overwrite] [--skip-secret-key-base] [--state-dir <dir>]
+```
+
+- **What moves.** Only these documents, from a fixed list (never a directory walk): `users.json`, `mcp_tokens.json`, `project_routes.json`, `factories/<scope>.json`, `usage.json`, `session_history.json`, `inbox.json` (queued messages for agents) and `secret_key_base`.
+- **What stays, and why.**
+  - `sessions.json`: agent sessions to resume, pointing at this host's workspaces and agent session files.
+  - `retries.json`: this host's retry queue, with its worker host and workspace paths. Issues still in an agent state are picked up again by the first poll.
+  - `runs.json`, `run_registry/`, `runs/`: runs started on this host. Their processes don't exist on the new controller, which would otherwise try to adopt or retry them.
+  - `accounts/`: managed account logins that the agent CLIs read from disk. They are plain files, not state documents. Set them up again on the new controller (`symphony accounts login|import`).
+  - Logs, workspaces, repo caches and transcripts: not state documents.
+- **The session secret.** `secret_key_base` signs session cookies, so importing it keeps people signed in. It is skipped when the importing environment sets `SYMPHONY_SECRET_KEY_BASE`. Pass `--skip-secret-key-base` when the secret is set as `server.secret_key_base` in the config file instead. Runner tokens also use it, but no runs move.
+- **MCP tokens keep working.** Only each token's SHA-256 is stored, without the secret key base, so the same tokens verify on the new controller.
+- **Safe to repeat.** Every document is checked before anything is written: the manifest, the checksums, that each key is on the list, and that JSON documents parse. A key that already holds the same content is `unchanged`. A key holding different content is a conflict: nothing is written unless `--overwrite` is given. `--dry-run` prints the plan only.
+- **No values in the output.** Summaries print keys and sizes, never contents.
+- **The archive is a secret.** It holds password hashes, token hashes and the session secret, and is written at mode 0600. Delete copies when the move is done.
+- **Startup.** The import starts only the repo and its migrations, not the orchestrator, so it can run inside the controller's pod.
+
+Moving a VM controller to Kubernetes:
+
+1. Stop Symphony on the VM so its state is final, for example with a delayed restart (`systemctl reload symphony`) and then `systemctl stop symphony`. Two controllers on one Linear workspace would dispatch the same issues.
+2. Check what would change:
+
+   ```bash
+   ssh vm 'symphony state export ~/.symphony -' \
+     | kubectl -n symphony exec -i deploy/symphony-controller -- symphony state import - --dry-run
+   ```
+
+3. Import. A controller that has already started on Postgres has created documents of its own, such as `secret_key_base` and `usage.json`. The dry run lists them as conflicts; add `--overwrite` to replace them with the VM's.
+
+   ```bash
+   ssh vm 'symphony state export ~/.symphony -' \
+     | kubectl -n symphony exec -i deploy/symphony-controller -- symphony state import - --overwrite
+   ```
+
+4. Restart the controller right away, so every store loads the imported documents instead of keeping, and later writing back, what it holds in memory:
+
+   ```bash
+   kubectl -n symphony rollout restart deploy/symphony-controller
+   ```
+
+5. Set up managed accounts on the new controller.
 
 ### Delayed restart
 

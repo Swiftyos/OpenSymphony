@@ -31,9 +31,13 @@ defmodule SymphonyElixir.CLI do
 
   @spec main([String.t()]) :: no_return()
   def main(args) do
+    # `state` streams an archive over stdio and starts no Symphony application;
+    # keep the repo's info and query logs (which carry document bodies) out.
+    if state_command?(args), do: quiet_logger()
+
     case evaluate(args) do
       :ok ->
-        if accounts_command?(args) or runner_command?(args) do
+        if accounts_command?(args) or runner_command?(args) or state_command?(args) do
           System.halt(0)
         else
           wait_for_shutdown()
@@ -51,11 +55,23 @@ defmodule SymphonyElixir.CLI do
   defp runner_command?(["runner" | _args]), do: true
   defp runner_command?(_args), do: false
 
+  defp quiet_logger do
+    Application.put_env(:logger, :level, :warning)
+    Logger.configure(level: :warning)
+  end
+
+  defp state_command?(["state" | _args]), do: true
+  defp state_command?(_args), do: false
+
   @spec evaluate([String.t()], deps()) :: :ok | {:error, String.t()}
   def evaluate(args, deps \\ runtime_deps())
 
   def evaluate(["runner" | runner_args], deps) do
     evaluate_runner(runner_args, deps)
+  end
+
+  def evaluate(["state" | state_args], deps) do
+    Map.get(deps, :state, &SymphonyElixir.StateTransfer.run/1).(state_args)
   end
 
   def evaluate(["accounts" | account_args], deps) do
@@ -129,6 +145,8 @@ defmodule SymphonyElixir.CLI do
       symphony accounts pause <codex|claude> <id> [--until <timestamp>] [--reason <text>] [path-to-symphony.yml|path-to-WORKFLOW.md]
       symphony accounts resume <codex|claude> <id> [path-to-symphony.yml|path-to-WORKFLOW.md]
       symphony accounts remove <codex|claude> <id> [path-to-symphony.yml|path-to-WORKFLOW.md]
+      symphony state export <state-dir> <out.tar.gz|->
+      symphony state import <archive.tar.gz|-> [--dry-run] [--overwrite] [--skip-secret-key-base] [--state-dir <dir>]
     """
     |> String.trim()
   end
