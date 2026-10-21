@@ -185,21 +185,23 @@ defmodule SymphonyElixir.Linear.Client do
     payload = build_graphql_payload(query, variables, Keyword.get(opts, :operation_name))
     operation = graphql_operation_name(query, Keyword.get(opts, :operation_name))
     request_fun = Keyword.get(opts, :request_fun, &post_graphql_request/2)
+    api_key = Keyword.get(opts, :api_key)
 
     # `api_key:` runs the request as a specific Linear user (dashboard sign-in)
-    # instead of Symphony's own tracker key.
-    with {:ok, headers} <- graphql_headers(Keyword.get(opts, :api_key)) do
+    # instead of Symphony's own tracker key. Rate-limit gauges track the
+    # tracker key only, so a dashboard request must not overwrite them.
+    with {:ok, headers} <- graphql_headers(api_key) do
       started_at = System.monotonic_time()
       result = request_fun.(payload, headers)
       record_request_metrics(operation, result, System.monotonic_time() - started_at)
 
       case result do
         {:ok, %{status: 200, body: body}} ->
-          record_rate_limit_headers(result)
+          maybe_record_rate_limit_headers(result, api_key)
           {:ok, body}
 
         {:ok, response} ->
-          record_rate_limit_headers(result)
+          maybe_record_rate_limit_headers(result, api_key)
 
           Logger.error(
             "Linear GraphQL request failed status=#{response.status}" <>
@@ -251,6 +253,9 @@ defmodule SymphonyElixir.Linear.Client do
   defp request_outcome({:ok, %{status: 429}}), do: "rate_limited"
   defp request_outcome({:ok, %{status: 200}}), do: "ok"
   defp request_outcome(_result), do: "error"
+
+  defp maybe_record_rate_limit_headers(result, nil), do: record_rate_limit_headers(result)
+  defp maybe_record_rate_limit_headers(_result, _api_key), do: :ok
 
   defp record_rate_limit_headers({:ok, response}) do
     case Map.get(response, :headers) do

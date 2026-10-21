@@ -6,7 +6,7 @@ defmodule SymphonyElixir.CapacityTest do
   alias SymphonyElixir.Linear.Client
 
   describe "capacity config" do
-    test "defaults to a 30 second sample interval and accepts 0" do
+    test "defaults to a 30 second sample interval and accepts 0 or at least one second" do
       assert {:ok, settings} = Schema.parse(%{})
       assert settings.capacity.sample_interval_ms == 30_000
 
@@ -16,10 +16,22 @@ defmodule SymphonyElixir.CapacityTest do
       assert {:ok, settings} = Schema.parse(%{"capacity" => %{"sample_interval_ms" => 5_000}})
       assert settings.capacity.sample_interval_ms == 5_000
 
-      assert {:error, {:invalid_workflow_config, message}} =
-               Schema.parse(%{"capacity" => %{"sample_interval_ms" => -1}})
+      assert {:ok, settings} = Schema.parse(%{"capacity" => %{"sample_interval_ms" => 1_000}})
+      assert settings.capacity.sample_interval_ms == 1_000
 
-      assert message =~ "capacity.sample_interval_ms must be greater than or equal to 0"
+      for invalid <- [-1, 1, 999] do
+        assert {:error, {:invalid_workflow_config, message}} =
+                 Schema.parse(%{"capacity" => %{"sample_interval_ms" => invalid}})
+
+        assert message =~ "capacity.sample_interval_ms must be 0 (off) or at least 1000"
+      end
+    end
+
+    test "rejects a missing interval instead of storing nil" do
+      changeset = Schema.Capacity.changeset(%Schema.Capacity{}, %{sample_interval_ms: nil})
+
+      refute changeset.valid?
+      assert {"can't be blank", _} = changeset.errors[:sample_interval_ms]
     end
   end
 
@@ -94,6 +106,10 @@ defmodule SymphonyElixir.CapacityTest do
       assert Metrics.snapshot() == %{counters: [], gauges: [], histograms: []}
       assert Metrics.reset() == :ok
     end
+
+    test "metric writes rescue a table deleted between lookup and write" do
+      assert Metrics.write(fn _table -> raise ArgumentError, "table gone" end) == :ok
+    end
   end
 
   describe "Linear instrumentation" do
@@ -129,6 +145,30 @@ defmodule SymphonyElixir.CapacityTest do
       assert body =~ ~s(symphony_linear_rate_limit_remaining{kind="requests"} 42)
       assert body =~ ~s(symphony_linear_rate_limit_remaining{kind="complexity"} 7)
       assert body =~ ~s(symphony_linear_request_duration_seconds_count{operation="SymphonyCreateComment"} 1)
+    end
+
+    test "does not let a per-user API key overwrite the tracker rate-limit gauges" do
+      request = fn _payload, _headers ->
+        {:ok,
+         %{
+           status: 200,
+           body: %{"data" => %{"ok" => true}},
+           headers: [{"x-ratelimit-requests-remaining", "99"}, {"x-ratelimit-complexity-remaining", "98"}]
+         }}
+      end
+
+      assert {:ok, _body} = Client.graphql("{ viewer { id } }", %{}, request_fun: request, api_key: "dashboard-user-key")
+
+      body = Prometheus.render()
+      refute body =~ ~s(symphony_linear_rate_limit_remaining{kind="requests"})
+      refute body =~ ~s(symphony_linear_rate_limit_remaining{kind="complexity"})
+      assert body =~ ~s(symphony_linear_requests_total{operation="unknown",outcome="ok"} 1)
+
+      assert {:ok, _body} = Client.graphql("{ viewer { id } }", %{}, request_fun: request)
+
+      body = Prometheus.render()
+      assert body =~ ~s(symphony_linear_rate_limit_remaining{kind="requests"} 99)
+      assert body =~ ~s(symphony_linear_rate_limit_remaining{kind="complexity"} 98)
     end
 
     test "classifies errors and rate limits, falls back to operationName, and ignores bad headers" do
@@ -270,6 +310,30 @@ defmodule SymphonyElixir.CapacityTest do
       assert Enum.at(samples, 8).cpu_percent == 9.0
     end
 
+    test "parses cumulative CPU time fields in container stats" do
+      rows = [
+        %{"name" => "seconds-number", "cpu_seconds" => 1.5},
+        %{"name" => "seconds-string", "CPUSeconds" => "2.5"},
+        %{"name" => "seconds-bad", "cpu_seconds" => "bad"},
+        %{"name" => "seconds-other", "cpu_seconds" => %{}},
+        %{"name" => "nano-number", "cpu_time_ns" => 3_000_000_000},
+        %{"name" => "nano-string", "cpu_time_ns" => "4000000000"},
+        %{"name" => "nano-bad", "cpu_time_ns" => "bad"},
+        %{"name" => "nano-other", "cpu_time_ns" => %{}},
+        %{"name" => "time-number", "cpu_time" => 5_000_000_000},
+        %{"name" => "time-seconds-suffix", "CPUTime" => "6s"},
+        %{"name" => "time-clock", "cpu_time" => "00:00:07"},
+        %{"name" => "time-bad-clock", "cpu_time" => "1:bad"},
+        %{"name" => "time-text", "cpu_time" => "garbage"},
+        %{"name" => "time-other", "cpu_time" => %{}}
+      ]
+
+      assert {:ok, samples} = Sampler.parse_container_stats(Jason.encode!(rows))
+
+      assert Enum.map(samples, & &1.cpu_seconds) ==
+               [1.5, 2.5, nil, nil, 3.0, 4.0, nil, nil, 5.0, 6.0, 7.0, nil, nil, nil]
+    end
+
     test "reports malformed output instead of raising" do
       assert Sampler.parse_container_stats("") == {:ok, []}
       assert {:error, _reason} = Sampler.parse_container_stats("[")
@@ -281,38 +345,48 @@ defmodule SymphonyElixir.CapacityTest do
   end
 
   describe "process tree aggregation" do
-    test "parses ps output and sums roots plus descendants, skipping bad lines" do
+    test "parses headerless ps output and sums cumulative CPU time plus descendants" do
       output = """
-      PID PPID RSS %CPU
-      100 1 1000 1.5
-      101 100 2000 2.5
-      102 101 3000 3.0
-      200 1 4000 4.0
+      100 1 1000 00:00:01.5
+      101 100 2000 00:00:02.5
+      102 101 3000 00:00:03.0
+      200 1 4000 00:00:04
       bad row
-      201 x 1 1
-      202 1 x 1
+      201 x 1 00:00:01
+      202 1 x 00:00:01
+      203 1 100 nope
       """
 
       assert {:ok, processes} = Sampler.parse_ps(output)
-      assert processes[100] == %{ppid: 1, rss_kb: 1000.0, cpu_percent: 1.5}
+      assert processes[100] == %{ppid: 1, rss_kb: 1000.0, cpu_seconds: 1.5}
 
       assert %{
-               100 => %{cpu_percent: 7.0, memory_bytes: 6_144_000},
-               200 => %{cpu_percent: 4.0, memory_bytes: 4_096_000}
+               100 => %{cpu_seconds: 7.0, memory_bytes: 6_144_000},
+               200 => %{cpu_seconds: 4.0, memory_bytes: 4_096_000}
              } = Sampler.aggregate_processes(processes, [100, 200])
 
       assert Sampler.parse_ps(nil) == {:error, :invalid_ps_output}
     end
 
-    test "does not loop on cycles and tolerates missing roots" do
+    test "does not loop on cycles and skips roots that are not present" do
       processes = %{
-        1 => %{ppid: 2, rss_kb: 1, cpu_percent: 1},
-        2 => %{ppid: 1, rss_kb: 2, cpu_percent: 2}
+        1 => %{ppid: 2, rss_kb: 1, cpu_seconds: 1},
+        2 => %{ppid: 1, rss_kb: 2, cpu_seconds: 2}
       }
 
       result = Sampler.aggregate_processes(processes, [1, 99])
-      assert result[1] == %{cpu_percent: 3.0, memory_bytes: 3_072}
-      assert result[99] == %{cpu_percent: 0.0, memory_bytes: 0}
+      assert result[1] == %{cpu_seconds: 3.0, memory_bytes: 3_072}
+      refute Map.has_key?(result, 99)
+    end
+
+    test "parses ps clock formats" do
+      assert Sampler.parse_cpu_time("00:00:01.5") == {:ok, 1.5}
+      assert Sampler.parse_cpu_time("12:34") == {:ok, 754.0}
+      assert Sampler.parse_cpu_time("1-02:03:04") == {:ok, 93_784.0}
+      assert Sampler.parse_cpu_time("bad") == :error
+      assert Sampler.parse_cpu_time("a:b") == :error
+      assert Sampler.parse_cpu_time("1:2:3:4") == :error
+      assert Sampler.parse_cpu_time(nil) == :error
     end
   end
 
@@ -339,6 +413,35 @@ defmodule SymphonyElixir.CapacityTest do
       :ok
     end
 
+    test "starts safely with a nil or too-small interval" do
+      nil_interval_settings = %{capacity: %{sample_interval_ms: nil}, sandbox: %{kind: "none", command: "docker"}}
+
+      {:ok, nil_interval} =
+        start_supervised(%{
+          id: :capacity_nil_interval,
+          start: {Sampler, :start_link, [[name: :capacity_nil_interval_sampler, settings: nil_interval_settings]]}
+        })
+
+      assert %{interval_ms: 0} = :sys.get_state(nil_interval)
+
+      {:ok, too_small} =
+        start_supervised(%{
+          id: :capacity_small_interval,
+          start:
+            {Sampler, :start_link,
+             [
+               [
+                 name: :capacity_small_interval_sampler,
+                 settings: nil_interval_settings,
+                 sample_interval_ms: 500
+               ]
+             ]}
+        })
+
+      assert %{interval_ms: 0} = :sys.get_state(too_small)
+      refute_receive :sample, 20
+    end
+
     test "selects podman and docker stats arguments" do
       assert Sampler.stats_args("/usr/bin/podman") == ["stats", "--no-stream", "--format", "json"]
       assert Sampler.stats_args("docker") == ["stats", "--no-stream", "--format", "{{json .}}"]
@@ -348,6 +451,7 @@ defmodule SymphonyElixir.CapacityTest do
       workspace = Path.join(System.tmp_dir!(), "symphony-capacity-container")
       container = SymphonyElixir.Sandbox.container_name(workspace)
       settings = docker_settings("podman")
+      parent = self()
 
       snapshot = %{
         running: [
@@ -371,7 +475,7 @@ defmodule SymphonyElixir.CapacityTest do
       }
 
       runner = fn command, args, opts ->
-        send(self(), {:stats, command, args, opts})
+        send(parent, {:stats, command, args, opts})
 
         {Jason.encode!([
            %{"name" => container, "cpu" => "25.0%", "mem_usage" => "512MiB / 1GiB"},
@@ -390,16 +494,57 @@ defmodule SymphonyElixir.CapacityTest do
       assert body =~ ~s(symphony_run_memory_bytes_distribution_count{} 1)
     end
 
-    test "samples local process trees and skips remote workers" do
+    test "computes container CPU from cumulative CPU time deltas between samples" do
+      workspace = Path.join(System.tmp_dir!(), "symphony-capacity-container-delta")
+      container = SymphonyElixir.Sandbox.container_name(workspace)
+      settings = docker_settings("podman")
+
+      snapshot = fn -> %{running: [%{identifier: "PAY-1", backend: "codex", stage: "implement", workspace_path: workspace}]} end
+
+      first = Jason.encode!([%{"name" => container, "cpu" => "50.0%", "mem_usage" => "512MiB / 1GiB", "cpu_time_ns" => 2_000_000_000}])
+      second = Jason.encode!([%{"name" => container, "cpu" => "75.0%", "mem_usage" => "512MiB / 1GiB", "cpu_time_ns" => 3_000_000_000}])
+
+      calls = :counters.new(1, [])
+
+      runner = fn _command, _args, _opts ->
+        index = :counters.get(calls, 1)
+        :counters.add(calls, 1, 1)
+        {Enum.at([first, second], index), 0}
+      end
+
+      clock = :counters.new(1, [])
+      :counters.put(clock, 1, 1_000)
+
+      {:ok, pid} =
+        start_supervised(
+          {Sampler, name: :capacity_container_delta_sampler, settings: settings, sample_interval_ms: 0, snapshot_fun: snapshot, command_runner: runner, clock: fn -> :counters.get(clock, 1) end}
+        )
+
+      send(pid, :sample)
+      :sys.get_state(pid)
+
+      first_body = Prometheus.render()
+      assert first_body =~ ~s(symphony_run_memory_bytes{backend="codex",issue="PAY-1",stage="implement"} 536870912)
+      refute first_body =~ ~s(symphony_run_cpu_percent{backend="codex",issue="PAY-1")
+
+      :counters.put(clock, 1, 2_000)
+      send(pid, :sample)
+      :sys.get_state(pid)
+
+      second_body = Prometheus.render()
+      assert second_body =~ ~s(symphony_run_cpu_percent{backend="codex",issue="PAY-1",stage="implement"} 100.0)
+    end
+
+    test "samples local process memory first and skips remote workers" do
       settings = no_sandbox_settings()
+      parent = self()
 
       ps = """
-      PID PPID RSS %CPU
-      100 1 1000 1.5
-      101 100 2000 2.5
-      102 101 3000 3.0
-      200 1 4000 4.0
-      300 1 5000 5.0
+      100 1 1000 00:00:01.5
+      101 100 2000 00:00:02.5
+      102 101 3000 00:00:03.0
+      200 1 4000 00:00:04.0
+      300 1 5000 00:00:05.0
       """
 
       snapshot = %{
@@ -413,19 +558,99 @@ defmodule SymphonyElixir.CapacityTest do
       }
 
       runner = fn command, args, opts ->
-        send(self(), {:ps, command, args, opts})
+        send(parent, {:ps, command, args, opts})
         {ps, 0}
       end
 
       assert :ok = Sampler.sample(settings: settings, snapshot_fun: fn -> snapshot end, command_runner: runner)
-      assert_receive {:ps, "ps", ["-o", "pid,ppid,rss,%cpu", "-ax"], _opts}
+      assert_receive {:ps, "ps", ["-e", "-o", "pid=,ppid=,rss=,time="], _opts}
 
       body = Prometheus.render()
       assert body =~ ~s(symphony_runs_sampled{} 2)
-      assert body =~ ~s(symphony_run_cpu_percent{backend="codex",issue="PAY-1",stage="implement"} 7.0)
       assert body =~ ~s(symphony_run_memory_bytes{backend="codex",issue="PAY-1",stage="implement"} 6144000)
-      assert body =~ ~s(symphony_run_cpu_percent{backend="claude",issue="PAY-2",stage="review"} 4.0)
+      assert body =~ ~s(symphony_run_memory_bytes{backend="claude",issue="PAY-2",stage="review"} 4096000)
+      refute body =~ ~s(symphony_run_cpu_percent{backend="codex",issue="PAY-1")
       refute body =~ "REMOTE-1"
+    end
+
+    test "computes process CPU from cumulative CPU time deltas between samples" do
+      settings = no_sandbox_settings()
+
+      snapshot = fn ->
+        %{
+          running: [
+            %{issue_id: "issue-1", identifier: "PAY-1", backend: "codex", stage: "implement", agent_server_pid: "100"}
+          ]
+        }
+      end
+
+      first = """
+      100 1 1000 00:00:10
+      101 100 2000 00:00:05
+      """
+
+      second = """
+      100 1 1000 00:00:10.25
+      101 100 2000 00:00:05.25
+      """
+
+      calls = :counters.new(1, [])
+
+      runner = fn _command, _args, _opts ->
+        index = :counters.get(calls, 1)
+        :counters.add(calls, 1, 1)
+        {Enum.at([first, second], index), 0}
+      end
+
+      clock = :counters.new(1, [])
+      :counters.put(clock, 1, 1_000)
+
+      {:ok, pid} =
+        start_supervised(
+          {Sampler, name: :capacity_process_delta_sampler, settings: settings, sample_interval_ms: 0, snapshot_fun: snapshot, command_runner: runner, clock: fn -> :counters.get(clock, 1) end}
+        )
+
+      send(pid, :sample)
+      :sys.get_state(pid)
+
+      first_body = Prometheus.render()
+      assert first_body =~ ~s(symphony_runs_sampled{} 1)
+      assert first_body =~ ~s(symphony_run_memory_bytes{backend="codex",issue="PAY-1",stage="implement"} 3072000)
+      refute first_body =~ ~s(symphony_run_cpu_percent{backend="codex",issue="PAY-1")
+      assert first_body =~ ~s(symphony_run_memory_bytes_distribution_count{} 1)
+      refute first_body =~ "symphony_run_cpu_percent_distribution_count"
+
+      :counters.put(clock, 1, 2_000)
+      send(pid, :sample)
+      :sys.get_state(pid)
+
+      second_body = Prometheus.render()
+      assert second_body =~ ~s(symphony_run_cpu_percent{backend="codex",issue="PAY-1",stage="implement"} 50.0)
+      assert second_body =~ ~s(symphony_run_memory_bytes_distribution_count{} 2)
+      assert second_body =~ ~s(symphony_run_cpu_percent_distribution_count{} 1)
+    end
+
+    test "skips roots missing from ps output instead of recording them as zero" do
+      snapshot = fn ->
+        %{
+          running: [
+            %{identifier: "PAY-1", backend: "codex", stage: "implement", agent_server_pid: "100"},
+            %{identifier: "PAY-2", backend: "claude", stage: "review", agent_server_pid: "200"}
+          ]
+        }
+      end
+
+      assert :ok =
+               Sampler.sample(
+                 settings: no_sandbox_settings(),
+                 snapshot_fun: snapshot,
+                 command_runner: fn "ps", _args, _opts -> {"200 1 4000 00:00:04\n", 0} end
+               )
+
+      body = Prometheus.render()
+      assert body =~ ~s(symphony_runs_sampled{} 1)
+      assert body =~ ~s(symphony_run_memory_bytes{backend="claude",issue="PAY-2",stage="review"} 4096000)
+      refute body =~ ~s(symphony_run_memory_bytes{backend="codex",issue="PAY-1")
     end
 
     test "does not run a command when nothing is running" do
@@ -439,6 +664,63 @@ defmodule SymphonyElixir.CapacityTest do
                )
 
       assert Prometheus.render() =~ ~s(symphony_runs_sampled{} 0)
+    end
+
+    test "times out a hanging command, keeps old gauges and records the reason" do
+      settings = docker_settings("podman")
+      Metrics.set_gauge("symphony_run_cpu_percent", [issue: "OLD-1"], 12.5)
+      Metrics.set_gauge("symphony_runs_sampled", [], 3)
+
+      snapshot = fn -> %{running: [%{identifier: "PAY-1", workspace_path: "/tmp/capacity-hang"}]} end
+      started_at = System.monotonic_time(:millisecond)
+
+      assert :ok =
+               Sampler.sample(
+                 settings: settings,
+                 snapshot_fun: snapshot,
+                 command_runner: fn _command, _args, _opts -> Process.sleep(:infinity) end,
+                 command_timeout_ms: 50
+               )
+
+      assert System.monotonic_time(:millisecond) - started_at < 2_000
+
+      body = Prometheus.render()
+      assert body =~ ~s(symphony_runs_sampled{} 0)
+      assert body =~ ~s(symphony_run_cpu_percent{issue="OLD-1"} 12.5)
+      assert body =~ ~s(symphony_capacity_sample_errors_total{reason="timeout"} 1)
+    end
+
+    test "the default command runner kills a hung child at the deadline" do
+      root = Path.join(System.tmp_dir!(), "symphony-capacity-hang-#{System.unique_integer([:positive])}")
+      script = Path.join(root, "hang.sh")
+      pid_file = Path.join(root, "pid")
+
+      try do
+        File.mkdir_p!(root)
+        File.write!(script, "#!/bin/sh\necho $$ > #{pid_file}\nexec sleep 30\n")
+        File.chmod!(script, 0o755)
+
+        started_at = System.monotonic_time(:millisecond)
+
+        assert :ok =
+                 Sampler.sample(
+                   settings: docker_settings(script),
+                   snapshot_fun: fn -> %{running: [%{identifier: "PAY-1", workspace_path: "/tmp/capacity-hang"}]} end,
+                   command_timeout_ms: 1_000
+                 )
+
+        assert System.monotonic_time(:millisecond) - started_at < 5_000
+
+        body = Prometheus.render()
+        assert body =~ ~s(symphony_capacity_sample_errors_total{reason="timeout"} 1)
+
+        os_pid = pid_file |> File.read!() |> String.trim()
+        Process.sleep(100)
+        {_output, status} = System.cmd("kill", ["-0", os_pid], stderr_to_stdout: true)
+        assert status != 0
+      after
+        File.rm_rf(root)
+      end
     end
 
     test "handles unavailable snapshots and empty container sets" do
@@ -488,6 +770,42 @@ defmodule SymphonyElixir.CapacityTest do
         end)
 
       assert length(String.split(log, "Capacity sampler failed")) == 2
+    end
+
+    test "logs the same error kind again after a successful sample" do
+      settings = docker_settings("podman")
+      workspace = Path.join(System.tmp_dir!(), "symphony-capacity-relog")
+      container = SymphonyElixir.Sandbox.container_name(workspace)
+
+      valid = Jason.encode!([%{"name" => container, "cpu" => "1.0%", "mem_usage" => "1MiB / 1GiB"}])
+      calls = :counters.new(1, [])
+
+      runner = fn _command, _args, _opts ->
+        index = :counters.get(calls, 1)
+        :counters.add(calls, 1, 1)
+        {Enum.at(["not json", valid, "not json"], index), 0}
+      end
+
+      sampler_opts = [
+        name: :capacity_relog_sampler,
+        settings: settings,
+        sample_interval_ms: 0,
+        snapshot_fun: fn -> %{running: [%{identifier: "PAY-1", workspace_path: workspace}]} end,
+        command_runner: runner
+      ]
+
+      {:ok, pid} = start_supervised({Sampler, sampler_opts})
+
+      log =
+        capture_log(fn ->
+          for _ <- 1..3 do
+            send(pid, :sample)
+            :sys.get_state(pid)
+          end
+        end)
+
+      assert length(String.split(log, "Capacity sampler failed")) == 3
+      assert Prometheus.render() =~ ~s(symphony_capacity_sample_errors_total{reason="container_stats_parse_error"} 2)
     end
 
     test "logs command failures and exceptions once and never crashes" do
@@ -590,6 +908,90 @@ defmodule SymphonyElixir.CapacityTest do
                  snapshot_fun: fn -> :weird end,
                  command_runner: fn _, _, _ -> {"", 0} end
                )
+    end
+
+    test "maps an explicit command timeout status to the timeout reason" do
+      ps_snapshot = fn -> %{running: [%{identifier: "PAY-1", agent_server_pid: "100"}]} end
+
+      assert :ok =
+               Sampler.sample(
+                 settings: no_sandbox_settings(),
+                 snapshot_fun: ps_snapshot,
+                 command_runner: fn "ps", _args, _opts -> {"deadline", 124} end
+               )
+
+      assert :ok =
+               Sampler.sample(
+                 settings: docker_settings("podman"),
+                 snapshot_fun: fn -> %{running: [%{identifier: "PAY-1", workspace_path: "/tmp/capacity-timeout"}]} end,
+                 command_runner: fn _command, _args, _opts -> {"deadline", 124} end
+               )
+
+      body = Prometheus.render()
+      assert body =~ ~s(symphony_runs_sampled{} 0)
+      assert body =~ ~s(symphony_capacity_sample_errors_total{reason="timeout"} 2)
+    end
+
+    test "treats a runner returning an unexpected shape as a command exception" do
+      assert :ok =
+               Sampler.sample(
+                 settings: docker_settings("podman"),
+                 snapshot_fun: fn -> %{running: [%{identifier: "PAY-1", workspace_path: "/tmp/capacity-weird"}]} end,
+                 command_runner: fn _command, _args, _opts -> :weird end
+               )
+
+      body = Prometheus.render()
+      assert body =~ ~s(symphony_runs_sampled{} 0)
+      assert body =~ ~s(symphony_capacity_sample_errors_total{reason="command_exception"} 1)
+    end
+
+    test "reports a missing container command" do
+      command = "symphony-no-such-command-#{System.unique_integer([:positive])}"
+
+      assert :ok =
+               Sampler.sample(
+                 settings: docker_settings(command),
+                 snapshot_fun: fn -> %{running: [%{identifier: "PAY-1", workspace_path: "/tmp/capacity-missing"}]} end,
+                 command_timeout_ms: 100
+               )
+
+      body = Prometheus.render()
+      assert body =~ ~s(symphony_runs_sampled{} 0)
+      assert body =~ ~s(symphony_capacity_sample_errors_total{reason="container_stats_failed"} 1)
+    end
+
+    test "the default command runner records a successful command and an entry without an id" do
+      root = Path.join(System.tmp_dir!(), "symphony-capacity-success-#{System.unique_integer([:positive])}")
+      script = Path.join(root, "stats.sh")
+      workspace = Path.join(System.tmp_dir!(), "symphony-capacity-success-workspace")
+      container = SymphonyElixir.Sandbox.container_name(workspace)
+
+      try do
+        File.mkdir_p!(root)
+
+        File.write!(script, """
+        #!/bin/sh
+        cat <<'EOF'
+        [{"name":"#{container}","cpu":"12.5%","mem_usage":"32MiB / 1GiB"}]
+        EOF
+        """)
+
+        File.chmod!(script, 0o755)
+
+        assert :ok =
+                 Sampler.sample(
+                   settings: docker_settings(script),
+                   snapshot_fun: fn -> %{running: [%{workspace_path: workspace}]} end,
+                   command_timeout_ms: 5_000
+                 )
+
+        body = Prometheus.render()
+        assert body =~ ~s(symphony_runs_sampled{} 1)
+        assert body =~ ~s(symphony_run_cpu_percent{backend="unknown",issue="",stage=""} 12.5)
+        assert body =~ ~s(symphony_run_memory_bytes{backend="unknown",issue="",stage=""} 33554432)
+      after
+        File.rm_rf(root)
+      end
     end
 
     test "handles ps and container command failures without metrics" do

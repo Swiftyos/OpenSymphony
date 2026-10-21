@@ -12,6 +12,9 @@ capacity:
   sample_interval_ms: 30000  # default; 0 disables the sampler
 ```
 
+`sample_interval_ms` must be `0` (off) or at least `1000`; smaller positive values are rejected
+instead of scheduling a tight loop.
+
 The Linear and git counters are always recorded; `sample_interval_ms: 0` only disables the periodic
 CPU/memory sampler.
 
@@ -36,19 +39,35 @@ CPU/memory sampler.
 ### Running agents
 
 - `symphony_run_cpu_percent{issue,backend,stage}`: latest sampled CPU use, in percent of one CPU
-  (100 means one full core).
+  (100 means one full core). It is computed from the growth in cumulative CPU time between two
+  samples, not from `ps %cpu` or one-shot `podman stats` percentages (both are lifetime averages).
 - `symphony_run_memory_bytes{issue,backend,stage}`: latest sampled RSS/container memory, in bytes.
-- `symphony_runs_sampled`: number of running agents matched by the latest sample.
+- `symphony_runs_sampled`: number of running agents matched by the latest sample, or `0` when the
+  latest sample failed.
+- `symphony_capacity_sample_errors_total{reason}`: failed samples by reason (`timeout`,
+  `ps_failed`, `ps_parse_error`, `container_stats_failed`, `container_stats_parse_error`,
+  `snapshot_*`, `command_exception`, `sampler_exception`).
 - `symphony_run_cpu_percent_distribution`: histogram of every sample since start (0–800%).
 - `symphony_run_memory_bytes_distribution`: histogram of every sample since start (0–32 GiB).
 - `symphony_run_tokens_per_minute{issue,backend}`: token total for the run divided by the run's age.
 
 With `sandbox.kind: docker`, one `docker`/`podman stats` call per sample covers all Symphony
-containers and containers are mapped back to issues by workspace. Without a sandbox, one `ps` call
-per sample covers the process trees of the local agent app servers, including child processes.
+containers and containers are mapped back to issues by workspace. Without a sandbox, one
+portable `ps -e -o pid=,ppid=,rss=,time=` call per sample covers the process trees of the local
+agent app servers, including child processes.
 
-Sampler failures (missing container command, unreadable `ps`, invalid JSON) are logged once per
-distinct error and never crash Symphony.
+The first sample of a run records memory only; CPU appears from the second sample once a delta is
+available. For processes the delta uses the summed cumulative `ps` CPU time of the tree. For
+containers it uses a cumulative CPU-time field when the stats output has one (`CPUNano`,
+`cpu_time_ns`, ...); when it does not, the sampler falls back to the reported one-shot percentage,
+which is an average since container start and therefore only indicative for long-lived containers.
+
+Every command runs with a `10s` deadline: on timeout the sampler kills the child process, records
+`symphony_capacity_sample_errors_total{reason="timeout"}`, sets `symphony_runs_sampled` to `0`, and
+leaves the previous per-run gauges in place. Gauges for runs that have finished are deleted only
+after a successful sample. Sampler failures (missing container command, unreadable `ps`, invalid
+JSON) are logged once per kind of error and never crash Symphony; a successful sample clears that
+record so a later failure is logged again.
 
 ## Reading it from the VM
 

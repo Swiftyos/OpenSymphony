@@ -90,11 +90,9 @@ defmodule SymphonyElixir.Capacity.Metrics do
   def record_counter(name, labels \\ [], amount \\ 1) when is_binary(name) and is_number(amount) do
     labels = normalize_labels(labels)
 
-    with table when not is_nil(table) <- table() do
+    write(fn table ->
       :ets.update_counter(table, {:counter, name, labels}, {2, amount}, {{:counter, name, labels}, 0})
-    end
-
-    :ok
+    end)
   end
 
   @doc "Stores the latest value of a labelled gauge."
@@ -102,23 +100,19 @@ defmodule SymphonyElixir.Capacity.Metrics do
   def set_gauge(name, labels, value) when is_binary(name) and is_number(value) do
     labels = normalize_labels(labels)
 
-    with table when not is_nil(table) <- table() do
+    write(fn table ->
       :ets.insert(table, {{:gauge, name, labels}, value})
-    end
-
-    :ok
+    end)
   end
 
   @doc "Deletes every gauge with one of the given names."
   @spec delete_gauges([String.t()]) :: :ok
   def delete_gauges(names) when is_list(names) do
-    with table when not is_nil(table) <- table() do
+    write(fn table ->
       Enum.each(names, fn name ->
         :ets.match_delete(table, {{:gauge, name, :_}, :_})
       end)
-    end
-
-    :ok
+    end)
   end
 
   @doc "Records one observation in a named histogram."
@@ -128,7 +122,7 @@ defmodule SymphonyElixir.Capacity.Metrics do
     buckets = Map.fetch!(@histogram_buckets, name)
     bucket = bucket_index(buckets, value)
 
-    with table when not is_nil(table) <- table() do
+    write(fn table ->
       :ets.update_counter(
         table,
         {:histogram, name, labels, {:bucket, bucket}},
@@ -150,9 +144,7 @@ defmodule SymphonyElixir.Capacity.Metrics do
         {2, round(value * 1_000_000)},
         {{:histogram, name, labels, :sum}, 0}
       )
-    end
-
-    :ok
+    end)
   end
 
   @doc "Returns a consistent-enough point-in-time view of all stored metrics."
@@ -176,11 +168,7 @@ defmodule SymphonyElixir.Capacity.Metrics do
   @doc "Removes every metric. Used by tests."
   @spec reset() :: :ok
   def reset do
-    with table when not is_nil(table) <- table() do
-      :ets.delete_all_objects(table)
-    end
-
-    :ok
+    write(fn table -> :ets.delete_all_objects(table) end)
   end
 
   @spec histogram_buckets(String.t()) :: [number()]
@@ -203,6 +191,24 @@ defmodule SymphonyElixir.Capacity.Metrics do
     end
   end
 
+  @doc false
+  @spec write((atom() -> term())) :: :ok
+  def write(fun) when is_function(fun, 1) do
+    case table() do
+      nil ->
+        :ok
+
+      table ->
+        try do
+          fun.(table)
+        rescue
+          ArgumentError -> :ok
+        end
+    end
+
+    :ok
+  end
+
   defp samples(entries, kind) do
     for {{^kind, name, labels}, value} <- entries do
       %{name: name, labels: labels, value: value}
@@ -221,12 +227,16 @@ defmodule SymphonyElixir.Capacity.Metrics do
     count = histogram_part(group, :count)
     sum = histogram_part(group, :sum) / 1_000_000
 
+    # Derive +Inf from the buckets so a scrape racing the separate count update
+    # can never see +Inf below the last bucket.
+    inf_count = bucket_counts |> Map.values() |> Enum.sum()
+
     buckets =
       name
       |> histogram_buckets()
       |> Enum.with_index()
       |> Enum.map(fn {bound, index} -> {bound, cumulative_bucket_count(bucket_counts, index)} end)
-      |> Kernel.++([{:inf, count}])
+      |> Kernel.++([{:inf, inf_count}])
 
     %{name: name, labels: labels, buckets: buckets, count: count, sum: sum}
   end

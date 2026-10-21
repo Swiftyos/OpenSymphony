@@ -101,6 +101,38 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
            }
   end
 
+  test "orchestrator snapshot reads the stage stored in the running entry" do
+    issue_id = "issue-stage-snapshot"
+    issue = %Issue{id: issue_id, identifier: "MT-190", title: "Stage", state: "In Progress"}
+    orchestrator_name = Module.concat(__MODULE__, :StageSnapshotOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    running_entry = %{
+      pid: self(),
+      ref: make_ref(),
+      identifier: issue.identifier,
+      issue: issue,
+      stage: "cached-stage",
+      session_id: nil,
+      turn_count: 0,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn state ->
+      state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(state.claimed, issue_id))
+    end)
+
+    assert %{running: [snapshot_entry]} = GenServer.call(pid, :snapshot)
+    assert snapshot_entry.issue_id == issue_id
+    assert snapshot_entry.stage == "cached-stage"
+  end
+
   test "orchestrator snapshot tracks OpenCode token totals and app-server pid" do
     issue_id = "issue-usage-snapshot"
 

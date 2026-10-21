@@ -681,8 +681,15 @@ defmodule SymphonyElixir.Config.Schema do
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:sample_interval_ms], empty_values: [])
-      |> validate_number(:sample_interval_ms, greater_than_or_equal_to: 0)
+      |> cast(attrs, [:sample_interval_ms])
+      |> validate_required([:sample_interval_ms])
+      |> validate_change(:sample_interval_ms, fn :sample_interval_ms, value ->
+        if value == 0 or (is_integer(value) and value >= 1_000) do
+          []
+        else
+          [sample_interval_ms: "must be 0 (off) or at least 1000"]
+        end
+      end)
     end
   end
 

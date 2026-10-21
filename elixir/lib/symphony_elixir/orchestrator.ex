@@ -286,6 +286,7 @@ defmodule SymphonyElixir.Orchestrator do
           |> maybe_put_runtime_value(:worker_host, runtime_info[:worker_host])
           |> maybe_put_runtime_value(:workspace_path, runtime_info[:workspace_path])
           |> put_route(runtime_info)
+          |> Map.put(:stage, issue_stage(Map.get(running_entry, :issue)))
 
         notify_dashboard()
         {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
@@ -667,7 +668,8 @@ defmodule SymphonyElixir.Orchestrator do
   defp refresh_running_issue_state(%State{} = state, %Issue{} = issue) do
     case Map.get(state.running, issue.id) do
       %{issue: _} = running_entry ->
-        %{state | running: Map.put(state.running, issue.id, %{running_entry | issue: issue})}
+        updated_running_entry = Map.merge(running_entry, %{issue: issue, stage: issue_stage(issue)})
+        %{state | running: Map.put(state.running, issue.id, updated_running_entry)}
 
       _ ->
         state
@@ -1368,6 +1370,7 @@ defmodule SymphonyElixir.Orchestrator do
       ref: ref,
       identifier: issue.identifier,
       issue: issue,
+      stage: issue_stage(issue),
       backend: route.backend,
       effort: route.effort,
       stall_timeout_ms: Config.agent_stall_timeout_ms(route.backend),
@@ -2159,7 +2162,7 @@ defmodule SymphonyElixir.Orchestrator do
       project_name: issue_value(metadata, :project_name),
       labels: issue_value(metadata, :labels) || [],
       backend: running_entry_backend(metadata),
-      stage: running_entry_stage(metadata),
+      stage: Map.get(metadata, :stage),
       effort: Map.get(metadata, :effort),
       worker_host: Map.get(metadata, :worker_host),
       workspace_path: Map.get(metadata, :workspace_path),
@@ -2184,7 +2187,7 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
-  defp running_entry_stage(%{issue: %Issue{} = issue}) do
+  defp issue_stage(%Issue{} = issue) do
     IssueStage.stage(issue)
   rescue
     _error -> nil
@@ -2192,7 +2195,7 @@ defmodule SymphonyElixir.Orchestrator do
     _kind, _reason -> nil
   end
 
-  defp running_entry_stage(_metadata), do: nil
+  defp issue_stage(_issue), do: nil
 
   defp issue_value(%{issue: issue}, key) when is_map(issue), do: Map.get(issue, key)
   defp issue_value(_metadata, _key), do: nil

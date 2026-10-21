@@ -47,6 +47,11 @@ defmodule SymphonyElixir.Capacity.Prometheus do
       type: "gauge"
     },
     %{
+      name: "symphony_capacity_sample_errors_total",
+      help: "Capacity samples that failed, by reason.",
+      type: "counter"
+    },
+    %{
       name: "symphony_run_memory_bytes_distribution",
       help: "Memory use of every sampled agent run since Symphony started, in bytes.",
       type: "histogram"

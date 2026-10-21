@@ -4,8 +4,9 @@ defmodule SymphonyElixir.Capacity.Sampler do
 
   With `sandbox.kind: docker`, one `<sandbox.command> stats` call covers every
   Symphony container; otherwise one `ps` call covers the process trees of the
-  local agent app servers. Failures are logged once per distinct error and never
-  take the sampler (or the application) down.
+  local agent app servers. Commands run with a deadline so a wedged container
+  runtime cannot block the sampler. Failures are logged once per kind of error
+  and never take the sampler (or the application) down.
   """
 
   use GenServer
@@ -18,7 +19,9 @@ defmodule SymphonyElixir.Capacity.Sampler do
     "symphony_run_cpu_percent",
     "symphony_run_memory_bytes"
   ]
-  @ps_columns ["-o", "pid,ppid,rss,%cpu", "-ax"]
+  @sample_error_counter "symphony_capacity_sample_errors_total"
+  @ps_columns ["-e", "-o", "pid=,ppid=,rss=,time="]
+  @command_timeout_ms 10_000
   @memory_units %{
     "" => 1,
     "b" => 1,
@@ -37,6 +40,9 @@ defmodule SymphonyElixir.Capacity.Sampler do
     :settings,
     :command_runner,
     :snapshot_fun,
+    :command_timeout_ms,
+    :clock,
+    previous_cpu: %{},
     logged_errors: MapSet.new()
   ]
 
@@ -44,12 +50,13 @@ defmodule SymphonyElixir.Capacity.Sampler do
   @type container_sample :: %{
           name: String.t(),
           cpu_percent: float(),
-          memory_bytes: non_neg_integer()
+          memory_bytes: non_neg_integer(),
+          cpu_seconds: float() | nil
         }
   @type process_sample :: %{
           ppid: integer(),
           rss_kb: number(),
-          cpu_percent: number()
+          cpu_seconds: number()
         }
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -60,14 +67,14 @@ defmodule SymphonyElixir.Capacity.Sampler do
   @impl true
   def init(opts) do
     state = build_state(opts)
-    if state.interval_ms > 0, do: schedule_sample(state.interval_ms)
+    if sampling_enabled?(state.interval_ms), do: schedule_sample(state.interval_ms)
     {:ok, state}
   end
 
   @impl true
   def handle_info(:sample, state) do
     state = safe_sample(state)
-    if state.interval_ms > 0, do: schedule_sample(state.interval_ms)
+    if sampling_enabled?(state.interval_ms), do: schedule_sample(state.interval_ms)
     {:noreply, state}
   end
 
@@ -105,7 +112,6 @@ defmodule SymphonyElixir.Capacity.Sampler do
   def parse_ps(output) when is_binary(output) do
     output
     |> String.split(~r/\r?\n/, trim: true)
-    |> Enum.drop(1)
     |> Enum.reduce_while({:ok, %{}}, fn line, {:ok, processes} ->
       case parse_ps_line(line) do
         {:ok, pid, sample} -> {:cont, {:ok, Map.put(processes, pid, sample)}}
@@ -118,14 +124,16 @@ defmodule SymphonyElixir.Capacity.Sampler do
 
   @doc false
   @spec aggregate_processes(%{integer() => process_sample()}, [integer()]) ::
-          %{integer() => %{cpu_percent: number(), memory_bytes: non_neg_integer()}}
+          %{integer() => %{cpu_seconds: number(), memory_bytes: non_neg_integer()}}
   def aggregate_processes(processes, root_pids) when is_map(processes) and is_list(root_pids) do
     children_by_parent =
       Enum.reduce(processes, %{}, fn {pid, sample}, acc ->
         Map.update(acc, sample.ppid, [pid], &[pid | &1])
       end)
 
-    Map.new(root_pids, fn root_pid ->
+    root_pids
+    |> Enum.filter(&Map.has_key?(processes, &1))
+    |> Map.new(fn root_pid ->
       {root_pid, sum_process_tree(processes, children_by_parent, root_pid)}
     end)
   end
@@ -142,6 +150,21 @@ defmodule SymphonyElixir.Capacity.Sampler do
   end
 
   @doc false
+  @spec parse_cpu_time(String.t()) :: {:ok, float()} | :error
+  def parse_cpu_time(value) when is_binary(value) do
+    {days, rest} = split_days(value)
+
+    with {days, ""} <- Integer.parse(days),
+         {:ok, parts} <- parse_cpu_time_parts(rest) do
+      {:ok, days * 86_400 + parts}
+    else
+      _ -> :error
+    end
+  end
+
+  def parse_cpu_time(_value), do: :error
+
+  @doc false
   @spec stats_args(String.t()) :: [String.t()]
   def stats_args(command) when is_binary(command) do
     if String.contains?(Path.basename(command), "podman") do
@@ -155,45 +178,72 @@ defmodule SymphonyElixir.Capacity.Sampler do
     settings = Keyword.get(opts, :settings) || Config.settings!()
 
     %__MODULE__{
-      interval_ms:
-        Keyword.get(opts, :sample_interval_ms) ||
-          Application.get_env(:symphony_elixir, :capacity_sample_interval_ms) ||
-          settings.capacity.sample_interval_ms,
+      interval_ms: normalize_interval(sample_interval_ms(opts, settings)),
       settings: settings,
       command_runner:
         Keyword.get(opts, :command_runner) ||
-          Application.get_env(:symphony_elixir, :capacity_command_runner, &System.cmd/3),
+          Application.get_env(:symphony_elixir, :capacity_command_runner, &system_command/3),
       snapshot_fun:
         Keyword.get(opts, :snapshot_fun) ||
           Application.get_env(:symphony_elixir, :capacity_snapshot_fun, &Orchestrator.snapshot/0),
+      command_timeout_ms:
+        Keyword.get(opts, :command_timeout_ms) ||
+          Application.get_env(:symphony_elixir, :capacity_command_timeout_ms, @command_timeout_ms),
+      clock: Keyword.get(opts, :clock) || fn -> System.monotonic_time(:millisecond) end,
+      previous_cpu: %{},
       logged_errors: MapSet.new()
     }
   end
+
+  defp sample_interval_ms(opts, settings) do
+    Keyword.get(opts, :sample_interval_ms) ||
+      Application.get_env(:symphony_elixir, :capacity_sample_interval_ms) ||
+      settings.capacity.sample_interval_ms
+  end
+
+  defp normalize_interval(0), do: 0
+  defp normalize_interval(interval) when is_integer(interval) and interval >= 1_000, do: interval
+  defp normalize_interval(_interval), do: 0
+
+  defp sampling_enabled?(interval_ms), do: is_integer(interval_ms) and interval_ms > 0
 
   defp schedule_sample(interval_ms), do: Process.send_after(self(), :sample, interval_ms)
 
   defp safe_sample(state) do
     do_sample(state) |> elem(0)
   rescue
-    error -> log_once(state, {:exception, Exception.message(error)})
+    error ->
+      record_sample_error({:exception, Exception.message(error)})
+      log_once(state, {:exception, Exception.message(error)})
   end
 
   defp do_sample(state) do
     case snapshot_running(state) do
       {:ok, running} ->
-        record_token_rates(running)
-
-        {state, sampled} =
+        {result, state} =
           if Sandbox.enabled?(state.settings) do
             sample_containers(state, running)
           else
             sample_processes(state, running)
           end
 
-        Metrics.set_gauge("symphony_runs_sampled", [], sampled)
-        {state, sampled}
+        case result do
+          {:ok, samples} ->
+            Metrics.delete_gauges(["symphony_run_tokens_per_minute" | @run_metric_names])
+            record_token_rates(running)
+            Enum.each(samples, &record_run_sample/1)
+            Metrics.set_gauge("symphony_runs_sampled", [], length(samples))
+            {%{state | logged_errors: MapSet.new()}, length(samples)}
+
+          {:error, reason} ->
+            Metrics.set_gauge("symphony_runs_sampled", [], 0)
+            record_sample_error(reason)
+            {log_once(state, reason), 0}
+        end
 
       {:error, reason} ->
+        Metrics.set_gauge("symphony_runs_sampled", [], 0)
+        record_sample_error(reason)
         {log_once(state, reason), 0}
     end
   end
@@ -203,19 +253,17 @@ defmodule SymphonyElixir.Capacity.Sampler do
       %{running: running} when is_list(running) -> {:ok, running}
       %{"running" => running} when is_list(running) -> {:ok, running}
       running when is_list(running) -> {:ok, running}
-      :unavailable -> {:error, :orchestrator_unavailable}
-      :timeout -> {:error, :orchestrator_timeout}
+      :unavailable -> {:error, {:snapshot_unavailable, "orchestrator not available"}}
+      :timeout -> {:error, {:snapshot_timeout, "orchestrator snapshot timed out"}}
       other -> {:error, {:invalid_snapshot, inspect(other)}}
     end
   rescue
     error -> {:error, {:snapshot_exception, Exception.message(error)}}
   catch
-    kind, reason -> {:error, {kind, inspect(reason)}}
+    kind, reason -> {:error, {:snapshot_exception, inspect({kind, reason})}}
   end
 
   defp record_token_rates(running) do
-    Metrics.delete_gauges(["symphony_run_tokens_per_minute"])
-
     Enum.each(running, fn entry ->
       case token_rate_per_minute(entry) do
         nil ->
@@ -233,14 +281,32 @@ defmodule SymphonyElixir.Capacity.Sampler do
 
   defp sample_containers(state, running) do
     expected = expected_containers(running)
-    Metrics.delete_gauges(@run_metric_names)
 
     if expected == %{} do
-      {state, 0}
+      {{:ok, []}, state}
     else
       command = state.settings.sandbox.command
-      {result, state} = run_command(state, command, stats_args(command))
-      record_container_result(state, result, expected)
+
+      case run_command(state, command, stats_args(command)) do
+        {{:ok, {output, 0}}, state} ->
+          container_output(state, output, expected)
+
+        {{:ok, {output, 124}}, state} ->
+          {{:error, {:command_timeout, truncate(output)}}, state}
+
+        {{:ok, {output, status}}, state} ->
+          {{:error, {:container_stats_failed, "#{status}: #{truncate(output)}"}}, state}
+
+        {{:error, reason}, state} ->
+          {{:error, reason}, state}
+      end
+    end
+  end
+
+  defp container_output(state, output, expected) do
+    case parse_container_stats(output) do
+      {:ok, samples} -> container_samples(samples, expected, state)
+      {:error, reason} -> {{:error, {:container_stats_parse_error, inspect(reason)}}, state}
     end
   end
 
@@ -255,39 +321,52 @@ defmodule SymphonyElixir.Capacity.Sampler do
     |> Map.new()
   end
 
-  defp record_container_result(state, {output, 0}, expected) do
-    case parse_container_stats(output) do
-      {:ok, samples} -> {state, record_container_samples(samples, expected)}
-      {:error, reason} -> {log_once(state, {:container_stats_parse_error, inspect(reason)}), 0}
-    end
-  end
+  defp container_samples(samples, expected, state) do
+    now = state.clock.()
 
-  defp record_container_result(state, {output, status}, _expected) do
-    {log_once(state, {:container_stats_failed, status, truncate(output)}), 0}
-  end
+    {rows, previous_cpu} =
+      Enum.reduce(samples, {[], state.previous_cpu}, fn sample, {rows, previous} ->
+        case Map.get(expected, sample.name) do
+          nil ->
+            {rows, previous}
 
-  defp record_container_samples(samples, expected) do
-    Enum.reduce(samples, 0, fn sample, count ->
-      case Map.get(expected, sample.name) do
-        nil ->
-          count
+          entry ->
+            {row, previous} =
+              run_sample_row(entry, sample.cpu_seconds, sample.cpu_percent, sample.memory_bytes, previous, now)
 
-        entry ->
-          record_run_sample(entry, sample.cpu_percent, sample.memory_bytes)
-          count + 1
-      end
-    end)
+            {[row | rows], previous}
+        end
+      end)
+
+    {{:ok, Enum.reverse(rows)}, %{state | previous_cpu: previous_cpu}}
   end
 
   defp sample_processes(state, running) do
     roots = process_roots(running)
-    Metrics.delete_gauges(@run_metric_names)
 
     if roots == [] do
-      {state, 0}
+      {{:ok, []}, state}
     else
-      {result, state} = run_command(state, "ps", @ps_columns)
-      record_process_result(state, result, roots)
+      case run_command(state, "ps", @ps_columns) do
+        {{:ok, {output, 0}}, state} ->
+          process_output(state, output, roots)
+
+        {{:ok, {output, 124}}, state} ->
+          {{:error, {:command_timeout, truncate(output)}}, state}
+
+        {{:ok, {output, status}}, state} ->
+          {{:error, {:ps_failed, "#{status}: #{truncate(output)}"}}, state}
+
+        {{:error, reason}, state} ->
+          {{:error, reason}, state}
+      end
+    end
+  end
+
+  defp process_output(state, output, roots) do
+    case parse_ps(output) do
+      {:ok, processes} -> process_samples(processes, roots, state)
+      {:error, reason} -> {{:error, {:ps_parse_error, inspect(reason)}}, state}
     end
   end
 
@@ -302,53 +381,157 @@ defmodule SymphonyElixir.Capacity.Sampler do
     end)
   end
 
-  defp record_process_result(state, {output, 0}, roots) do
-    case parse_ps(output) do
-      {:ok, processes} -> {state, record_process_samples(processes, roots)}
-      {:error, reason} -> {log_once(state, {:ps_parse_error, inspect(reason)}), 0}
+  defp process_samples(processes, roots, state) do
+    usage = aggregate_processes(processes, Enum.map(roots, &elem(&1, 0)))
+    now = state.clock.()
+
+    {rows, previous_cpu} =
+      Enum.reduce(roots, {[], state.previous_cpu}, fn {pid, entry}, {rows, previous} ->
+        case Map.get(usage, pid) do
+          nil ->
+            {rows, Map.delete(previous, entry_key(entry))}
+
+          %{cpu_seconds: cpu_seconds, memory_bytes: memory_bytes} ->
+            {row, previous} =
+              run_sample_row(entry, cpu_seconds, 0.0, memory_bytes, previous, now)
+
+            {[row | rows], previous}
+        end
+      end)
+
+    {{:ok, Enum.reverse(rows)}, %{state | previous_cpu: previous_cpu}}
+  end
+
+  defp run_sample_row(entry, cpu_seconds, fallback_percent, memory_bytes, previous, now) do
+    key = entry_key(entry)
+
+    case cpu_seconds do
+      seconds when is_number(seconds) ->
+        case Map.get(previous, key) do
+          {previous_seconds, previous_at}
+          when is_number(previous_seconds) and now > previous_at and seconds >= previous_seconds ->
+            cpu_percent = (seconds - previous_seconds) * 100_000 / (now - previous_at)
+            {{entry, cpu_percent, memory_bytes}, Map.put(previous, key, {seconds, now})}
+
+          _ ->
+            {{entry, nil, memory_bytes}, Map.put(previous, key, {seconds, now})}
+        end
+
+      _ ->
+        {{entry, fallback_percent, memory_bytes}, Map.delete(previous, key)}
     end
   end
 
-  defp record_process_result(state, {output, status}, _roots) do
-    {log_once(state, {:ps_failed, status, truncate(output)}), 0}
-  end
-
-  defp record_process_samples(processes, roots) do
-    usage = aggregate_processes(processes, Enum.map(roots, &elem(&1, 0)))
-    entries_by_pid = Map.new(roots)
-
-    Enum.reduce(usage, 0, fn {pid, usage}, count ->
-      entry = Map.fetch!(entries_by_pid, pid)
-      record_run_sample(entry, usage.cpu_percent, usage.memory_bytes)
-      count + 1
-    end)
-  end
-
   defp run_command(state, command, args) do
+    opts = [stderr_to_stdout: true, timeout_ms: state.command_timeout_ms]
+
+    task =
+      Task.async(fn ->
+        try do
+          {:ok, state.command_runner.(command, args, opts)}
+        rescue
+          error -> {:raised, Exception.message(error)}
+        catch
+          kind, reason -> {:thrown, inspect({kind, reason})}
+        end
+      end)
+
+    # The runner enforces the deadline itself (and kills the OS process); this
+    # outer deadline only guards a custom runner that ignores it.
+    outer_timeout_ms = state.command_timeout_ms + 1_000
+
     result =
-      try do
-        state.command_runner.(command, args, stderr_to_stdout: true)
-      rescue
-        error -> {Exception.message(error), 127}
-      catch
-        kind, reason -> {inspect({kind, reason}), 127}
+      case Task.yield(task, outer_timeout_ms) || Task.shutdown(task, :brutal_kill) do
+        {:ok, {:ok, {output, status}}} -> {:ok, {output, status}}
+        {:ok, {:raised, message}} -> {:error, {:command_exception, message}}
+        {:ok, {:thrown, detail}} -> {:error, {:command_exception, detail}}
+        nil -> {:error, {:command_timeout, "command deadline exceeded"}}
+        other -> {:error, {:command_exception, inspect(other)}}
       end
 
     {result, state}
   end
 
-  defp record_run_sample(entry, cpu_percent, memory_bytes) do
-    labels = [
-      issue: issue_label(entry),
-      backend: backend_label(entry),
-      stage: stage_label(entry)
-    ]
+  defp system_command(command, args, opts) do
+    timeout_ms = Keyword.get(opts, :timeout_ms, @command_timeout_ms)
+
+    case System.find_executable(command) do
+      nil ->
+        {"command not found: #{command}", 127}
+
+      executable ->
+        port =
+          Port.open({:spawn_executable, executable}, [
+            :binary,
+            :exit_status,
+            :stderr_to_stdout,
+            :use_stdio,
+            args: args
+          ])
+
+        collect_port(port, "", System.monotonic_time(:millisecond) + timeout_ms)
+    end
+  end
+
+  defp collect_port(port, output, deadline_ms) do
+    remaining_ms = max(deadline_ms - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {^port, {:data, data}} -> collect_port(port, output <> data, deadline_ms)
+      {^port, {:exit_status, status}} -> {output, status}
+    after
+      remaining_ms ->
+        kill_os_process(port)
+        {output, 124}
+    end
+  end
+
+  defp kill_os_process(port) do
+    {:os_pid, os_pid} = :erlang.port_info(port, :os_pid)
+    _ = System.cmd("kill", ["-KILL", Integer.to_string(os_pid)], stderr_to_stdout: true)
+    Port.close(port)
+  end
+
+  defp record_run_sample({entry, nil, memory_bytes}) do
+    labels = run_labels(entry)
+    Metrics.set_gauge("symphony_run_memory_bytes", labels, memory_bytes)
+    Metrics.record_histogram("symphony_run_memory_bytes_distribution", [], memory_bytes)
+  end
+
+  defp record_run_sample({entry, cpu_percent, memory_bytes}) do
+    labels = run_labels(entry)
 
     Metrics.set_gauge("symphony_run_cpu_percent", labels, cpu_percent)
     Metrics.set_gauge("symphony_run_memory_bytes", labels, memory_bytes)
     Metrics.record_histogram("symphony_run_cpu_percent_distribution", [], cpu_percent)
     Metrics.record_histogram("symphony_run_memory_bytes_distribution", [], memory_bytes)
   end
+
+  defp run_labels(entry) do
+    [
+      issue: issue_label(entry),
+      backend: backend_label(entry),
+      stage: stage_label(entry)
+    ]
+  end
+
+  defp record_sample_error({kind, _detail}), do: record_sample_error(kind)
+
+  defp record_sample_error(kind) do
+    Metrics.record_counter(@sample_error_counter, reason: error_reason_label(kind))
+  end
+
+  defp error_reason_label(:command_timeout), do: "timeout"
+  defp error_reason_label(:container_stats_failed), do: "container_stats_failed"
+  defp error_reason_label(:container_stats_parse_error), do: "container_stats_parse_error"
+  defp error_reason_label(:ps_failed), do: "ps_failed"
+  defp error_reason_label(:ps_parse_error), do: "ps_parse_error"
+  defp error_reason_label(:snapshot_unavailable), do: "snapshot_unavailable"
+  defp error_reason_label(:snapshot_timeout), do: "snapshot_timeout"
+  defp error_reason_label(:invalid_snapshot), do: "invalid_snapshot"
+  defp error_reason_label(:snapshot_exception), do: "snapshot_exception"
+  defp error_reason_label(:command_exception), do: "command_exception"
+  defp error_reason_label(:exception), do: "sampler_exception"
 
   defp container_for_entry(entry) do
     case workspace_path(entry) do
@@ -362,6 +545,12 @@ defmodule SymphonyElixir.Capacity.Sampler do
   defp backend_label(entry), do: string_value(Map.get(entry, :backend) || Map.get(entry, "backend")) || "unknown"
   defp stage_label(entry), do: string_value(Map.get(entry, :stage) || Map.get(entry, "stage")) || ""
   defp issue_label(entry), do: string_value(Map.get(entry, :identifier) || Map.get(entry, "identifier") || Map.get(entry, :issue_id) || Map.get(entry, "issue_id")) || ""
+
+  defp entry_key(entry) do
+    Map.get(entry, :issue_id) || Map.get(entry, "issue_id") ||
+      Map.get(entry, :identifier) || Map.get(entry, "identifier") ||
+      issue_label(entry)
+  end
 
   defp os_pid(entry) do
     case Map.get(entry, :agent_server_pid) || Map.get(entry, "agent_server_pid") do
@@ -379,12 +568,12 @@ defmodule SymphonyElixir.Capacity.Sampler do
     end
   end
 
-  defp log_once(state, reason) do
-    if MapSet.member?(state.logged_errors, reason) do
+  defp log_once(state, {kind, _detail} = reason) do
+    if MapSet.member?(state.logged_errors, kind) do
       state
     else
       Logger.warning("Capacity sampler failed: #{inspect(reason)}")
-      %{state | logged_errors: MapSet.put(state.logged_errors, reason)}
+      %{state | logged_errors: MapSet.put(state.logged_errors, kind)}
     end
   end
 
@@ -425,7 +614,8 @@ defmodule SymphonyElixir.Capacity.Sampler do
     %{
       name: container_name(sample),
       cpu_percent: cpu_percent(sample),
-      memory_bytes: memory_bytes(sample)
+      memory_bytes: memory_bytes(sample),
+      cpu_seconds: container_cpu_seconds(sample)
     }
   end
 
@@ -444,6 +634,66 @@ defmodule SymphonyElixir.Capacity.Sampler do
     sample
     |> first_value(["CPUPerc", "cpu_perc", "cpu_percent", "cpu", "CPU"])
     |> percent_value()
+  end
+
+  defp container_cpu_seconds(sample) do
+    cond do
+      value = first_value(sample, ["cpu_seconds", "CPUSeconds", "cpu_time_seconds"]) ->
+        numeric_seconds(value)
+
+      value = first_value(sample, ["CPUNano", "cpu_nano", "cpu_time_ns", "cpu_time_nano", "cpu_usage_total_usage"]) ->
+        numeric_nanoseconds(value)
+
+      value = first_value(sample, ["cpu_time", "CPUTime"]) ->
+        parse_cpu_time_field(value)
+
+      true ->
+        nil
+    end
+  end
+
+  defp numeric_seconds(value) when is_number(value), do: value * 1.0
+  defp numeric_seconds(value) when is_binary(value), do: parse_float(value)
+  defp numeric_seconds(_value), do: nil
+
+  defp numeric_nanoseconds(value) when is_number(value), do: value / 1_000_000_000
+
+  defp numeric_nanoseconds(value) when is_binary(value) do
+    case parse_float(value) do
+      nil -> nil
+      nanoseconds -> nanoseconds / 1_000_000_000
+    end
+  end
+
+  defp numeric_nanoseconds(_value), do: nil
+
+  defp parse_cpu_time_field(value) when is_number(value), do: value / 1_000_000_000
+
+  defp parse_cpu_time_field(value) when is_binary(value) do
+    value = String.trim(value)
+
+    cond do
+      String.ends_with?(value, "s") ->
+        parse_float(String.trim_trailing(value, "s"))
+
+      String.contains?(value, ":") ->
+        case parse_cpu_time(value) do
+          {:ok, seconds} -> seconds
+          :error -> nil
+        end
+
+      true ->
+        nil
+    end
+  end
+
+  defp parse_cpu_time_field(_value), do: nil
+
+  defp parse_float(value) do
+    case Float.parse(value) do
+      {number, ""} -> number
+      _ -> nil
+    end
   end
 
   defp memory_bytes(sample) do
@@ -499,12 +749,12 @@ defmodule SymphonyElixir.Capacity.Sampler do
 
   defp parse_ps_line(line) do
     case String.split(line) do
-      [pid, ppid, rss, cpu | _rest] ->
+      [pid, ppid, rss, time | _rest] ->
         with {pid, ""} <- Integer.parse(pid),
              {ppid, ""} <- Integer.parse(ppid),
              {rss, ""} <- number_parse(rss),
-             {cpu, ""} <- number_parse(cpu) do
-          {:ok, pid, %{ppid: ppid, rss_kb: rss, cpu_percent: cpu}}
+             {:ok, cpu_seconds} <- parse_cpu_time(time) do
+          {:ok, pid, %{ppid: ppid, rss_kb: rss, cpu_seconds: cpu_seconds}}
         else
           _ -> :error
         end
@@ -521,12 +771,47 @@ defmodule SymphonyElixir.Capacity.Sampler do
     end
   end
 
+  defp split_days(value) do
+    case String.split(value, "-", parts: 2) do
+      [days, rest] -> {days, rest}
+      [rest] -> {"0", rest}
+    end
+  end
+
+  defp parse_cpu_time_parts(value) do
+    parts = String.split(value, ":")
+
+    with true <- length(parts) in 2..3,
+         {:ok, numbers} <- parse_float_parts(parts) do
+      case numbers do
+        [minutes, seconds] -> {:ok, minutes * 60 + seconds}
+        [hours, minutes, seconds] -> {:ok, hours * 3_600 + minutes * 60 + seconds}
+      end
+    else
+      _ -> :error
+    end
+  end
+
+  defp parse_float_parts(parts) do
+    parts
+    |> Enum.reduce_while({:ok, []}, fn part, {:ok, acc} ->
+      case Float.parse(part) do
+        {number, ""} -> {:cont, {:ok, [number | acc]}}
+        _ -> {:halt, :error}
+      end
+    end)
+    |> case do
+      {:ok, reversed} -> {:ok, Enum.reverse(reversed)}
+      :error -> :error
+    end
+  end
+
   defp sum_process_tree(processes, children_by_parent, root_pid) do
     do_sum_process_tree(processes, children_by_parent, [root_pid], MapSet.new())
   end
 
   defp do_sum_process_tree(_processes, _children_by_parent, [], _seen) do
-    %{cpu_percent: 0.0, memory_bytes: 0}
+    %{cpu_seconds: 0.0, memory_bytes: 0}
   end
 
   defp do_sum_process_tree(processes, children_by_parent, [pid | rest], seen) do
@@ -536,16 +821,12 @@ defmodule SymphonyElixir.Capacity.Sampler do
       children = Map.get(children_by_parent, pid, [])
       acc = do_sum_process_tree(processes, children_by_parent, rest ++ children, MapSet.put(seen, pid))
 
-      case Map.get(processes, pid) do
-        nil ->
-          acc
+      sample = Map.fetch!(processes, pid)
 
-        sample ->
-          %{
-            cpu_percent: acc.cpu_percent + sample.cpu_percent,
-            memory_bytes: acc.memory_bytes + round(sample.rss_kb * 1024)
-          }
-      end
+      %{
+        cpu_seconds: acc.cpu_seconds + sample.cpu_seconds,
+        memory_bytes: acc.memory_bytes + round(sample.rss_kb * 1024)
+      }
     end
   end
 
