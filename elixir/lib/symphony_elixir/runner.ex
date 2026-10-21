@@ -98,33 +98,35 @@ defmodule SymphonyElixir.Runner do
       outbox: Process.whereis(RunOutbox)
     }
 
-    try do
-      :ok =
-        AgentRunner.run(
-          RunSpec.to_issue(spec),
-          nil,
-          run_host: host,
-          attempt: spec.attempt,
-          worker_host: spec.worker_host,
-          account: resolve_account(spec.account)
-        )
+    issue = RunSpec.to_issue(spec)
+    account = resolve_account(spec.account)
 
-      finish(host, "normal")
-      :ok
-    rescue
-      exception ->
-        reason = Exception.message(exception)
-        finish(host, reason)
-        {:error, reason}
-    catch
-      kind, reason ->
-        formatted = inspect({kind, reason}, limit: 10)
-        finish(host, formatted)
-        {:error, {kind, reason}}
+    # The run gets its own process: the agent CLIs are ports linked to it, and a
+    # port that dies (an agent that exits at once gives :epipe) would otherwise
+    # take the runner down before it could report the run's end.
+    task =
+      Task.Supervisor.async_nolink(SymphonyElixir.TaskSupervisor, fn ->
+        AgentRunner.run(issue, nil, run_host: host, attempt: spec.attempt, worker_host: spec.worker_host, account: account)
+      end)
+
+    try do
+      case Task.yield(task, :infinity) do
+        {:ok, :ok} ->
+          finish(host, "normal")
+          :ok
+
+        {:exit, reason} ->
+          message = exit_message(reason)
+          finish(host, message)
+          {:error, message}
+      end
     after
       RunOutbox.flush(@flush_timeout_ms)
     end
   end
+
+  defp exit_message({%{__exception__: true} = exception, _stacktrace}), do: Exception.message(exception)
+  defp exit_message(reason), do: inspect(reason, limit: 10)
 
   # The spec names an account by id; the runner reloads the credential from the
   # same config so tokens refreshed on the controller are picked up.
