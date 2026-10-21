@@ -57,11 +57,21 @@ defmodule SymphonyElixir.Orchestrator do
       :poll_check_in_progress,
       :tick_timer_ref,
       :tick_token,
+      # The one poll in flight: %{ref, fingerprint, running_ids}.
+      :poll_task,
       # %{requested_at: DateTime, requested_by: String} while a delayed restart is pending.
       :delayed_restart,
       running: %{},
       completed: MapSet.new(),
       claimed: MapSet.new(),
+      # Issues whose dispatch is waiting on a revalidation task, by task ref,
+      # and the chosen order their results are applied in.
+      revalidation_tasks: %{},
+      revalidation_results: %{},
+      dispatch_order: [],
+      pending_dispatches: MapSet.new(),
+      # Retry lookups in flight, by task ref.
+      retry_tasks: %{},
       retry_attempts: %{},
       codex_totals: nil,
       codex_rate_limits: nil,
@@ -96,7 +106,7 @@ defmodule SymphonyElixir.Orchestrator do
       |> restore_retries()
       |> recover_runs()
 
-    run_terminal_workspace_cleanup()
+    start_terminal_workspace_cleanup()
     :ok = SymphonyElixir.DelayedRestartSignal.install()
     state = schedule_tick(state, 0)
 
@@ -104,46 +114,56 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @impl true
+  # A tick during a poll is coalesced into it; the poll schedules the next tick.
+  def handle_info({:tick, _tick_token}, %{poll_task: %{}} = state), do: {:noreply, state}
+
   def handle_info({:tick, tick_token}, %{tick_token: tick_token} = state)
       when is_reference(tick_token) do
-    state = refresh_runtime_config(state)
-
-    state = %{
-      state
-      | poll_check_in_progress: true,
-        next_poll_due_at_ms: nil,
-        tick_timer_ref: nil,
-        tick_token: nil
-    }
-
-    notify_dashboard()
-    :ok = schedule_poll_cycle_start()
-    {:noreply, state}
+    start_tick(state)
   end
 
   def handle_info({:tick, _tick_token}, state), do: {:noreply, state}
 
+  def handle_info(:tick, %{poll_task: %{}} = state), do: {:noreply, state}
+
   def handle_info(:tick, state) do
-    state = refresh_runtime_config(state)
-
-    state = %{
-      state
-      | poll_check_in_progress: true,
-        next_poll_due_at_ms: nil,
-        tick_timer_ref: nil,
-        tick_token: nil
-    }
-
-    notify_dashboard()
-    :ok = schedule_poll_cycle_start()
-    {:noreply, state}
+    start_tick(state)
   end
+
+  def handle_info(:run_poll_cycle, %{poll_task: %{}} = state), do: {:noreply, state}
 
   def handle_info(:run_poll_cycle, state) do
     state = refresh_runtime_config(state)
-    state = maybe_dispatch(state)
-    state = schedule_tick(state, state.poll_interval_ms)
-    state = %{state | poll_check_in_progress: false}
+    {:noreply, start_poll_task(state)}
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{poll_task: %{ref: ref}} = state) do
+    handle_poll_task_down(state, reason)
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{revalidation_tasks: tasks} = state)
+      when is_map_key(tasks, ref) do
+    {context, tasks} = Map.pop(tasks, ref)
+    Logger.warning("Dispatch revalidation failed for issue_id=#{context.issue.id}: #{inspect(reason)}")
+
+    state = %{state | revalidation_tasks: tasks}
+    {:noreply, queue_revalidation_result(state, context, {:error, {:task_crashed, reason}})}
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{retry_tasks: tasks} = state)
+      when is_map_key(tasks, ref) do
+    {context, tasks} = Map.pop(tasks, ref)
+    state = %{state | retry_tasks: tasks}
+
+    Logger.warning("Retry poll failed for issue_id=#{context.issue_id} issue_identifier=#{context.metadata[:identifier] || context.issue_id}: #{inspect(reason)}")
+
+    state =
+      schedule_issue_retry(
+        state,
+        context.issue_id,
+        context.attempt + 1,
+        Map.merge(context.metadata, %{error: "retry poll failed: #{inspect(reason)}"})
+      )
 
     notify_dashboard()
     {:noreply, state}
@@ -292,6 +312,25 @@ defmodule SymphonyElixir.Orchestrator do
     {:noreply, state}
   end
 
+  def handle_info({ref, result}, %{poll_task: %{ref: ref} = poll_task} = state) when is_reference(ref) do
+    Process.demonitor(ref, [:flush])
+    handle_poll_result(state, poll_task, result)
+  end
+
+  def handle_info({ref, result}, %{revalidation_tasks: tasks} = state) when is_map_key(tasks, ref) do
+    Process.demonitor(ref, [:flush])
+    {context, tasks} = Map.pop(tasks, ref)
+    handle_revalidation_result(%{state | revalidation_tasks: tasks}, context, result)
+  end
+
+  def handle_info({ref, result}, %{retry_tasks: tasks} = state) when is_map_key(tasks, ref) do
+    Process.demonitor(ref, [:flush])
+    {context, tasks} = Map.pop(tasks, ref)
+    result = handle_retry_task_result(%{state | retry_tasks: tasks}, context, result)
+    notify_dashboard()
+    result
+  end
+
   # Delayed restart: once nothing is running, stop so the supervisor (systemd,
   # Restart=always) starts Symphony again with the new binary or config.
   def handle_info(:delayed_restart_check, %{delayed_restart: %{}, running: running} = state) when map_size(running) == 0 do
@@ -304,14 +343,15 @@ defmodule SymphonyElixir.Orchestrator do
   def handle_info(:delayed_restart_check, state), do: {:noreply, state}
 
   def handle_info({:retry_issue, issue_id, retry_token}, state) do
-    result =
-      case pop_retry_attempt_state(state, issue_id, retry_token) do
-        {:ok, attempt, metadata, state} -> handle_retry_issue(state, issue_id, attempt, metadata)
-        :missing -> {:noreply, state}
-      end
+    case pop_retry_attempt_state(state, issue_id, retry_token) do
+      {:ok, attempt, metadata, state} ->
+        state = start_retry_task(state, issue_id, attempt, metadata)
+        notify_dashboard()
+        {:noreply, state}
 
-    notify_dashboard()
-    result
+      :missing ->
+        {:noreply, state}
+    end
   end
 
   def handle_info({:retry_issue, _issue_id}, state), do: {:noreply, state}
@@ -321,50 +361,117 @@ defmodule SymphonyElixir.Orchestrator do
     {:noreply, state}
   end
 
-  defp maybe_dispatch(%State{} = state) do
-    state = reconcile_running_issues(state)
+  defp start_tick(state) do
+    state = refresh_runtime_config(state)
+
+    state = %{
+      state
+      | poll_check_in_progress: true,
+        next_poll_due_at_ms: nil,
+        tick_timer_ref: nil,
+        tick_token: nil
+    }
+
+    notify_dashboard()
+    :ok = schedule_poll_cycle_start()
+    {:noreply, state}
+  end
+
+  # Fetches a snapshot of the running issues' states and the candidates. Both
+  # requests happen here, off the orchestrator, and are applied later against
+  # whatever state the orchestrator has by then.
+  defp start_poll_task(%State{} = state) do
+    running_ids = Map.keys(state.running)
+    fingerprint = state.config_fingerprint
+
+    task =
+      Task.Supervisor.async_nolink(SymphonyElixir.TaskSupervisor, fn ->
+        %{
+          running_ids: running_ids,
+          running_result: fetch_running_states(running_ids),
+          candidates_result: Tracker.fetch_candidate_issues()
+        }
+      end)
+
+    %{state | poll_task: %{ref: task.ref, fingerprint: fingerprint, running_ids: running_ids}}
+  end
+
+  defp fetch_running_states([]), do: {:ok, []}
+  defp fetch_running_states(running_ids), do: Tracker.fetch_issue_states_by_ids(running_ids)
+
+  defp handle_poll_result(state, poll_task, result) do
+    state = refresh_runtime_config(state)
+    state = %{state | poll_task: nil, poll_check_in_progress: false}
+
+    if poll_task.fingerprint != state.config_fingerprint do
+      Logger.info("Discarding poll result fetched before a configuration change; polling again")
+      state = schedule_tick(state, 0)
+      notify_dashboard()
+      {:noreply, state}
+    else
+      state =
+        state
+        |> apply_running_states(poll_task.running_ids, result.running_result)
+        |> apply_candidate_issues(result.candidates_result)
+
+      state = schedule_tick(state, state.poll_interval_ms)
+      notify_dashboard()
+      {:noreply, state}
+    end
+  end
+
+  defp handle_poll_task_down(state, reason) do
+    Logger.error("Poll cycle failed: #{inspect(reason)}; keeping active workers and polling again")
+    state = %{state | poll_task: nil, poll_check_in_progress: false}
+    state = schedule_tick(state, state.poll_interval_ms)
+    notify_dashboard()
+    {:noreply, state}
+  end
+
+  defp apply_running_states(state, running_ids, {:ok, issues}) when is_list(issues) do
+    state = reconcile_stalled_running_issues(state)
+    # Only issues still running now are reconciled: a run that finished while
+    # the fetch was in flight must not have its retry claim reconciled away.
+    running_ids = Enum.filter(running_ids, &Map.has_key?(state.running, &1))
+
+    visible_issues =
+      Enum.filter(issues, fn
+        %Issue{id: issue_id} -> issue_id in running_ids
+        _ -> false
+      end)
+
+    visible_issues
+    |> reconcile_running_issue_states(state, active_state_set(), terminal_state_set())
+    |> reconcile_missing_running_issue_ids(running_ids, visible_issues)
+  end
+
+  defp apply_running_states(state, _running_ids, {:error, reason}) do
+    Logger.debug("Failed to refresh running issue states: #{inspect(reason)}; keeping active workers")
+    reconcile_stalled_running_issues(state)
+  end
+
+  defp apply_running_states(state, _running_ids, _result), do: state
+
+  defp apply_candidate_issues(state, {:ok, issues}) when is_list(issues) do
     # Reconciling can stop the last agent without a :DOWN reaching us (its issue
     # closed or vanished), so a pending delayed restart is checked every poll too.
     if state.delayed_restart, do: send(self(), :delayed_restart_check)
 
-    with {:ok, issues} <- Tracker.fetch_candidate_issues(),
-         :ok <- Enum.each(issues, &UsageLedger.observe_issue/1),
-         true <- available_slots(state) > 0 do
+    Enum.each(issues, &UsageLedger.observe_issue/1)
+
+    if available_slots(state) > 0 do
       choose_issues(issues, state)
     else
-      {:error, reason} ->
-        Logger.error("Failed to fetch from Linear: #{inspect(reason)}")
-        state
-
-      false ->
-        state
-    end
-  end
-
-  defp reconcile_running_issues(%State{} = state) do
-    state = reconcile_stalled_running_issues(state)
-    running_ids = Map.keys(state.running)
-
-    if running_ids == [] do
       state
-    else
-      case Tracker.fetch_issue_states_by_ids(running_ids) do
-        {:ok, issues} ->
-          issues
-          |> reconcile_running_issue_states(
-            state,
-            active_state_set(),
-            terminal_state_set()
-          )
-          |> reconcile_missing_running_issue_ids(running_ids, issues)
-
-        {:error, reason} ->
-          Logger.debug("Failed to refresh running issue states: #{inspect(reason)}; keeping active workers")
-
-          state
-      end
     end
   end
+
+  defp apply_candidate_issues(state, {:error, reason}) do
+    Logger.error("Failed to fetch from Linear: #{inspect(reason)}")
+    state
+  end
+
+  defp apply_candidate_issues(state, _result), do: state
 
   @doc false
   @spec reconcile_issue_states_for_test([Issue.t()], term()) :: term()
@@ -641,12 +748,24 @@ defmodule SymphonyElixir.Orchestrator do
 
         true ->
           next = maybe_dispatch_issue(state_acc, issue, active_states, terminal_states)
-          admitted? = kind == "queue" and Map.has_key?(next.running, issue.id) and not Map.has_key?(state_acc.running, issue.id)
+          admitted? = admitted_from_queue?(kind, state_acc, next, issue.id)
           {:cont, {next, if(admitted?, do: allowance - 1, else: allowance)}}
       end
     end)
     |> elem(0)
   end
+
+  defp admitted_from_queue?("queue", before, after_dispatch, issue_id) do
+    starting? =
+      Map.has_key?(after_dispatch.running, issue_id) or
+        MapSet.member?(after_dispatch.pending_dispatches, issue_id)
+
+    starting? and
+      not Map.has_key?(before.running, issue_id) and
+      not MapSet.member?(before.pending_dispatches, issue_id)
+  end
+
+  defp admitted_from_queue?(_kind, _before, _after_dispatch, _issue_id), do: false
 
   @doc """
   Dispatch order: the furthest stage first (its distance from the queue in the
@@ -860,23 +979,104 @@ defmodule SymphonyElixir.Orchestrator do
     state
   end
 
+  defp dispatch_issue(%State{} = state, %Issue{id: issue_id} = issue, attempt, preferred_worker_host)
+       when is_binary(issue_id) do
+    # Claim before the refresh so a second poll cannot dispatch it too. The
+    # claim is released below if the issue is no longer a valid candidate.
+    state = claim_issue(state, issue_id)
+
+    task =
+      Task.Supervisor.async_nolink(SymphonyElixir.TaskSupervisor, fn ->
+        revalidate_issue_for_dispatch(
+          issue,
+          &Tracker.fetch_issue_states_by_ids/1,
+          terminal_state_set()
+        )
+      end)
+
+    context = %{issue: issue, attempt: attempt, preferred_worker_host: preferred_worker_host}
+
+    %{
+      state
+      | revalidation_tasks: Map.put(state.revalidation_tasks, task.ref, context),
+        dispatch_order: state.dispatch_order ++ [issue_id],
+        pending_dispatches: MapSet.put(state.pending_dispatches, issue_id)
+    }
+  end
+
   defp dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host) do
-    case revalidate_issue_for_dispatch(issue, &Tracker.fetch_issue_states_by_ids/1, terminal_state_set()) do
+    do_dispatch_issue(state, issue, attempt, preferred_worker_host)
+  end
+
+  defp handle_revalidation_result(state, context, result) do
+    state = queue_revalidation_result(state, context, result)
+    notify_dashboard()
+    {:noreply, state}
+  end
+
+  # Revalidation tasks finish in any order; dispatch stays in the order
+  # choose_issues picked, so a fast Linear response cannot reorder runs.
+  defp queue_revalidation_result(state, context, result) do
+    results = Map.put(state.revalidation_results, context.issue.id, {context, result})
+    drain_revalidation_results(%{state | revalidation_results: results})
+  end
+
+  defp drain_revalidation_results(%State{dispatch_order: [issue_id | rest]} = state) do
+    case Map.pop(state.revalidation_results, issue_id) do
+      {nil, _results} ->
+        state
+
+      {{context, result}, results} ->
+        state = %{
+          state
+          | dispatch_order: rest,
+            revalidation_results: results,
+            pending_dispatches: MapSet.delete(state.pending_dispatches, issue_id)
+        }
+
+        state
+        |> apply_revalidation_result(context, result)
+        |> drain_revalidation_results()
+    end
+  end
+
+  defp drain_revalidation_results(state), do: state
+
+  defp apply_revalidation_result(state, context, result) do
+    issue_id = context.issue.id
+
+    case result do
       {:ok, %Issue{} = refreshed_issue} ->
-        do_dispatch_issue(state, refreshed_issue, attempt, preferred_worker_host)
+        dispatch_revalidated_issue(state, context, refreshed_issue)
 
       {:skip, :missing} ->
-        Logger.info("Skipping dispatch; issue no longer active or visible: #{issue_context(issue)}")
-        state
+        Logger.info("Skipping dispatch; issue no longer active or visible: #{issue_context(context.issue)}")
+        release_issue_claim(state, issue_id)
 
       {:skip, %Issue{} = refreshed_issue} ->
         Logger.info("Skipping stale dispatch after issue refresh: #{issue_context(refreshed_issue)} state=#{inspect(refreshed_issue.state)} blocked_by=#{length(refreshed_issue.blocked_by)}")
 
-        state
+        release_issue_claim(state, issue_id)
 
       {:error, reason} ->
-        Logger.warning("Skipping dispatch; issue refresh failed for #{issue_context(issue)}: #{inspect(reason)}")
-        state
+        Logger.warning("Skipping dispatch; issue refresh failed for #{issue_context(context.issue)}: #{inspect(reason)}")
+
+        release_issue_claim(state, issue_id)
+    end
+  end
+
+  defp dispatch_revalidated_issue(%State{delayed_restart: %{}} = state, context, _refreshed_issue) do
+    Logger.info("Not starting a run during a delayed restart: #{issue_context(context.issue)}")
+    release_issue_claim(state, context.issue.id)
+  end
+
+  defp dispatch_revalidated_issue(state, context, refreshed_issue) do
+    state = do_dispatch_issue(state, refreshed_issue, context.attempt, context.preferred_worker_host)
+
+    if Map.has_key?(state.running, refreshed_issue.id) or Map.has_key?(state.retry_attempts, refreshed_issue.id) do
+      state
+    else
+      release_issue_claim(state, refreshed_issue.id)
     end
   end
 
@@ -1213,24 +1413,40 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp handle_retry_issue(%State{} = state, issue_id, attempt, metadata) do
-    case Tracker.fetch_issue_states_by_ids([issue_id]) do
-      {:ok, issues} ->
-        issues
-        |> find_issue_by_id(issue_id)
-        |> handle_retry_issue_lookup(state, issue_id, attempt, metadata)
+  defp start_retry_task(%State{} = state, issue_id, attempt, metadata) do
+    task =
+      Task.Supervisor.async_nolink(SymphonyElixir.TaskSupervisor, fn ->
+        Tracker.fetch_issue_states_by_ids([issue_id])
+      end)
 
-      {:error, reason} ->
-        Logger.warning("Retry poll failed for issue_id=#{issue_id} issue_identifier=#{metadata[:identifier] || issue_id}: #{inspect(reason)}")
+    context = %{issue_id: issue_id, attempt: attempt, metadata: metadata}
+    %{state | retry_tasks: Map.put(state.retry_tasks, task.ref, context)}
+  end
 
-        {:noreply,
-         schedule_issue_retry(
-           state,
-           issue_id,
-           attempt + 1,
-           Map.merge(metadata, %{error: "retry poll failed: #{inspect(reason)}"})
-         )}
-    end
+  defp handle_retry_task_result(state, context, {:ok, issues}) do
+    issues
+    |> find_issue_by_id(context.issue_id)
+    |> handle_retry_issue_lookup(state, context.issue_id, context.attempt, context.metadata)
+  end
+
+  defp handle_retry_task_result(state, context, {:error, reason}) do
+    handle_retry_task_error(state, context, reason)
+  end
+
+  defp handle_retry_task_result(state, context, result) do
+    handle_retry_task_error(state, context, {:unexpected_response, result})
+  end
+
+  defp handle_retry_task_error(state, context, reason) do
+    Logger.warning("Retry poll failed for issue_id=#{context.issue_id} issue_identifier=#{context.metadata[:identifier] || context.issue_id}: #{inspect(reason)}")
+
+    {:noreply,
+     schedule_issue_retry(
+       state,
+       context.issue_id,
+       context.attempt + 1,
+       Map.merge(context.metadata, %{error: "retry poll failed: #{inspect(reason)}"})
+     )}
   end
 
   defp handle_retry_issue_lookup(%Issue{} = issue, state, issue_id, attempt, metadata) do
@@ -1263,6 +1479,12 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp cleanup_issue_workspace(issue_or_identifier, worker_host) do
     Workspace.remove_issue_workspaces(issue_or_identifier, worker_host)
+  end
+
+  defp start_terminal_workspace_cleanup do
+    Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
+      run_terminal_workspace_cleanup()
+    end)
   end
 
   defp run_terminal_workspace_cleanup do

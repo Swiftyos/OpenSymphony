@@ -749,8 +749,12 @@ defmodule SymphonyElixir.CoreTest do
         agent_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
       }
 
-      assert {:noreply, updated_state} =
+      assert {:noreply, retrying_state} =
                Orchestrator.handle_info({:retry_issue, issue_id, retry_token}, state)
+
+      assert [{ref, _context}] = Map.to_list(retrying_state.retry_tasks)
+      assert_receive {^ref, result}, 1_000
+      assert {:noreply, updated_state} = Orchestrator.handle_info({ref, result}, retrying_state)
 
       refute MapSet.member?(updated_state.claimed, issue_id)
       refute Map.has_key?(updated_state.retry_attempts, issue_id)

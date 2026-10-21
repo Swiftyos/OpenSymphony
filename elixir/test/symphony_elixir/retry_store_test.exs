@@ -127,13 +127,20 @@ defmodule SymphonyElixir.RetryStoreTest do
 
         # The retry fires; the memory tracker no longer has the issue, so it is released and forgotten.
         send(restarted, {:retry_issue, issue_id, state.retry_attempts[issue_id].retry_token})
-        Process.sleep(50)
-        refute MapSet.member?(:sys.get_state(restarted).claimed, issue_id)
+        wait_until(fn -> not MapSet.member?(:sys.get_state(restarted).claimed, issue_id) end)
         assert RetryStore.load() == %{}
         GenServer.stop(restarted)
       end)
 
     assert log =~ "Restored retry issue_id=#{issue_id} issue_identifier=MT-900"
     assert File.exists?(path)
+  end
+
+  defp wait_until(fun, attempts \\ 200) do
+    cond do
+      fun.() -> :ok
+      attempts <= 0 -> flunk("condition not met in time")
+      true -> Process.sleep(10) && wait_until(fun, attempts - 1)
+    end
   end
 end

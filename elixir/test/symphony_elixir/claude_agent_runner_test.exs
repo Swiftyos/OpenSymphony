@@ -1,6 +1,29 @@
 defmodule SymphonyElixir.ClaudeAgentRunnerTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.FactoryControls
+
+  setup do
+    FactoryControls.reset()
+    on_exit(&FactoryControls.reset/0)
+    :ok
+  end
+
+  test "a pick-up into the same backend continues with the new stage's effort" do
+    %{issue: issue, trace_file: trace_file} = runner_setup!("success", 1)
+
+    {:ok, _} = FactoryControls.put("todo", "effort", "low")
+    {:ok, _} = FactoryControls.put("implement", "effort", "high")
+
+    issue = %{issue | state: "Todo", labels: []}
+
+    assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: fn _ -> {:ok, [%{issue | state: "Done"}]} end)
+
+    argv = trace_file |> File.read!() |> String.split("\n", trim: true) |> Enum.find(&String.starts_with?(&1, "ARGV:"))
+    assert argv =~ "--effort high"
+    refute argv =~ "--effort low"
+  end
+
   test "agent runner uses Claude through the generic update path and continuation prompt" do
     test_root = temp_root!("continuation")
     trace_env = "SYMP_TEST_CLAUDE_TRACE_#{System.unique_integer([:positive])}"
@@ -174,6 +197,7 @@ defmodule SymphonyElixir.ClaudeAgentRunnerTest do
     System.put_env(scenario_env, scenario)
 
     write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
       agent_backend: "claude",
       workspace_root: workspace_root,
       hook_after_create: "printf '# test\\n' > README.md",

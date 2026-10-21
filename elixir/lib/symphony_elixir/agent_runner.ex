@@ -76,8 +76,12 @@ defmodule SymphonyElixir.AgentRunner do
 
     try do
       with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host, settings: issue_config.settings),
+           {:ok, issue, route} <- pick_up_and_reroute(issue, route, issue_config),
            :ok <- prepare_workspace_for_backend(workspace, worker_host, route.backend, issue_config) do
         run_backend_turns(workspace, issue, host, opts, worker_host, route)
+      else
+        :handover -> :ok
+        other -> other
       end
     after
       Sandbox.reap(workspace, issue_config.settings)
@@ -112,7 +116,6 @@ defmodule SymphonyElixir.AgentRunner do
     max_turns = Keyword.get(opts, :max_turns, issue_config.settings.agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
     StageResult.exclude_from_git(workspace)
-    issue = pick_up(issue)
 
     resume = resumable_session(host, issue, workspace, "codex")
 
@@ -222,7 +225,6 @@ defmodule SymphonyElixir.AgentRunner do
     ]
 
     StageResult.exclude_from_git(workspace)
-    issue = pick_up(issue)
 
     resume = resumable_session(host, issue, workspace, route.backend)
 
@@ -428,6 +430,28 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp hold_unapproved_move(outcome, _issue), do: outcome
+
+  # The queue stage's route was resolved before the run; after a pick-up the
+  # issue is in its next stage, so re-resolve there. A different backend means
+  # this run (account and session belong to the old one) ends and the
+  # orchestrator's continuation retry starts the new stage's backend.
+  defp pick_up_and_reroute(%Issue{} = issue, %AgentRoute{} = route, issue_config) do
+    moved_issue = pick_up(issue)
+
+    if moved_issue == issue do
+      {:ok, issue, route}
+    else
+      next_route = AgentRoute.resolve(moved_issue, issue_config.settings)
+
+      if next_route.backend != route.backend do
+        Logger.info("Symphony handed over #{issue_context(moved_issue)} after pick-up: backend #{route.backend} -> #{next_route.backend}; ending this run for the new stage")
+
+        :handover
+      else
+        {:ok, moved_issue, next_route}
+      end
+    end
+  end
 
   # An issue waiting in a queue stage with one agent connection out (Todo ->
   # Research) is picked up by Symphony itself, so no agent turn is spent on it.

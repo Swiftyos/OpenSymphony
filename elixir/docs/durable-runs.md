@@ -123,6 +123,19 @@ Kubernetes they move behind a tool gateway.
      is adopted and completes once.
 5. **Kubernetes launcher** (Phase 3): the runner is a pod's entrypoint.
 
+## Controller responsiveness
+
+The orchestrator does no tracker (Linear) I/O in its own callbacks. Polls,
+per-issue dispatch revalidation, retries and startup terminal cleanup run as
+tasks under `SymphonyElixir.TaskSupervisor`, and their results are applied back
+in the GenServer against the state at that moment. Only one poll is in flight;
+ticks and refresh requests that arrive during it are coalesced.
+
+This keeps the controller responsive as the fleet grows: a slow Linear response
+never delays a dashboard `:snapshot`, `/api/v1/state`, or an MCP call such as
+`request_refresh`. It also means a crashed fetch is isolated and logged, and the
+next tick still polls.
+
 ## Rules for Phase 3
 
 - **Runners read no controller state.** A runner pod is untrusted and has no database

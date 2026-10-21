@@ -2,6 +2,7 @@ defmodule SymphonyElixir.RunHostTest do
   use SymphonyElixir.TestSupport
 
   alias SymphonyElixir.AgentInbox
+  alias SymphonyElixir.FactoryControls
   alias SymphonyElixir.RunHost
   alias SymphonyElixir.RunHost.Local
   alias SymphonyElixir.SessionStore
@@ -103,10 +104,12 @@ defmodule SymphonyElixir.RunHostTest do
   setup do
     AgentInbox.reset()
     Transcript.reset()
+    FactoryControls.reset()
 
     on_exit(fn ->
       AgentInbox.reset()
       Transcript.reset()
+      FactoryControls.reset()
     end)
 
     :ok
@@ -166,6 +169,43 @@ defmodule SymphonyElixir.RunHostTest do
       refute_received {:worker_runtime_info, _, _}
       refute_received {:agent_worker_update, _, _}
       refute_received {:codex_worker_update, _, _}
+    end
+
+    test "a pick-up into a different backend ends the run before starting the old backend" do
+      test_root = temp_root!("handover")
+      {launcher, trace_file} = write_fake_claude_launcher!(test_root)
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        agent_backend: "claude",
+        workspace_root: workspace_root,
+        hook_after_create: "printf '# test\n' > README.md",
+        claude_command: launcher,
+        max_turns: 1
+      )
+
+      {:ok, _} = FactoryControls.put("todo", "backend", "claude")
+      {:ok, _} = FactoryControls.put("implement", "backend", "codex")
+
+      issue = %{issue_fixture("issue-handover", "MT-HOST-HANDOVER") | state: "Todo"}
+      host = %RecordingHost{owner: self()}
+
+      log =
+        capture_log(fn ->
+          assert :ok =
+                   AgentRunner.run(issue, self(),
+                     run_host: host,
+                     issue_state_fetcher: fn _ -> {:ok, [issue]} end
+                   )
+        end)
+
+      assert log =~ "handed over"
+      assert_receive {:run_host, :runtime_info, %{issue: %Issue{id: "issue-handover"}}}, 1_000
+      refute_received {:run_host, :inbox_register, _}
+      refute_received {:run_host, :turn_started, _}
+      refute File.exists?(trace_file)
     end
   end
 
