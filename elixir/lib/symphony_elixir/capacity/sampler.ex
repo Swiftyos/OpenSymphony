@@ -42,6 +42,7 @@ defmodule SymphonyElixir.Capacity.Sampler do
     :snapshot_fun,
     :command_timeout_ms,
     :clock,
+    :proc_reader,
     previous_cpu: %{},
     logged_errors: MapSet.new()
   ]
@@ -91,7 +92,14 @@ defmodule SymphonyElixir.Capacity.Sampler do
   @doc false
   @spec parse_container_stats(String.t()) :: {:ok, [container_sample()]} | {:error, term()}
   def parse_container_stats(output) when is_binary(output) do
-    output = String.trim(output)
+    # Rootless podman prints warnings (WARN[0000] ...) on stderr, which the
+    # runner merges into the output; only JSON lines are stats.
+    output =
+      output
+      |> String.split(~r/\r?\n/)
+      |> Enum.filter(&json_line?/1)
+      |> Enum.join("\n")
+      |> String.trim()
 
     cond do
       output == "" ->
@@ -106,6 +114,13 @@ defmodule SymphonyElixir.Capacity.Sampler do
   end
 
   def parse_container_stats(_output), do: {:error, :invalid_container_stats}
+
+  # Log lines podman/docker print on stderr: logrus (WARN[0000] ...) and
+  # key=value (time="..." level=warning ...) formats.
+  defp json_line?(line) do
+    trimmed = String.trim_leading(line)
+    not Regex.match?(~r/^(?:(?:WARN|ERRO|INFO|DEBU|FATA)\[|time=|level=)/, trimmed)
+  end
 
   @doc false
   @spec parse_ps(String.t()) :: {:ok, %{integer() => process_sample()}} | {:error, term()}
@@ -186,6 +201,9 @@ defmodule SymphonyElixir.Capacity.Sampler do
       snapshot_fun:
         Keyword.get(opts, :snapshot_fun) ||
           Application.get_env(:symphony_elixir, :capacity_snapshot_fun, &Orchestrator.snapshot/0),
+      proc_reader:
+        Keyword.get(opts, :proc_reader) ||
+          Application.get_env(:symphony_elixir, :capacity_proc_reader, &read_proc_stat/1),
       command_timeout_ms:
         Keyword.get(opts, :command_timeout_ms) ||
           Application.get_env(:symphony_elixir, :capacity_command_timeout_ms, @command_timeout_ms),
@@ -283,7 +301,7 @@ defmodule SymphonyElixir.Capacity.Sampler do
     expected = expected_containers(running)
 
     if expected == %{} do
-      {{:ok, []}, state}
+      {{:ok, []}, %{state | previous_cpu: %{}}}
     else
       command = state.settings.sandbox.command
 
@@ -325,14 +343,25 @@ defmodule SymphonyElixir.Capacity.Sampler do
     now = state.clock.()
 
     {rows, previous_cpu} =
-      Enum.reduce(samples, {[], state.previous_cpu}, fn sample, {rows, previous} ->
+      Enum.reduce(samples, {[], %{}}, fn sample, {rows, previous} ->
         case Map.get(expected, sample.name) do
           nil ->
             {rows, previous}
 
           entry ->
+            key = {entry_key(entry), sample.name}
+
             {row, previous} =
-              run_sample_row(entry, sample.cpu_seconds, sample.cpu_percent, sample.memory_bytes, previous, now)
+              run_sample_row(
+                key,
+                entry,
+                sample.cpu_seconds,
+                sample.cpu_percent,
+                sample.memory_bytes,
+                state.previous_cpu,
+                previous,
+                now
+              )
 
             {[row | rows], previous}
         end
@@ -345,7 +374,7 @@ defmodule SymphonyElixir.Capacity.Sampler do
     roots = process_roots(running)
 
     if roots == [] do
-      {{:ok, []}, state}
+      {{:ok, []}, %{state | previous_cpu: %{}}}
     else
       case run_command(state, "ps", @ps_columns) do
         {{:ok, {output, 0}}, state} ->
@@ -365,9 +394,64 @@ defmodule SymphonyElixir.Capacity.Sampler do
 
   defp process_output(state, output, roots) do
     case parse_ps(output) do
-      {:ok, processes} -> process_samples(processes, roots, state)
+      {:ok, processes} -> process_samples(with_proc_cpu(processes, state.proc_reader), roots, state)
       {:error, reason} -> {{:error, {:ps_parse_error, inspect(reason)}}, state}
     end
+  end
+
+  # `ps` time is a process's own CPU and drops the CPU of children it already
+  # reaped (test runs, builds), so a tree's total falls whenever a child exits.
+  # On Linux /proc/<pid>/stat also has cutime/cstime (reaped children), which
+  # keeps the tree total monotonic. Elsewhere (macOS) ps time is all there is.
+  defp with_proc_cpu(processes, reader) do
+    Map.new(processes, fn {pid, sample} ->
+      case reader.(pid) do
+        {:ok, seconds} -> {pid, %{sample | cpu_seconds: seconds}}
+        _ -> {pid, sample}
+      end
+    end)
+  end
+
+  @clock_ticks_per_second 100
+
+  @doc false
+  @spec read_proc_stat(pos_integer(), Path.t()) :: {:ok, float()} | :error
+  def read_proc_stat(pid, proc_root \\ "/proc") when is_integer(pid) do
+    case File.read(Path.join([proc_root, Integer.to_string(pid), "stat"])) do
+      {:ok, contents} -> parse_proc_stat(contents)
+      {:error, _reason} -> :error
+    end
+  end
+
+  @doc false
+  @spec parse_proc_stat(String.t()) :: {:ok, float()} | :error
+  def parse_proc_stat(contents) when is_binary(contents) do
+    # Fields after "(comm)": state is field 3, so utime..cstime (14..17) are
+    # at 11..14. comm may contain spaces and parens, hence the last ")".
+    with [_, rest] <- :binary.split(contents, ") ", [:global]) |> then(&split_after_comm(&1)),
+         fields = String.split(rest),
+         [utime, stime, cutime, cstime] <- Enum.slice(fields, 11, 4),
+         {:ok, ticks} <- sum_integers([utime, stime, cutime, cstime]) do
+      {:ok, ticks / @clock_ticks_per_second}
+    else
+      _ -> :error
+    end
+  end
+
+  defp split_after_comm(parts) when length(parts) >= 2 do
+    {comm_parts, [rest]} = Enum.split(parts, -1)
+    [Enum.join(comm_parts, ") "), rest]
+  end
+
+  defp split_after_comm(_parts), do: :error
+
+  defp sum_integers(values) do
+    Enum.reduce_while(values, {:ok, 0}, fn value, {:ok, total} ->
+      case Integer.parse(value) do
+        {number, ""} -> {:cont, {:ok, total + number}}
+        _ -> {:halt, :error}
+      end
+    end)
   end
 
   defp process_roots(running) do
@@ -386,14 +470,23 @@ defmodule SymphonyElixir.Capacity.Sampler do
     now = state.clock.()
 
     {rows, previous_cpu} =
-      Enum.reduce(roots, {[], state.previous_cpu}, fn {pid, entry}, {rows, previous} ->
+      Enum.reduce(roots, {[], %{}}, fn {pid, entry}, {rows, previous} ->
         case Map.get(usage, pid) do
           nil ->
-            {rows, Map.delete(previous, entry_key(entry))}
+            {rows, previous}
 
           %{cpu_seconds: cpu_seconds, memory_bytes: memory_bytes} ->
             {row, previous} =
-              run_sample_row(entry, cpu_seconds, 0.0, memory_bytes, previous, now)
+              run_sample_row(
+                {entry_key(entry), pid},
+                entry,
+                cpu_seconds,
+                0.0,
+                memory_bytes,
+                state.previous_cpu,
+                previous,
+                now
+              )
 
             {[row | rows], previous}
         end
@@ -402,23 +495,24 @@ defmodule SymphonyElixir.Capacity.Sampler do
     {{:ok, Enum.reverse(rows)}, %{state | previous_cpu: previous_cpu}}
   end
 
-  defp run_sample_row(entry, cpu_seconds, fallback_percent, memory_bytes, previous, now) do
-    key = entry_key(entry)
-
+  # Baselines are keyed by run and process (or container) and rebuilt every
+  # tick from the runs sampled in it (`baselines` is last tick's, `next` this
+  # tick's), so an ended run's baseline never leaks into a later run.
+  defp run_sample_row(key, entry, cpu_seconds, fallback_percent, memory_bytes, baselines, next, now) do
     case cpu_seconds do
       seconds when is_number(seconds) ->
-        case Map.get(previous, key) do
+        case Map.get(baselines, key) do
           {previous_seconds, previous_at}
           when is_number(previous_seconds) and now > previous_at and seconds >= previous_seconds ->
             cpu_percent = (seconds - previous_seconds) * 100_000 / (now - previous_at)
-            {{entry, cpu_percent, memory_bytes}, Map.put(previous, key, {seconds, now})}
+            {{entry, cpu_percent, memory_bytes}, Map.put(next, key, {seconds, now})}
 
           _ ->
-            {{entry, nil, memory_bytes}, Map.put(previous, key, {seconds, now})}
+            {{entry, nil, memory_bytes}, Map.put(next, key, {seconds, now})}
         end
 
       _ ->
-        {{entry, fallback_percent, memory_bytes}, Map.delete(previous, key)}
+        {{entry, fallback_percent, memory_bytes}, next}
     end
   end
 
@@ -486,10 +580,23 @@ defmodule SymphonyElixir.Capacity.Sampler do
     end
   end
 
-  defp kill_os_process(port) do
-    {:os_pid, os_pid} = :erlang.port_info(port, :os_pid)
-    _ = System.cmd("kill", ["-KILL", Integer.to_string(os_pid)], stderr_to_stdout: true)
-    Port.close(port)
+  # The command may exit right at the deadline, closing the port first; then
+  # there is nothing left to kill and it still counts as a timeout.
+  @doc false
+  @spec kill_os_process(port()) :: :ok
+  def kill_os_process(port) do
+    case :erlang.port_info(port, :os_pid) do
+      {:os_pid, os_pid} -> System.cmd("kill", ["-KILL", Integer.to_string(os_pid)], stderr_to_stdout: true)
+      _closed -> :ok
+    end
+
+    try do
+      Port.close(port)
+    rescue
+      ArgumentError -> :ok
+    end
+
+    :ok
   end
 
   defp record_run_sample({entry, nil, memory_bytes}) do
@@ -673,8 +780,8 @@ defmodule SymphonyElixir.Capacity.Sampler do
     value = String.trim(value)
 
     cond do
-      String.ends_with?(value, "s") ->
-        parse_float(String.trim_trailing(value, "s"))
+      go_duration?(value) ->
+        go_duration_seconds(value)
 
       String.contains?(value, ":") ->
         case parse_cpu_time(value) do
@@ -688,6 +795,28 @@ defmodule SymphonyElixir.Capacity.Sampler do
   end
 
   defp parse_cpu_time_field(_value), do: nil
+
+  # Podman reports cpu_time as a Go duration: "6s", "1m12.27s", "1h2m3.5s", "850ms".
+  @go_duration ~r/^(?:\d+(?:\.\d+)?(?:h|ms|us|µs|ns|m|s))+$/u
+  @go_duration_part ~r/(\d+(?:\.\d+)?)(h|ms|us|µs|ns|m|s)/u
+
+  defp go_duration?(value), do: Regex.match?(@go_duration, value)
+
+  defp go_duration_seconds(value) do
+    @go_duration_part
+    |> Regex.scan(value, capture: :all_but_first)
+    |> Enum.reduce(0.0, fn [number, unit], total ->
+      {amount, ""} = Float.parse(number)
+      total + amount * go_duration_unit(unit)
+    end)
+  end
+
+  defp go_duration_unit("h"), do: 3600.0
+  defp go_duration_unit("m"), do: 60.0
+  defp go_duration_unit("s"), do: 1.0
+  defp go_duration_unit("ms"), do: 1.0e-3
+  defp go_duration_unit(unit) when unit in ["us", "µs"], do: 1.0e-6
+  defp go_duration_unit("ns"), do: 1.0e-9
 
   defp parse_float(value) do
     case Float.parse(value) do

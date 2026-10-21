@@ -5,6 +5,14 @@ defmodule SymphonyElixir.CapacityTest do
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Linear.Client
 
+  # The fake pids below (100, 101...) are real processes on a Linux host; never
+  # let the sampler read their /proc entries unless a test injects a reader.
+  setup do
+    Application.put_env(:symphony_elixir, :capacity_proc_reader, fn _pid -> :error end)
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :capacity_proc_reader) end)
+    :ok
+  end
+
   describe "capacity config" do
     test "defaults to a 30 second sample interval and accepts 0 or at least one second" do
       assert {:ok, settings} = Schema.parse(%{})
@@ -325,13 +333,125 @@ defmodule SymphonyElixir.CapacityTest do
         %{"name" => "time-clock", "cpu_time" => "00:00:07"},
         %{"name" => "time-bad-clock", "cpu_time" => "1:bad"},
         %{"name" => "time-text", "cpu_time" => "garbage"},
-        %{"name" => "time-other", "cpu_time" => %{}}
+        %{"name" => "time-other", "cpu_time" => %{}},
+        %{"name" => "time-go-minutes", "cpu_time" => "1m12.5s"},
+        %{"name" => "time-go-hours", "cpu_time" => "1h2m3.5s"},
+        %{"name" => "time-go-millis", "cpu_time" => "850ms"},
+        %{"name" => "time-go-micros", "cpu_time" => "250µs"},
+        %{"name" => "time-go-nanos", "cpu_time" => "100ns"}
       ]
 
       assert {:ok, samples} = Sampler.parse_container_stats(Jason.encode!(rows))
 
       assert Enum.map(samples, & &1.cpu_seconds) ==
-               [1.5, 2.5, nil, nil, 3.0, 4.0, nil, nil, 5.0, 6.0, 7.0, nil, nil, nil]
+               [1.5, 2.5, nil, nil, 3.0, 4.0, nil, nil, 5.0, 6.0, 7.0, nil, nil, nil] ++
+                 [72.5, 3723.5, 0.85, 2.5e-4, 1.0000000000000001e-7]
+    end
+
+    test "ignores log lines rootless podman prints around the JSON" do
+      output = """
+      WARN[0000] The cgroupv2 manager is set to systemd but there is no systemd user session available
+      time="2026-10-21T12:00:00Z" level=warning msg="something"
+      [{"name": "symphony-abc", "cpu_percent": "1.5%", "mem_usage": "10MB / 1GB", "cpu_time": "2m0s"}]
+      """
+
+      assert {:ok, [%{name: "symphony-abc", cpu_seconds: 120.0}]} = Sampler.parse_container_stats(output)
+      assert {:ok, []} = Sampler.parse_container_stats("WARN[0000] only a warning\n")
+    end
+
+    test "reads cumulative CPU including reaped children from /proc stat" do
+      stat = "1234 (my (odd) prog) S 1 1234 1234 0 -1 4194560 100 0 0 0 250 50 30 20 20 0 1 0 100 0 0"
+      assert Sampler.parse_proc_stat(stat) == {:ok, 3.5}
+      assert Sampler.parse_proc_stat("garbage") == :error
+      assert Sampler.parse_proc_stat("1 (x) S 1 2 3") == :error
+      assert Sampler.parse_proc_stat("1 (x) S 1 1 1 0 -1 0 0 0 0 0 a b c d 20") == :error
+      assert Sampler.read_proc_stat(999_999_999) == :error
+
+      root = Path.join(System.tmp_dir!(), "capacity-proc-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(Path.join(root, "42"))
+      File.write!(Path.join([root, "42", "stat"]), stat)
+      on_exit(fn -> File.rm_rf(root) end)
+      assert Sampler.read_proc_stat(42, root) == {:ok, 3.5}
+    end
+
+    test "killing an already-closed command port is a no-op" do
+      port = Port.open({:spawn_executable, System.find_executable("true")}, [:exit_status])
+      assert_receive {^port, {:exit_status, 0}}, 5_000
+      assert Sampler.kill_os_process(port) == :ok
+    end
+
+    test "process CPU stays monotonic with /proc even when a child exits between samples" do
+      snapshot = fn ->
+        %{running: [%{issue_id: "issue-1", identifier: "PAY-1", backend: "codex", stage: "implement", agent_server_pid: "100"}]}
+      end
+
+      # ps: the child 101 exits before the second sample, so ps time alone drops.
+      first = "100 1 1000 00:00:10\n101 100 2000 00:00:05\n"
+      second = "100 1 1000 00:00:10.25\n"
+      calls = :counters.new(1, [])
+
+      runner = fn _command, _args, _opts ->
+        index = :counters.get(calls, 1)
+        :counters.add(calls, 1, 1)
+        {Enum.at([first, second], index), 0}
+      end
+
+      # /proc: the reaped child's time moves into the parent's cutime.
+      proc_reader = fn
+        100 -> {:ok, if(:counters.get(calls, 1) <= 1, do: 10.0, else: 15.5)}
+        101 -> {:ok, 5.0}
+        _ -> :error
+      end
+
+      clock = :counters.new(1, [])
+      :counters.put(clock, 1, 1_000)
+
+      {:ok, pid} =
+        start_supervised(
+          {Sampler,
+           name: :capacity_proc_sampler,
+           settings: no_sandbox_settings(),
+           sample_interval_ms: 0,
+           snapshot_fun: snapshot,
+           command_runner: runner,
+           proc_reader: proc_reader,
+           clock: fn -> :counters.get(clock, 1) end}
+        )
+
+      send(pid, :sample)
+      :sys.get_state(pid)
+      :counters.put(clock, 1, 2_000)
+      send(pid, :sample)
+      :sys.get_state(pid)
+
+      assert Prometheus.render() =~ ~s(symphony_run_cpu_percent{backend="codex",issue="PAY-1",stage="implement"} 50.0)
+    end
+
+    test "a run that comes back starts without the old CPU baseline" do
+      present = :counters.new(1, [])
+      :counters.put(present, 1, 1)
+
+      snapshot = fn ->
+        if :counters.get(present, 1) == 1,
+          do: %{running: [%{issue_id: "issue-1", identifier: "PAY-1", backend: "codex", stage: "implement", agent_server_pid: "100"}]},
+          else: %{running: []}
+      end
+
+      runner = fn _command, _args, _opts -> {"100 1 1000 00:00:10\n", 0} end
+      clock = :counters.new(1, [])
+      :counters.put(clock, 1, 1_000)
+
+      {:ok, pid} =
+        start_supervised(
+          {Sampler, name: :capacity_baseline_sampler, settings: no_sandbox_settings(), sample_interval_ms: 0, snapshot_fun: snapshot, command_runner: runner, clock: fn -> :counters.get(clock, 1) end}
+        )
+
+      send(pid, :sample)
+      assert map_size(:sys.get_state(pid).previous_cpu) == 1
+
+      :counters.put(present, 1, 0)
+      send(pid, :sample)
+      assert :sys.get_state(pid).previous_cpu == %{}
     end
 
     test "reports malformed output instead of raising" do
