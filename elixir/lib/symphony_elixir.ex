@@ -81,7 +81,7 @@ defmodule SymphonyElixir.Application do
       SymphonyElixir.Capacity.Metrics,
       # The CPU and memory runners report about themselves (pods, process runners).
       SymphonyElixir.Capacity.RunUsage,
-      # The single writer of runs.json; before the orchestrator and the runner endpoints.
+      # The run registry's single writer and cache; before the orchestrator and the runner endpoints.
       SymphonyElixir.RunRegistry.Server,
       {Registry, keys: :unique, name: SymphonyElixir.RunWatcher.Registry},
       {DynamicSupervisor, strategy: :one_for_one, name: SymphonyElixir.RunWatcher.Supervisor},

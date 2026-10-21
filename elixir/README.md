@@ -316,13 +316,13 @@ run that is still alive: the run keeps its run id, epoch, workspace, token and s
 controller starts a watcher for it and puts it back in `running`, and no retry is scheduled. A
 run that is gone is retried with its next attempt. Heartbeats every 30s (and the watcher's
 last-seen time) keep stall detection honest while the controller is restarted. Applied event
-seqs are persisted in `~/.symphony/runs.json`, so a replayed outbox is deduplicated after a
+seqs are persisted in the run registry (`~/.symphony/run_registry/`), so a replayed outbox is deduplicated after a
 restart; a crash in the small window before that write can duplicate transcript entries, which
 is harmless and bounded to one batch.
 
 A runner exits only after the controller has acknowledged its `finished` event (or fenced the run).
 While the controller is down it keeps retrying for up to `agent.runner_finish_flush_ms` (default
-`3600000`, one hour), and a restarted controller that finds a finished run, in `runs.json` or in a
+`3600000`, one hour), and a restarted controller that finds a finished run, in the run registry or in a
 dead runner's `outbox.jsonl`, completes it instead of retrying it as interrupted.
 
 In short: the controller, dashboard and polling can restart; the runner, its agent process,
@@ -831,7 +831,7 @@ Issues waiting for a retry or a continuation check are saved in `~/.symphony/ret
 
 ### Interrupted runs
 
-Running agent runs are recorded in `~/.symphony/runs.json` with their run id, attempt, epoch and metadata. A run cut off by a restart is retried within a second with its next attempt, so it resumes its session instead of being forgotten until the next poll resets it.
+Running agent runs are recorded in the run registry, one document per issue under `~/.symphony/run_registry/` (a `runs.json` from an earlier version is migrated into it once), with their run id, attempt, epoch and metadata. The controller keeps the registry decoded in memory, so a runner request costs one lookup however many runs there are. A run cut off by a restart is retried within a second with its next attempt, so it resumes its session instead of being forgotten until the next poll resets it.
 
 ### Idempotent Linear writes
 

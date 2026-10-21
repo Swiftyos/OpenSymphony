@@ -43,12 +43,8 @@ defmodule SymphonyElixirWeb.RunnerAuth do
     end
   end
 
-  defp find_run(run_id) when is_binary(run_id) do
-    RunRegistry.load()
-    |> Enum.find(fn {_issue_id, entry} -> entry.run_id == run_id end)
-  end
-
-  defp find_run(_run_id), do: nil
+  # One ETS lookup in the registry's cache, however many runs there are.
+  defp find_run(run_id), do: RunRegistry.find_run(run_id)
 
   defp authorize(conn, run_id, issue_id, entry) do
     token = credential(conn)

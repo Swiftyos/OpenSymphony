@@ -35,7 +35,9 @@ to the controller only through a **run host** interface:
   run id and epoch under a controller secret). A request with a stale epoch gets `409`, and the
   runner stops: that is the fencing.
 
-The controller keeps a **run registry** (`~/.symphony/runs.json` through `StateStore`). It
+The controller keeps a **run registry** (one `StateStore` document per issue,
+`~/.symphony/run_registry/<base64url issue id>.json`; the single `runs.json` of earlier
+versions is migrated into it once and left empty with a `migrated_to` marker). It
 holds run id, issue, attempt, epoch, launcher reference, started_at and last_seen_at. On start
 the orchestrator adopts every registered run still alive. Each adopted run goes back into
 `running`, with heartbeats in place of a process monitor. A run whose heartbeat lapses past
@@ -61,7 +63,7 @@ Kubernetes they move behind a tool gateway.
    heartbeat-based liveness. The orchestrator records dispatch and completion, and on start
    adopts live runs. It still uses the local launcher.
    Done: `SymphonyElixir.RunLauncher` (behaviour and `launcher/0`),
-   `SymphonyElixir.RunLauncher.Local`, `SymphonyElixir.RunRegistry` (`runs.json`), and the
+   `SymphonyElixir.RunLauncher.Local`, `SymphonyElixir.RunRegistry` (the run registry), and the
    orchestrator's dispatch/completion recording and `recover_runs/1` (runs cut off by a
    restart are retried within a second with their next attempt).
 3. **Runner protocol.** This step adds the runner protocol, still exercised in-process. It has
@@ -151,12 +153,14 @@ Kubernetes they move behind a tool gateway.
    - **Lost watchers.** When a process run's watcher goes down for any reason but a normal
      finish, the orchestrator stops the runner before the retry is dispatched. `stop` can wait
      up to 20s, so the orchestrator always runs it in a task under `TaskSupervisor`.
-   - **Event progress.** `RunnerCommands` seeds its per-run `last_seq` from `runs.json` after a
+   - **Event progress.** `RunnerCommands` seeds its per-run `last_seq` from the run registry after a
      restart, and the controller writes the applied batch's `last_seq` (and the finished reason)
      back to the registry. Every registry write goes through `SymphonyElixir.RunRegistry.Server`,
      so the orchestrator's records and deletes and the endpoints' progress never overwrite each
-     other. Progress is coalesced per run and written at most once a second (readers in the
-     controller see it at once); a finished reason is written before the batch is acknowledged. A crash between a batch being applied and that one write can still
+     other. The server also keeps the decoded registry in ETS, indexed by issue and by
+     run id, so `RunnerAuth`'s lookup and `next_epoch` never decode the store; a write
+     changes one issue's document. Progress is coalesced per run and written at most once a
+     second, only for the runs that changed (readers in the controller see it at once); a finished reason is written before the batch is acknowledged. A crash between a batch being applied and that one write can still
      replay the batch's transcript entries; it cannot apply a stage result twice because Linear
      writes are idempotent.
    - **Cancellation** stops the systemd unit, or kills the process group (`TERM`, then `KILL`

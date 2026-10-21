@@ -57,7 +57,45 @@ defmodule SymphonyElixir.RunRegistryServerTest do
       end
     end
 
-    assert path |> File.read!() |> Jason.decode!() |> Map.fetch!("epochs") |> map_size() == 40
+    assert path |> RunRegistry.dir() |> File.ls!() |> length() == 40
+  end
+
+  test "a progress flush writes only the runs that changed", %{path: path} do
+    for issue_id <- ["issue-1", "issue-2"], do: :ok = RunRegistry.record(issue_id, entry(issue_id))
+    untouched = RunRegistry.doc_path(path, "issue-2")
+    File.write!(untouched, "sentinel")
+
+    :ok = RunRegistry.advance_progress("issue-1", "run-issue-1", 3)
+    # Progress that changes nothing is not buffered.
+    :ok = RunRegistry.advance_progress("issue-1", "run-issue-1", 1)
+    :ok = RunRegistry.advance_progress("issue-2", "run-issue-2", 0)
+    assert Server.pending(path) == %{"issue-1" => {"run-issue-1", 3}}
+    :ok = RunRegistry.flush()
+
+    assert File.read!(untouched) == "sentinel"
+    File.rm!(untouched)
+    assert disk_runs(path)["issue-1"]["last_seq"] == 3
+  end
+
+  test "readers fall back to the store while the server is unavailable", %{path: path} do
+    :ok = RunRegistry.record("issue-1", entry("issue-1"))
+    :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, Server)
+
+    try do
+      assert Server.lookup(path, "issue-1") == :unavailable
+      assert Server.find_run(path, "run-issue-1") == :unavailable
+      assert Server.docs(path) == :unavailable
+      assert {"issue-1", %{run_id: "run-issue-1"}} = RunRegistry.find_run("run-issue-1")
+      assert RunRegistry.next_epoch("issue-1") == 2
+      assert %{"issue-1" => _entry} = RunRegistry.load()
+      assert :ok = RunRegistry.reload()
+    after
+      {:ok, _pid} = Supervisor.restart_child(SymphonyElixir.Supervisor, Server)
+    end
+
+    # A restarted server loads the registry from the store again.
+    assert {"issue-1", _entry} = RunRegistry.find_run("run-issue-1")
+    assert Server.find_run(path, "run-other") == nil
   end
 
   test "progress is visible at once, written once a second, and a finished reason is written before it returns", %{path: path} do
@@ -67,6 +105,8 @@ defmodule SymphonyElixir.RunRegistryServerTest do
     assert :ok = RunRegistry.advance_progress("issue-1", "run-issue-1", 2)
     assert RunRegistry.load()["issue-1"].last_seq == 3
     assert disk_runs(path)["issue-1"]["last_seq"] == 0
+    # Reading the store directly shows only what was written.
+    assert RunRegistry.read_store(path)["issue-1"].run.last_seq == 0
     assert Server.pending(path) == %{"issue-1" => {"run-issue-1", 3}}
 
     # The coalesced write lands within the flush interval.
@@ -91,11 +131,11 @@ defmodule SymphonyElixir.RunRegistryServerTest do
     :ok = RunRegistry.advance_progress("issue-2", "old-run", 7)
     :ok = RunRegistry.advance_progress("issue-2", "run-issue-2", 2)
     assert Server.pending(path) == %{"issue-2" => {"run-issue-2", 2}}
-    # Progress for another run is not shown either.
+    # Progress for another run is ignored and never replaces the current run's.
     :ok = RunRegistry.advance_progress("issue-2", "old-run", 8)
-    assert RunRegistry.load()["issue-2"].last_seq == 0
+    assert RunRegistry.load()["issue-2"].last_seq == 2
     :ok = RunRegistry.flush()
-    assert disk_runs(path)["issue-2"]["last_seq"] == 0
+    assert disk_runs(path)["issue-2"]["last_seq"] == 2
   end
 
   test "pending progress is written when the server shuts down, and writes go direct without it", %{path: path} do
@@ -142,10 +182,17 @@ defmodule SymphonyElixir.RunRegistryServerTest do
     end
   end
 
+  # The runs as written to the per-issue documents, by issue id.
   defp disk_runs(path) do
-    case File.read(path) do
-      {:ok, body} -> body |> Jason.decode!() |> Map.get("runs", %{})
-      {:error, :enoent} -> %{}
+    case File.ls(RunRegistry.dir(path)) do
+      {:ok, names} ->
+        for name <- names,
+            %{"issue_id" => issue_id, "run" => %{} = run} <- [path |> RunRegistry.dir() |> Path.join(name) |> File.read!() |> Jason.decode!()],
+            into: %{},
+            do: {issue_id, run}
+
+      {:error, :enoent} ->
+        %{}
     end
   end
 

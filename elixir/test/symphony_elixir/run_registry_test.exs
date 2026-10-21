@@ -22,7 +22,7 @@ defmodule SymphonyElixir.RunRegistryTest do
 
   test "records a run and loads it back with its metadata", %{path: path} do
     assert :ok = RunRegistry.record("issue-1", entry())
-    assert Bitwise.band(File.stat!(path).mode, 0o777) == 0o600
+    assert Bitwise.band(File.stat!(RunRegistry.doc_path(path, "issue-1")).mode, 0o777) == 0o600
 
     assert %{"issue-1" => loaded} = RunRegistry.load()
     assert loaded.run_id == "run-1"
@@ -81,7 +81,12 @@ defmodule SymphonyElixir.RunRegistryTest do
                entry(%{metadata: %{identifier: "MT-D", issue: %Issue{id: "issue-date", identifier: "MT-D", created_at: ~D[2026-01-01]}}})
              )
 
-    assert File.exists?(path)
+    assert File.exists?(RunRegistry.doc_path(path, "issue-date"))
+
+    # Every write is in the store: a fresh load from it sees the same runs.
+    cached = Map.new(RunRegistry.load(), fn {issue_id, entry} -> {issue_id, {entry.run_id, entry.last_seq, entry.finished}} end)
+    :ok = RunRegistry.reload()
+    assert Map.new(RunRegistry.load(), fn {issue_id, entry} -> {issue_id, {entry.run_id, entry.last_seq, entry.finished}} end) == cached
   end
 
   test "delete forgets the run but keeps its epoch", %{path: path} do
@@ -93,8 +98,15 @@ defmodule SymphonyElixir.RunRegistryTest do
     assert RunRegistry.next_epoch("issue-1") == 4
 
     # The epoch survives a re-read of the document, as it does across a restart.
-    assert File.exists?(path)
-    assert %{"epochs" => %{"issue-1" => 3}} = path |> File.read!() |> Jason.decode!()
+    assert %{"issue_id" => "issue-1", "epoch" => 3, "run" => nil} = disk_doc(path, "issue-1")
+    :ok = RunRegistry.reload()
+    assert RunRegistry.next_epoch("issue-1") == 4
+
+    # Deleting an issue with no run (or none at all) writes nothing.
+    File.rm!(RunRegistry.doc_path(path, "issue-1"))
+    assert :ok = RunRegistry.delete("issue-1")
+    assert :ok = RunRegistry.delete("issue-never")
+    refute File.exists?(RunRegistry.doc_path(path, "issue-1"))
   end
 
   test "epochs increase per issue across restarts and are independent", %{path: path} do
@@ -110,7 +122,7 @@ defmodule SymphonyElixir.RunRegistryTest do
     # A stale epoch never moves the counter back.
     assert :ok = RunRegistry.record("issue-1", entry(%{run_id: "run-3", epoch: 1}))
     assert RunRegistry.next_epoch("issue-1") == 3
-    assert path |> File.read!() |> Jason.decode!() |> get_in(["runs", "issue-1", "epoch"]) == 1
+    assert %{"epoch" => 2, "run" => %{"epoch" => 1, "run_id" => "run-3"}} = disk_doc(path, "issue-1")
   end
 
   test "malformed rows are skipped and launchers are parsed safely", %{path: path} do
@@ -170,6 +182,84 @@ defmodule SymphonyElixir.RunRegistryTest do
     assert RunRegistry.next_epoch("bad") == 1
   end
 
+  test "a legacy runs.json is migrated once into per-issue documents", %{path: path} do
+    legacy_run = %{"run_id" => "run-legacy", "attempt" => 1, "epoch" => 2, "ref" => "local:boot:0.1.0", "started_at_unix_ms" => 5, "last_seq" => 4}
+    newer_run = %{"run_id" => "run-newer", "attempt" => 0, "epoch" => 1, "ref" => "local:boot:0.2.0", "started_at_unix_ms" => 6}
+
+    File.write!(
+      path,
+      Jason.encode!(%{
+        "version" => 1,
+        "runs" => %{"issue-legacy" => legacy_run, "issue-both" => legacy_run},
+        "epochs" => %{"issue-legacy" => 5, "issue-epoch-only" => 7, "issue-both" => 9}
+      })
+    )
+
+    # A per-issue document already there keeps its run; the epoch is the higher one.
+    File.mkdir_p!(RunRegistry.dir(path))
+    File.write!(RunRegistry.doc_path(path, "issue-both"), Jason.encode!(%{"issue_id" => "issue-both", "epoch" => 1, "run" => newer_run}))
+
+    log = capture_log(fn -> assert map_size(RunRegistry.load()) == 2 end)
+    assert log =~ "Run registry migrated to per-issue documents"
+
+    loaded = RunRegistry.load()
+    assert %{run_id: "run-legacy", last_seq: 4} = loaded["issue-legacy"]
+    assert %{run_id: "run-newer"} = loaded["issue-both"]
+    assert RunRegistry.next_epoch("issue-legacy") == 6
+    assert RunRegistry.next_epoch("issue-epoch-only") == 8
+    assert RunRegistry.next_epoch("issue-both") == 10
+    assert {"issue-legacy", %{run_id: "run-legacy"}} = RunRegistry.find_run("run-legacy")
+
+    # The legacy file is emptied with a marker, and not migrated again.
+    assert %{"migrated_to" => "run_registry", "runs" => %{}, "epochs" => %{}} = path |> File.read!() |> Jason.decode!()
+    assert %{"epoch" => 7, "run" => nil} = disk_doc(path, "issue-epoch-only")
+    :ok = RunRegistry.reload()
+    assert capture_log(fn -> assert map_size(RunRegistry.load()) == 2 end) == ""
+  end
+
+  test "find_run finds a run by its id, and only the issue's current run", %{path: path} do
+    assert RunRegistry.find_run("run-1") == nil
+    assert RunRegistry.find_run(nil) == nil
+
+    :ok = RunRegistry.record("issue-1", entry())
+    assert {"issue-1", %{run_id: "run-1"}} = RunRegistry.find_run("run-1")
+
+    # A new run for the issue replaces the old one in the index.
+    :ok = RunRegistry.record("issue-1", entry(%{run_id: "run-2", epoch: 2}))
+    assert RunRegistry.find_run("run-1") == nil
+    assert {"issue-1", %{run_id: "run-2"}} = RunRegistry.find_run("run-2")
+
+    :ok = RunRegistry.delete("issue-1")
+    assert RunRegistry.find_run("run-2") == nil
+
+    # Without the server's cache it reads the store.
+    :ok = RunRegistry.record("issue-3", entry(%{run_id: "run-3"}))
+    assert path |> RunRegistry.read_store() |> Map.fetch!("issue-3") |> Map.fetch!(:run) |> Map.fetch!(:run_id) == "run-3"
+  end
+
+  test "an unreadable issue document is skipped", %{path: path} do
+    File.mkdir_p!(RunRegistry.dir(path))
+    File.write!(Path.join(RunRegistry.dir(path), "junk.json"), "not json")
+    File.write!(Path.join(RunRegistry.dir(path), "no-issue.json"), Jason.encode!(%{"epoch" => 1}))
+    File.write!(RunRegistry.doc_path(path, "issue-bad-run"), Jason.encode!(%{"issue_id" => "issue-bad-run", "epoch" => "x", "run" => "nope"}))
+
+    log = capture_log(fn -> assert RunRegistry.load() == %{} end)
+    assert log =~ "Run registry document unreadable"
+    assert RunRegistry.next_epoch("issue-bad-run") == 1
+  end
+
+  test "lookups stay constant-time with a thousand runs" do
+    for n <- 1..1_000, do: :ok = RunRegistry.record("issue-#{n}", entry(%{run_id: "run-#{n}", metadata: %{identifier: "MT-#{n}"}}))
+
+    {micros, found} = :timer.tc(fn -> for n <- 1..1_000, do: RunRegistry.find_run("run-#{n}") end)
+    assert Enum.all?(found, &match?({_issue_id, %{}}, &1))
+    # 1,000 lookups among 1,000 runs; decoding the registry per lookup took seconds.
+    assert micros < 1_000_000
+
+    {micros, _epochs} = :timer.tc(fn -> for n <- 1..1_000, do: RunRegistry.next_epoch("issue-#{n}") end)
+    assert micros < 1_000_000
+  end
+
   test "non-object runs and epochs sections load as empty", %{path: path} do
     File.write!(path, Jason.encode!(%{"version" => 1, "runs" => "nope", "epochs" => []}))
 
@@ -182,6 +272,7 @@ defmodule SymphonyElixir.RunRegistryTest do
     assert RunRegistry.next_epoch("issue-1") == 1
 
     File.write!(path, "not json")
+    :ok = RunRegistry.reload()
     assert capture_log(fn -> assert RunRegistry.load() == %{} end) =~ "Run registry unreadable"
   end
 
@@ -199,8 +290,9 @@ defmodule SymphonyElixir.RunRegistryTest do
     assert :ok = RunRegistry.record("issue-nil-launcher", Map.put(sparse, :launcher, nil))
     assert %{"issue-nil-launcher" => %{launcher: nil}} = RunRegistry.load()
 
-    File.rm!(path)
-    File.mkdir_p!(path)
+    # The per-issue documents' directory is a file: the save fails.
+    File.rm_rf!(RunRegistry.dir(path))
+    File.write!(RunRegistry.dir(path), "")
     assert capture_log(fn -> assert :ok = RunRegistry.record("issue-failed", entry()) end) =~ "Run registry save failed"
   end
 
@@ -250,7 +342,7 @@ defmodule SymphonyElixir.RunRegistryTest do
     end)
 
     :ok = RunRegistry.record("issue-1", entry())
-    assert File.exists?(Path.join(root, "runs.json"))
+    assert File.exists?(RunRegistry.doc_path(Path.join(root, "runs.json"), "issue-1"))
     assert %{"issue-1" => %{run_id: "run-1"}} = RunRegistry.load()
   end
 
@@ -297,7 +389,7 @@ defmodule SymphonyElixir.RunRegistryTest do
       end)
 
     assert log =~ "Recovered interrupted run issue_id=#{issue_id} issue_identifier=MT-901 attempt=2"
-    assert File.exists?(path)
+    assert %{"run" => nil, "epoch" => 4} = disk_doc(path, issue_id)
   end
 
   test "an issue with a restored retry keeps it instead of scheduling another", %{root: root} do
@@ -409,6 +501,8 @@ defmodule SymphonyElixir.RunRegistryTest do
       overrides
     )
   end
+
+  defp disk_doc(path, issue_id), do: path |> RunRegistry.doc_path(issue_id) |> File.read!() |> Jason.decode!()
 
   defp pid_string(pid) do
     pid
