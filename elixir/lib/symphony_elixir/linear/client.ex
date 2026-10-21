@@ -7,7 +7,13 @@ defmodule SymphonyElixir.Linear.Client do
   alias SymphonyElixir.Capacity.Metrics
   alias SymphonyElixir.{Config, IssueStage, Linear.Issue}
 
-  @issue_page_size 50
+  # Issues per request. 100 halves the requests a large fleet's poll makes;
+  # a page that fails at that size is retried once at the old 50 (Linear
+  # bounds a query's complexity, which grows with the page size). Nested
+  # connections (blocker relations) keep their own size.
+  @issue_page_size 100
+  @fallback_page_size 50
+  @relation_page_size 50
   @max_error_body_log_bytes 1_000
 
   @query """
@@ -363,15 +369,20 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp do_fetch_by_states_page(project_slugs, state_names, assignee_filter, after_cursor, acc_issues) do
-    with {:ok, body} <-
-           graphql(@query, %{
-             projectSlugs: project_slugs,
-             stateNames: state_names,
-             first: @issue_page_size,
-             relationFirst: @issue_page_size,
-             after: after_cursor
-           }),
-         {:ok, issues, page_info} <- decode_linear_page_response(body, assignee_filter) do
+    fetch_page = fn page_size ->
+      with {:ok, body} <-
+             graphql(@query, %{
+               projectSlugs: project_slugs,
+               stateNames: state_names,
+               first: page_size,
+               relationFirst: @relation_page_size,
+               after: after_cursor
+             }) do
+        decode_linear_page_response(body, assignee_filter)
+      end
+    end
+
+    with {:ok, issues, page_info} <- with_page_fallback(fetch_page) do
       updated_acc = prepend_page_issues(issues, acc_issues)
 
       case next_page_cursor(page_info) do
@@ -384,6 +395,18 @@ defmodule SymphonyElixir.Linear.Client do
         {:error, reason} ->
           {:error, reason}
       end
+    end
+  end
+
+  # A page that fails at the full size gets one more try at the fallback size.
+  defp with_page_fallback(fetch_page) do
+    case fetch_page.(@issue_page_size) do
+      {:error, reason} ->
+        Logger.warning("Linear page of #{@issue_page_size} failed reason=#{inspect(reason, limit: 5)}; retrying with #{@fallback_page_size}")
+        fetch_page.(@fallback_page_size)
+
+      ok ->
+        ok
     end
   end
 
@@ -413,19 +436,29 @@ defmodule SymphonyElixir.Linear.Client do
   defp do_fetch_issue_states_page(ids, assignee_filter, graphql_fun, acc_issues, issue_order_index) do
     {batch_ids, rest_ids} = Enum.split(ids, @issue_page_size)
 
-    case graphql_fun.(@query_by_ids, %{
-           ids: batch_ids,
-           first: length(batch_ids),
-           relationFirst: @issue_page_size
-         }) do
-      {:ok, body} ->
-        with {:ok, issues} <- decode_linear_response(body, assignee_filter) do
-          updated_acc = prepend_page_issues(issues, acc_issues)
-          do_fetch_issue_states_page(rest_ids, assignee_filter, graphql_fun, updated_acc, issue_order_index)
-        end
+    # A failed batch is retried in batches of the fallback size.
+    fetch_batch = fn
+      @issue_page_size -> fetch_issue_batch(batch_ids, assignee_filter, graphql_fun)
+      size -> batch_ids |> Enum.chunk_every(size) |> fetch_issue_batches(assignee_filter, graphql_fun, [])
+    end
 
-      {:error, reason} ->
-        {:error, reason}
+    with {:ok, issues} <- with_page_fallback(fetch_batch) do
+      updated_acc = prepend_page_issues(issues, acc_issues)
+      do_fetch_issue_states_page(rest_ids, assignee_filter, graphql_fun, updated_acc, issue_order_index)
+    end
+  end
+
+  defp fetch_issue_batches([], _assignee_filter, _graphql_fun, acc), do: {:ok, acc |> Enum.reverse() |> Enum.concat()}
+
+  defp fetch_issue_batches([batch | rest], assignee_filter, graphql_fun, acc) do
+    with {:ok, issues} <- fetch_issue_batch(batch, assignee_filter, graphql_fun) do
+      fetch_issue_batches(rest, assignee_filter, graphql_fun, [issues | acc])
+    end
+  end
+
+  defp fetch_issue_batch(batch_ids, assignee_filter, graphql_fun) do
+    with {:ok, body} <- graphql_fun.(@query_by_ids, %{ids: batch_ids, first: length(batch_ids), relationFirst: @relation_page_size}) do
+      decode_linear_response(body, assignee_filter)
     end
   end
 

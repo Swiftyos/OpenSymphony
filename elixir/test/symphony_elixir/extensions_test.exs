@@ -322,6 +322,25 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert {:error, :issue_update_failed} = Adapter.update_issue_state("issue-1", "Odd")
   end
 
+  test "a poll reuses the candidate fetch for running issues and fetches only the rest by id" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear")
+    Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearClient)
+    candidates = {:ok, [%Issue{id: "issue-a", state: "In Progress"}, %Issue{id: "issue-b", state: "Todo"}]}
+
+    assert Orchestrator.fetch_running_states_for_test([], candidates) == {:ok, []}
+
+    assert {:ok, [%Issue{id: "issue-a"}]} = Orchestrator.fetch_running_states_for_test(["issue-a"], candidates)
+    refute_received {:fetch_issue_states_by_ids_called, _ids}
+
+    # An issue that left the candidate states is fetched by id.
+    assert {:ok, [%Issue{id: "issue-a"}, "issue-done"]} = Orchestrator.fetch_running_states_for_test(["issue-a", "issue-done"], candidates)
+    assert_received {:fetch_issue_states_by_ids_called, ["issue-done"]}
+
+    # Without candidates every running issue is fetched by id.
+    assert {:ok, ["issue-a", "issue-done"]} = Orchestrator.fetch_running_states_for_test(["issue-a", "issue-done"], {:error, :boom})
+    assert_received {:fetch_issue_states_by_ids_called, ["issue-a", "issue-done"]}
+  end
+
   test "linear adapter create_comment passes an id and reconciles a failed idempotent create" do
     Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearClient)
 

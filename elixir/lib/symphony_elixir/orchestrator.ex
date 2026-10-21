@@ -418,10 +418,12 @@ defmodule SymphonyElixir.Orchestrator do
 
     task =
       Task.Supervisor.async_nolink(SymphonyElixir.TaskSupervisor, fn ->
+        candidates_result = Tracker.fetch_candidate_issues()
+
         %{
           running_ids: running_ids,
-          running_result: fetch_running_states(running_ids),
-          candidates_result: Tracker.fetch_candidate_issues()
+          running_result: fetch_running_states(running_ids, candidates_result),
+          candidates_result: candidates_result
         }
       end)
 
@@ -437,8 +439,26 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
-  defp fetch_running_states([]), do: {:ok, []}
-  defp fetch_running_states(running_ids), do: Tracker.fetch_issue_states_by_ids(running_ids)
+  # Most running issues are still in an active state, so the candidate fetch
+  # that was just made already has them: only the rest (moved to another
+  # state, or out of the candidate query) are fetched by id.
+  defp fetch_running_states([], _candidates_result), do: {:ok, []}
+
+  defp fetch_running_states(running_ids, {:ok, candidates}) when is_list(candidates) do
+    by_id = for %Issue{id: id} = issue <- candidates, is_binary(id), into: %{}, do: {id, issue}
+    {known, missing} = Enum.split_with(running_ids, &Map.has_key?(by_id, &1))
+    reused = Enum.map(known, &Map.fetch!(by_id, &1))
+
+    case missing do
+      [] ->
+        {:ok, reused}
+
+      missing ->
+        with {:ok, fetched} <- Tracker.fetch_issue_states_by_ids(missing), do: {:ok, reused ++ fetched}
+    end
+  end
+
+  defp fetch_running_states(running_ids, _candidates_result), do: Tracker.fetch_issue_states_by_ids(running_ids)
 
   defp handle_poll_result(state, poll_task, result) do
     state = refresh_runtime_config(state)
@@ -524,6 +544,10 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp apply_candidate_issues(state, _result), do: state
+
+  @doc false
+  @spec fetch_running_states_for_test([String.t()], term()) :: {:ok, [term()]} | {:error, term()}
+  def fetch_running_states_for_test(running_ids, candidates_result), do: fetch_running_states(running_ids, candidates_result)
 
   @doc false
   @spec reconcile_issue_states_for_test([Issue.t()], term()) :: term()

@@ -701,9 +701,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   end
 
   test "linear client paginates issue state fetches by id beyond one page" do
-    issue_ids = Enum.map(1..55, &"issue-#{&1}")
-    first_batch_ids = Enum.take(issue_ids, 50)
-    second_batch_ids = Enum.drop(issue_ids, 50)
+    issue_ids = Enum.map(1..105, &"issue-#{&1}")
+    first_batch_ids = Enum.take(issue_ids, 100)
+    second_batch_ids = Enum.drop(issue_ids, 100)
 
     raw_issue = fn issue_id ->
       suffix = String.replace_prefix(issue_id, "issue-", "")
@@ -737,10 +737,34 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert Enum.map(issues, & &1.id) == issue_ids
 
-    assert_receive {:fetch_issue_states_page, query, %{ids: ^first_batch_ids, first: 50, relationFirst: 50}}
+    assert_receive {:fetch_issue_states_page, query, %{ids: ^first_batch_ids, first: 100, relationFirst: 50}}
     assert query =~ "SymphonyLinearIssuesById"
 
     assert_receive {:fetch_issue_states_page, ^query, %{ids: ^second_batch_ids, first: 5, relationFirst: 50}}
+    refute_received {:fetch_issue_states_page, _query, _variables}
+
+    # A batch that fails at 100 is retried in batches of 50; a failure then is returned.
+    failing_fun = fn query, variables ->
+      send(self(), {:fetch_issue_states_page, query, variables})
+
+      if variables.first == 100,
+        do: {:error, {:linear_api_status, 400}},
+        else: {:ok, %{"data" => %{"issues" => %{"nodes" => Enum.map(variables.ids, raw_issue)}}}}
+    end
+
+    log = capture_log(fn -> send(self(), {:result, Client.fetch_issue_states_by_ids_for_test(issue_ids, failing_fun)}) end)
+    assert log =~ "Linear page of 100 failed"
+    assert_received {:result, {:ok, issues}}
+    assert Enum.map(issues, & &1.id) == issue_ids
+    assert_received {:fetch_issue_states_page, _query, %{first: 100}}
+    assert_received {:fetch_issue_states_page, _query, %{first: 50, ids: retried}}
+    assert retried == Enum.take(issue_ids, 50)
+    assert_received {:fetch_issue_states_page, _query, %{first: 50}}
+    assert_received {:fetch_issue_states_page, _query, %{first: 5}}
+
+    capture_log(fn ->
+      assert {:error, :boom} = Client.fetch_issue_states_by_ids_for_test(issue_ids, fn _query, _variables -> {:error, :boom} end)
+    end)
   end
 
   test "linear client logs response bodies for non-200 graphql responses" do

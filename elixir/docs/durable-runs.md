@@ -717,6 +717,11 @@ tasks under `SymphonyElixir.TaskSupervisor`, and their results are applied back
 in the GenServer against the state at that moment. Only one poll is in flight;
 ticks and refresh requests that arrive during it are coalesced.
 
+A poll fetches the candidate issues (pages of 100, a failed page retried at 50) and takes the
+running issues' states from that result; only running issues the candidates don't include
+(moved out of the active states) are fetched by id. With 1,000 running issues that is about 10
+requests per poll instead of about 40.
+
 This keeps the controller responsive as the fleet grows: a slow Linear response
 never delays a dashboard `:snapshot`, `/api/v1/state`, or an MCP call such as
 `request_refresh`. It also means a crashed fetch is isolated and logged, and the

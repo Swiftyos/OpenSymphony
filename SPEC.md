@@ -1373,7 +1373,9 @@ An implementation must support these tracker adapter operations:
    - Used for startup terminal cleanup.
 
 3. `fetch_issue_states_by_ids(issue_ids)`
-   - Used for active-run reconciliation.
+   - Used for active-run reconciliation. An implementation may take running issues' states from
+     the same poll's candidate fetch and call this only for the running issues the candidates
+     don't include (they left the active states), which keeps a large fleet's poll cheap.
 
 ### 11.2 Query Semantics (Linear)
 
@@ -1386,7 +1388,7 @@ Linear-specific requirements for `tracker.kind == "linear"`:
 - Candidate issue query filters project using `project: { slugId: { eq: $projectSlug } }`
 - Issue-state refresh query uses GraphQL issue IDs with variable type `[ID!]`
 - Pagination required for candidate issues
-- Page size default: `50`
+- Page size default: `50` (the Elixir implementation uses `100`, retrying a failed page at `50`)
 - Network timeout: `30000 ms`
 
 Important:
