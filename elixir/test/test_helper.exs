@@ -3,3 +3,4 @@ exclude = if System.get_env("SYMPHONY_TEST_DATABASE_URL"), do: [], else: [:postg
 ExUnit.start(exclude: exclude)
 Code.require_file("support/snapshot_support.exs", __DIR__)
 Code.require_file("support/test_support.exs", __DIR__)
+Code.require_file("support/runner_support.exs", __DIR__)

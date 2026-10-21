@@ -284,6 +284,14 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info({:agent_worker_update, _issue_id, _update}, state), do: {:noreply, state}
 
+  # A remote runner reported that its run ended. Step 4 routes this to the
+  # run's watcher so the existing :DOWN handling takes over; until then the
+  # reason is only logged.
+  def handle_info({:run_finished, issue_id, run_id, reason}, state) do
+    Logger.info("Runner finished issue_id=#{issue_id} run_id=#{run_id} reason=#{inspect(reason)}")
+    {:noreply, state}
+  end
+
   # Delayed restart: once nothing is running, stop so the supervisor (systemd,
   # Restart=always) starts Symphony again with the new binary or config.
   def handle_info(:delayed_restart_check, %{delayed_restart: %{}, running: running} = state) when map_size(running) == 0 do

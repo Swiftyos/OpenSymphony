@@ -480,3 +480,63 @@ defmodule SymphonyElixir.CLITest do
     assert output =~ "claude\twork\twork@example.com\tpaused\tclaude_oauth_token\tdaily quota exhausted"
   end
 end
+
+defmodule SymphonyElixir.CLIRunnerTest do
+  use ExUnit.Case, async: false
+
+  alias SymphonyElixir.CLI
+
+  @ack_flag "--i-understand-that-this-will-be-running-without-the-usual-guardrails"
+
+  setup do
+    previous = Application.get_env(:symphony_elixir, :app_mode)
+    on_exit(fn -> restore(previous) end)
+    :ok
+  end
+
+  test "runner mode requires the guardrails acknowledgement" do
+    deps = %{runner: fn _spec -> send(self(), :ran) && :ok end}
+
+    assert {:error, banner} = CLI.evaluate(["runner", "spec.json"], deps)
+    assert banner =~ @ack_flag
+    refute_received :ran
+  end
+
+  test "runner mode picks the same default config as the controller and runs the spec" do
+    parent = self()
+    config = Path.expand("symphony.yml")
+
+    deps = %{
+      file_regular?: fn path -> path == config end,
+      set_symphony_config_file_path: fn path -> send(parent, {:config, path}) && :ok end,
+      set_workflow_file_path: fn _path -> :ok end,
+      runner: fn spec -> send(parent, {:runner, spec}) && :ok end
+    }
+
+    assert :ok = CLI.evaluate(["runner", "spec.json", @ack_flag], deps)
+    assert_received {:config, ^config}
+    assert_received {:runner, "spec.json"}
+    assert Application.get_env(:symphony_elixir, :app_mode) == :runner
+  end
+
+  test "runner mode accepts an explicit WORKFLOW.md path and reports a bad spec path" do
+    parent = self()
+    workflow = Path.expand("WORKFLOW.md")
+
+    deps = %{
+      file_regular?: fn path -> path == workflow end,
+      set_symphony_config_file_path: fn _path -> :ok end,
+      set_workflow_file_path: fn path -> send(parent, {:workflow, path}) && :ok end,
+      runner: fn _spec -> {:error, :broken} end
+    }
+
+    assert {:error, "Runner failed: :broken"} = CLI.evaluate(["runner", "spec.json", @ack_flag, "WORKFLOW.md"], deps)
+    assert_received {:workflow, ^workflow}
+
+    assert {:error, message} = CLI.evaluate(["runner", @ack_flag], deps)
+    assert message =~ "Usage"
+  end
+
+  defp restore(nil), do: Application.delete_env(:symphony_elixir, :app_mode)
+  defp restore(value), do: Application.put_env(:symphony_elixir, :app_mode, value)
+end

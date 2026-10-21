@@ -185,6 +185,21 @@ defmodule SymphonyElixir.AgentInbox do
 
   def register_runner(_issue, _backend), do: :ok
 
+  @doc """
+  Registers a remote runner for `identifier`: the controller has no pid to
+  `send/2`, so new messages and steering commands are pushed to
+  `SymphonyElixir.RunnerCommands` for the runner's command long-poll.
+  """
+  @spec register_remote_runner(String.t(), String.t() | nil) :: :ok
+  def register_remote_runner(identifier, issue_id) when is_binary(identifier) do
+    if registry_ready?() do
+      _ = Registry.unregister(@registry, identifier)
+      _ = Registry.register(@registry, identifier, %{issue_id: issue_id, backend: "codex", steer: nil, remote: true})
+    end
+
+    :ok
+  end
+
   @spec unregister_runner(String.t() | nil) :: :ok
   def unregister_runner(identifier) when is_binary(identifier) do
     if registry_ready?(), do: Registry.unregister(@registry, identifier)
@@ -203,7 +218,7 @@ defmodule SymphonyElixir.AgentInbox do
   def codex_turn(%{identifier: identifier} = issue, steer) when is_binary(identifier) do
     if registry_ready?() do
       put_steer(issue, steer)
-      if steer, do: hand_over_queued(identifier)
+      if steer, do: hand_over_queued(identifier, runner_value(identifier))
     end
 
     :ok
@@ -211,7 +226,12 @@ defmodule SymphonyElixir.AgentInbox do
 
   def codex_turn(_issue, _steer), do: :ok
 
-  defp hand_over_queued(identifier) do
+  defp hand_over_queued(identifier, %{remote: true}) do
+    for %{status: "queued", id: id} <- messages(identifier),
+        do: SymphonyElixir.RunnerCommands.push(identifier, %{type: "agent_inbox", message_id: id})
+  end
+
+  defp hand_over_queued(identifier, _runner) do
     for %{status: "queued", id: id} <- messages(identifier), do: send(self(), {:agent_inbox, id})
   end
 
@@ -255,6 +275,7 @@ defmodule SymphonyElixir.AgentInbox do
     persist(state.path)
 
     case runner_value(identifier) do
+      %{remote: true} -> SymphonyElixir.RunnerCommands.push(identifier, %{type: "agent_inbox", message_id: message.id})
       %{steer: %{}, pid: pid} -> send(pid, {:agent_inbox, message.id})
       _ -> :ok
     end

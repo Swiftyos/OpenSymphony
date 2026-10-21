@@ -113,7 +113,14 @@ defmodule SymphonyElixir.HttpServer do
 
   # Signs and encrypts session cookies; it must be stable across restarts or
   # everyone is signed out on deploy. Anyone holding it can forge sessions.
-  defp secret_key_base do
+  @doc """
+  The endpoint's `secret_key_base`, also used to sign runner tokens
+  (`SymphonyElixir.RunToken`). Stable across restarts; persisted owner-only
+  unless configured. Public so a process that didn't start the endpoint (a
+  runner's controller side, tests) reads it the same way.
+  """
+  @spec secret_key_base() :: String.t()
+  def secret_key_base do
     configured = Config.settings!().server.secret_key_base || System.get_env("SYMPHONY_SECRET_KEY_BASE")
 
     cond do

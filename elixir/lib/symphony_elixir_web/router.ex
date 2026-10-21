@@ -33,6 +33,11 @@ defmodule SymphonyElixirWeb.Router do
     plug(SymphonyElixirWeb.McpAuth)
   end
 
+  # Runner protocol: run tokens only, no cookies and no CSRF (see RunnerAuth).
+  pipeline :runner do
+    plug(SymphonyElixirWeb.RunnerAuth)
+  end
+
   scope "/", SymphonyElixirWeb do
     pipe_through(:mcp)
 
@@ -103,6 +108,21 @@ defmodule SymphonyElixirWeb.Router do
     get("/api/v1/issues/:issue_identifier/messages", AgentMessagesController, :index)
     post("/api/v1/issues/:issue_identifier/messages", AgentMessagesController, :create)
     get("/api/v1/:issue_identifier", ObservabilityApiController, :issue)
+  end
+
+  scope "/runner/v1/runs/:run_id", SymphonyElixirWeb do
+    pipe_through(:runner)
+
+    post("/events", RunnerController, :events)
+    get("/session", RunnerController, :session)
+    put("/session", RunnerController, :put_session)
+    delete("/session", RunnerController, :delete_session)
+    post("/inbox/take", RunnerController, :inbox_take)
+    get("/inbox/queued", RunnerController, :inbox_queued)
+    get("/inbox/:message_id", RunnerController, :inbox_get)
+    post("/inbox/:message_id/delivered", RunnerController, :inbox_delivered)
+    post("/codex_turn", RunnerController, :codex_turn)
+    get("/commands", RunnerController, :commands)
   end
 
   scope "/", SymphonyElixirWeb do

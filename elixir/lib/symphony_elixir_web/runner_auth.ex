@@ -1,0 +1,92 @@
+defmodule SymphonyElixirWeb.RunnerAuth do
+  @moduledoc """
+  Guards the runner protocol (`/runner/v1/runs/:run_id/...`).
+
+  The run registry is the source of truth, so a runner keeps working (and can
+  report to a restarted controller) without the controller having the run in
+  its running set. A request is accepted only when:
+
+    * the registry has a run with this id (`404` otherwise),
+    * `Authorization: Bearer <token>` is the HMAC for the run's current epoch
+      (`401` for a missing or forged token), and
+    * that epoch is the current one — a token for an earlier run of the issue
+      is fenced with `409 {"error": "stale_epoch"}`.
+
+  Once the run's `finished` event has been applied every endpoint answers
+  `409 {"error": "finished"}`; see `SymphonyElixir.RunnerCommands`.
+
+  No cookies are read and no CSRF applies: runners are processes, not browsers.
+  """
+
+  import Plug.Conn
+  import Phoenix.Controller, only: [json: 2]
+
+  alias SymphonyElixir.RunnerCommands
+  alias SymphonyElixir.RunRegistry
+  alias SymphonyElixir.RunToken
+
+  @spec init(term()) :: term()
+  def init(opts), do: opts
+
+  @spec call(Plug.Conn.t(), term()) :: Plug.Conn.t()
+  def call(conn, _opts) do
+    run_id = conn.path_params["run_id"]
+
+    case find_run(run_id) do
+      nil ->
+        deny(conn, 404, "run_not_found")
+
+      {issue_id, entry} ->
+        authorize(conn, run_id, issue_id, entry)
+    end
+  end
+
+  defp find_run(run_id) when is_binary(run_id) do
+    RunRegistry.load()
+    |> Enum.find(fn {_issue_id, entry} -> entry.run_id == run_id end)
+  end
+
+  defp find_run(_run_id), do: nil
+
+  defp authorize(conn, run_id, issue_id, entry) do
+    token = bearer(conn)
+
+    cond do
+      RunToken.verify(run_id, entry.epoch, token) ->
+        if RunnerCommands.finished?(run_id) do
+          deny(conn, 409, "finished")
+        else
+          conn
+          |> assign(:run_id, run_id)
+          |> assign(:issue_id, issue_id)
+          |> assign(:identifier, entry.metadata[:identifier] || issue_id)
+          |> assign(:backend, entry.metadata[:backend])
+          |> assign(:epoch, entry.epoch)
+          |> assign(:run, entry)
+        end
+
+      RunToken.verify_any_epoch(run_id, token, entry.epoch) ->
+        deny(conn, 409, "stale_epoch")
+
+      true ->
+        deny(conn, 401, "unauthorized")
+    end
+  end
+
+  defp bearer(conn) do
+    with [header | _] <- get_req_header(conn, "authorization"),
+         [scheme, token] <- String.split(header, " ", parts: 2),
+         "bearer" <- String.downcase(scheme) do
+      String.trim(token)
+    else
+      _ -> nil
+    end
+  end
+
+  defp deny(conn, status, error) do
+    conn
+    |> put_status(status)
+    |> json(%{error: error})
+    |> halt()
+  end
+end

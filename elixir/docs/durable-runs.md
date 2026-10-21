@@ -95,6 +95,15 @@ Kubernetes they move behind a tool gateway.
      - *Events:* are deduplicated by `seq` and turned into today's orchestrator messages and
        `Transcript` calls. A `finished` event (`normal` or an error) goes to the run's watcher
        (step 4).
+   Done: `SymphonyElixir.RunToken` (HMAC run tokens), `SymphonyElixir.RunSpec`
+   (`runs/<run_id>/spec.json`), `SymphonyElixir.RunEvents` (base64 Erlang-term payloads),
+   `SymphonyElixirWeb.RunnerAuth` and `SymphonyElixirWeb.RunnerController` (the
+   `/runner/v1/runs/:run_id/...` endpoints), `SymphonyElixir.RunnerCommands` (steering queues
+   and per-run event/finished bookkeeping), `SymphonyElixir.RunnerCommandPoller`,
+   `SymphonyElixir.RunOutbox`, `SymphonyElixir.RunHost.Remote`, `SymphonyElixir.Runner` (the
+   reduced runner application and `symphony runner <spec.json>`), and the orchestrator's
+   `{:run_finished, ...}` handler (logs until step 4 wires watchers). AgentInbox pushes
+   messages to `RunnerCommands` for runners registered as remote; the local path is unchanged.
 4. **Process launcher and watchers.** This step makes runs real processes:
    - **Launcher.** It is selected with `agent.launcher: local | process`. `process` starts
      `symphony runner <spec>` with a command template. The default template detaches the runner

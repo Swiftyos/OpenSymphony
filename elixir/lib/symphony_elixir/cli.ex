@@ -33,7 +33,7 @@ defmodule SymphonyElixir.CLI do
   def main(args) do
     case evaluate(args) do
       :ok ->
-        if accounts_command?(args) do
+        if accounts_command?(args) or runner_command?(args) do
           System.halt(0)
         else
           wait_for_shutdown()
@@ -48,8 +48,15 @@ defmodule SymphonyElixir.CLI do
   defp accounts_command?(["accounts" | _args]), do: true
   defp accounts_command?(_args), do: false
 
+  defp runner_command?(["runner" | _args]), do: true
+  defp runner_command?(_args), do: false
+
   @spec evaluate([String.t()], deps()) :: :ok | {:error, String.t()}
   def evaluate(args, deps \\ runtime_deps())
+
+  def evaluate(["runner" | runner_args], deps) do
+    evaluate_runner(runner_args, deps)
+  end
 
   def evaluate(["accounts" | account_args], deps) do
     evaluate_accounts(account_args, deps)
@@ -112,6 +119,7 @@ defmodule SymphonyElixir.CLI do
     """
     Usage:
       symphony [--logs-root <path>] [--port <port>] [path-to-symphony.yml|path-to-WORKFLOW.md]
+      symphony runner <spec.json> [--i-understand-that-this-will-be-running-without-the-usual-guardrails] [path-to-symphony.yml|path-to-WORKFLOW.md]
       symphony accounts login codex <id> [--email <email>] [path-to-symphony.yml|path-to-WORKFLOW.md]
       symphony accounts login claude <id> [--email <email>] [--token-stdin|--token-file <path>|--token-env <VAR>] [path-to-symphony.yml|path-to-WORKFLOW.md]
         Claude setup-token output is streamed live, so SSH users can open the printed auth URL elsewhere.
@@ -146,6 +154,62 @@ defmodule SymphonyElixir.CLI do
       accounts_enable: &Accounts.enable/2,
       accounts_disable: &Accounts.disable/2
     }
+  end
+
+  # The runner mode reads the spec the controller wrote, boots the reduced
+  # application (no orchestrator, HTTP server or dashboard) with the same
+  # config as the controller, runs the issue over RunHost.Remote and exits.
+  defp evaluate_runner(args, deps) do
+    case OptionParser.parse(args, strict: @switches) do
+      {opts, [_spec_path | _config] = positional, []} when length(positional) in 1..2 ->
+        run_runner(opts, positional, deps)
+
+      _ ->
+        {:error, usage_message()}
+    end
+  end
+
+  defp run_runner(opts, [spec_path | config], deps) do
+    with :ok <- require_guardrails_acknowledgement(opts),
+         :ok <- maybe_set_runner_config(config, deps) do
+      Application.put_env(:symphony_elixir, :app_mode, :runner)
+      runner_result(spec_path, deps)
+    end
+  end
+
+  defp runner_result(spec_path, deps) do
+    case runner_dep(deps).(spec_path) do
+      :ok -> :ok
+      {:error, reason} -> {:error, "Runner failed: #{inspect(reason, limit: 20)}"}
+    end
+  end
+
+  defp runner_dep(deps), do: Map.get(deps, :runner, &SymphonyElixir.Runner.run/1)
+
+  defp maybe_set_runner_config([config_path], deps) when is_binary(config_path) do
+    expanded_path = Path.expand(config_path)
+
+    if deps.file_regular?.(expanded_path) do
+      case startup_mode_for_path(expanded_path) do
+        :legacy -> :ok = deps.set_workflow_file_path.(expanded_path)
+        :global -> :ok = deps.set_symphony_config_file_path.(expanded_path)
+      end
+    else
+      {:error, "Config file not found: #{expanded_path}"}
+    end
+  end
+
+  defp maybe_set_runner_config(_config, deps) do
+    cond do
+      deps.file_regular?.(Path.expand("symphony.yml")) ->
+        :ok = deps.set_symphony_config_file_path.(Path.expand("symphony.yml"))
+
+      deps.file_regular?.(Path.expand("WORKFLOW.md")) ->
+        :ok = deps.set_workflow_file_path.(Path.expand("WORKFLOW.md"))
+
+      true ->
+        :ok
+    end
   end
 
   defp evaluate_accounts(["login", backend, id | rest], deps) do
