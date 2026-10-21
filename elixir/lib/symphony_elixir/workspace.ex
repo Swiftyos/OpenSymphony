@@ -1219,7 +1219,14 @@ defmodule SymphonyElixir.Workspace do
       "if [ ! -d \"$workspace\" ]; then",
       "  exit 0",
       "fi",
-      "if ! git -C \"$workspace\" rev-parse --is-inside-work-tree >/dev/null 2>&1; then",
+      # Only a linked worktree (its own `.git` *file*, with itself as top level) is
+      # removed through git. A clone or a plain directory, even one inside some other
+      # checkout, falls back to a plain delete (still confined to the workspace root).
+      "if [ ! -f \"$workspace/.git\" ]; then",
+      "  exit 10",
+      "fi",
+      "toplevel=\"$(git -C \"$workspace\" rev-parse --show-toplevel 2>/dev/null || true)\"",
+      "if [ \"$toplevel\" != \"$(cd \"$workspace\" && pwd -P)\" ]; then",
       "  exit 10",
       "fi",
       "common_dir=\"$(git -C \"$workspace\" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)\"",
@@ -1241,7 +1248,14 @@ defmodule SymphonyElixir.Workspace do
       "if [ ! -d \"$workspace\" ]; then",
       "  exit 0",
       "fi",
-      "if ! git -C \"$workspace\" rev-parse --is-inside-work-tree >/dev/null 2>&1; then",
+      # Only a linked worktree (its own `.git` *file*, with itself as top level) is
+      # removed through git. A clone or a plain directory, even one inside some other
+      # checkout, falls back to a plain delete (still confined to the workspace root).
+      "if [ ! -f \"$workspace/.git\" ]; then",
+      "  exit 10",
+      "fi",
+      "toplevel=\"$(git -C \"$workspace\" rev-parse --show-toplevel 2>/dev/null || true)\"",
+      "if [ \"$toplevel\" != \"$(cd \"$workspace\" && pwd -P)\" ]; then",
       "  exit 10",
       "fi",
       "common_dir=\"$(git -C \"$workspace\" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)\"",

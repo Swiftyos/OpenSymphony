@@ -907,6 +907,34 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert {:ok, []} = Workspace.remove(random_path)
   end
 
+  test "workspace remove deletes plain directories and clones under a root inside another checkout" do
+    # A workspace root nested in an unrelated git checkout (e.g. a temp dir inside
+    # a repo) must not make plain workspaces look like linked worktrees.
+    outer = Path.join(System.tmp_dir!(), "symphony-elixir-outer-checkout-#{System.unique_integer([:positive])}")
+    root = Path.join(outer, "workspaces")
+
+    try do
+      File.mkdir_p!(root)
+      {_output, 0} = System.cmd("git", ["init", "--quiet", outer])
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: root)
+
+      plain = Path.join(root, "MT-PLAIN")
+      File.mkdir_p!(Path.join(plain, "src"))
+      File.write!(Path.join([plain, "src", "notes.txt"]), "work")
+
+      clone = Path.join(root, "MT-CLONE")
+      {_output, 0} = System.cmd("git", ["init", "--quiet", clone])
+
+      assert {:ok, _} = Workspace.remove(plain)
+      assert {:ok, _} = Workspace.remove(clone)
+      refute File.exists?(plain)
+      refute File.exists?(clone)
+      assert File.dir?(Path.join(outer, ".git"))
+    after
+      File.rm_rf(outer)
+    end
+  end
+
   test "workspace hooks support multiline YAML scripts and run at lifecycle boundaries" do
     test_root =
       Path.join(
