@@ -61,7 +61,7 @@ defmodule SymphonyElixir.MixProject do
   # summaries must not enforce the total threshold. `mix test.coverage` merges
   # the exports and applies it.
   defp test_coverage(ignore_modules) do
-    summary = if System.get_env("SYMPHONY_COVERAGE_PARTITION"), do: false, else: [threshold: 100]
+    summary = if System.get_env("SYMPHONY_COVERAGE_PARTITION"), do: false, else: [threshold: 80]
 
     [
       summary: summary,

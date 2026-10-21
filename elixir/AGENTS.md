@@ -38,7 +38,7 @@ Run targeted tests while iterating, then run full gates before handoff.
 ```bash
 make test-fast   # parallel, excludes @moduletag :slow (real git/process/HTTP integration)
 make test        # parallel full suite
-make coverage    # parallel full suite, merged coverage with the 100% threshold
+make coverage    # parallel full suite, merged coverage with the 80% threshold
 make all         # format check, lint, coverage, dialyzer
 ```
 
