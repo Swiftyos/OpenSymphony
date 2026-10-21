@@ -15,6 +15,7 @@ defmodule SymphonyElixir.Orchestrator do
     FactoryControls,
     IssueConfig,
     IssueStage,
+    RetryStore,
     StatusDashboard,
     Tracker,
     UsageLedger,
@@ -90,6 +91,7 @@ defmodule SymphonyElixir.Orchestrator do
         tick_token: nil
       }
       |> initialize_backend_totals(config)
+      |> restore_retries()
 
     run_terminal_workspace_cleanup()
     :ok = SymphonyElixir.DelayedRestartSignal.install()
@@ -497,12 +499,8 @@ defmodule SymphonyElixir.Orchestrator do
           Process.demonitor(ref, [:flush])
         end
 
-        %{
-          state
-          | running: Map.delete(state.running, issue_id),
-            claimed: MapSet.delete(state.claimed, issue_id),
-            retry_attempts: Map.delete(state.retry_attempts, issue_id)
-        }
+        %{state | running: Map.delete(state.running, issue_id), claimed: MapSet.delete(state.claimed, issue_id)}
+        |> put_retry_attempts(Map.delete(state.retry_attempts, issue_id))
 
       _ ->
         release_issue_claim(state, issue_id)
@@ -926,12 +924,8 @@ defmodule SymphonyElixir.Orchestrator do
             new_running_entry(issue, pid, ref, worker_host, attempt, route, account)
           )
 
-        %{
-          state
-          | running: running,
-            claimed: MapSet.put(state.claimed, issue.id),
-            retry_attempts: Map.delete(state.retry_attempts, issue.id)
-        }
+        %{state | running: running, claimed: MapSet.put(state.claimed, issue.id)}
+        |> put_retry_attempts(Map.delete(state.retry_attempts, issue.id))
 
       {:error, reason} ->
         Logger.error("Unable to spawn agent for #{issue_context(issue)}: #{inspect(reason)}")
@@ -1028,11 +1022,8 @@ defmodule SymphonyElixir.Orchestrator do
   defp revalidate_issue_for_dispatch(issue, _issue_fetcher, _terminal_states), do: {:ok, issue}
 
   defp complete_issue(%State{} = state, issue_id) do
-    %{
-      state
-      | completed: MapSet.put(state.completed, issue_id),
-        retry_attempts: Map.delete(state.retry_attempts, issue_id)
-    }
+    %{state | completed: MapSet.put(state.completed, issue_id)}
+    |> put_retry_attempts(Map.delete(state.retry_attempts, issue_id))
   end
 
   defp schedule_issue_retry(%State{} = state, issue_id, attempt, metadata)
@@ -1066,28 +1057,61 @@ defmodule SymphonyElixir.Orchestrator do
 
     Logger.warning("Retrying issue_id=#{issue_id} issue_identifier=#{identifier} in #{delay_ms}ms (attempt #{next_attempt})#{error_suffix}")
 
-    %{
-      state
-      | retry_attempts:
-          Map.put(state.retry_attempts, issue_id, %{
-            attempt: next_attempt,
-            timer_ref: timer_ref,
-            retry_token: retry_token,
-            due_at_ms: due_at_ms,
-            identifier: identifier,
-            error: error,
-            worker_host: worker_host,
-            workspace_path: workspace_path,
-            issue_title: issue_title,
-            issue_url: issue_url,
-            project_id: project_id,
-            project_slug: project_slug,
-            project_name: project_name,
-            labels: labels,
-            backend: backend,
-            effort: effort
-          })
-    }
+    put_retry_attempts(
+      state,
+      Map.put(state.retry_attempts, issue_id, %{
+        attempt: next_attempt,
+        timer_ref: timer_ref,
+        retry_token: retry_token,
+        due_at_ms: due_at_ms,
+        due_at_unix_ms: System.system_time(:millisecond) + delay_ms,
+        identifier: identifier,
+        error: error,
+        worker_host: worker_host,
+        workspace_path: workspace_path,
+        issue_title: issue_title,
+        issue_url: issue_url,
+        project_id: project_id,
+        project_slug: project_slug,
+        project_name: project_name,
+        labels: labels,
+        backend: backend,
+        effort: effort
+      })
+    )
+  end
+
+  # Every change to the retry queue is saved (`RetryStore`), so a restart keeps it.
+  defp put_retry_attempts(%State{retry_attempts: retry_attempts} = state, retry_attempts), do: state
+
+  defp put_retry_attempts(%State{} = state, retry_attempts) do
+    :ok = RetryStore.save(retry_attempts)
+    %{state | retry_attempts: retry_attempts}
+  end
+
+  # Re-arms the retries saved before the last stop. Each issue is claimed again,
+  # so the first poll doesn't dispatch it ahead of its backoff.
+  defp restore_retries(%State{} = state) do
+    now_unix_ms = System.system_time(:millisecond)
+
+    Enum.reduce(RetryStore.load(), state, fn {issue_id, %{attempt: attempt, due_at_unix_ms: due_at_unix_ms, metadata: metadata}}, acc ->
+      delay_ms = max(due_at_unix_ms - now_unix_ms, 0)
+      retry_token = make_ref()
+      timer_ref = Process.send_after(self(), {:retry_issue, issue_id, retry_token}, delay_ms)
+
+      Logger.info("Restored retry issue_id=#{issue_id} issue_identifier=#{metadata.identifier || issue_id} in #{delay_ms}ms (attempt #{attempt})")
+
+      entry =
+        Map.merge(metadata, %{
+          attempt: attempt,
+          timer_ref: timer_ref,
+          retry_token: retry_token,
+          due_at_ms: System.monotonic_time(:millisecond) + delay_ms,
+          due_at_unix_ms: due_at_unix_ms
+        })
+
+      %{acc | claimed: MapSet.put(acc.claimed, issue_id), retry_attempts: Map.put(acc.retry_attempts, issue_id, entry)}
+    end)
   end
 
   defp pop_retry_attempt_state(%State{} = state, issue_id, retry_token) when is_reference(retry_token) do
@@ -1108,7 +1132,7 @@ defmodule SymphonyElixir.Orchestrator do
           effort: Map.get(retry_entry, :effort)
         }
 
-        {:ok, attempt, metadata, %{state | retry_attempts: Map.delete(state.retry_attempts, issue_id)}}
+        {:ok, attempt, metadata, put_retry_attempts(state, Map.delete(state.retry_attempts, issue_id))}
 
       _ ->
         :missing

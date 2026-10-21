@@ -32,6 +32,8 @@ defmodule SymphonyElixir.Application do
     children = [
       {Phoenix.PubSub, name: SymphonyElixir.PubSub},
       {Task.Supervisor, name: SymphonyElixir.TaskSupervisor},
+      # Postgres (repo and migrations) when SYMPHONY_DATABASE_URL is set; before every store.
+      SymphonyElixir.StateStore.Supervisor,
       config_store,
       SymphonyElixir.UsageLedger,
       SymphonyElixir.SessionStore,

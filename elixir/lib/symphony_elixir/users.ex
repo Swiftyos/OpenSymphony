@@ -529,7 +529,7 @@ defmodule SymphonyElixir.Users do
   defp persist(path) do
     body = Jason.encode!(%{version: 1, users: all_records()}, pretty: true)
 
-    case SymphonyElixir.PrivateFile.write(path, body) do
+    case SymphonyElixir.StateStore.write(path, body) do
       :ok -> :ok
       {:error, reason} -> Logger.error("User accounts save failed path=#{path} reason=#{inspect(reason)}")
     end
@@ -538,7 +538,7 @@ defmodule SymphonyElixir.Users do
   defp load(nil), do: :ok
 
   defp load(path) do
-    with {:ok, body} <- File.read(path),
+    with {:ok, body} <- SymphonyElixir.StateStore.read(path),
          {:ok, %{"users" => users}} <- Jason.decode(body) do
       Enum.each(users, &load_record/1)
     else

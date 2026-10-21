@@ -16,7 +16,9 @@ defmodule SymphonyElixir.Factory.Store do
   takes effect without a restart. A changed file is loaded only if it
   validates; otherwise the error is logged and the last good flow stays. A
   deleted file drops the scope's own flow, as `reset_team/1` does. The store's
-  own saves are fingerprinted, so they never come back as reloads.
+  own saves are fingerprinted, so they never come back as reloads. With the
+  Postgres state store (`StateStore`) the rows are rescanned instead, so a flow
+  saved by another controller shows up here the same way.
   """
 
   use GenServer
@@ -363,7 +365,7 @@ defmodule SymphonyElixir.Factory.Store do
     path = Path.join(dir, file_name(key))
     body = Jason.encode!(definition, pretty: true)
 
-    case SymphonyElixir.PrivateFile.write(path, body) do
+    case SymphonyElixir.StateStore.write(path, body) do
       :ok ->
         %{state | seen: Map.put(state.seen, path, fingerprint(body))}
 
@@ -383,19 +385,19 @@ defmodule SymphonyElixir.Factory.Store do
   # its error is logged once per change, not on every tick.
   defp scan(%{dir: nil} = state), do: state
 
-  defp scan(%{dir: dir, seen: seen} = state) do
-    current =
-      dir
-      |> Path.join("*.json")
-      |> Path.wildcard()
-      |> Enum.flat_map(fn path ->
-        case File.read(path) do
-          {:ok, body} -> [{path, {fingerprint(body), body}}]
-          {:error, _reason} -> []
-        end
-      end)
-      |> Map.new()
+  defp scan(%{dir: dir} = state) do
+    case SymphonyElixir.StateStore.list(dir) do
+      {:ok, documents} ->
+        apply_scan(state, Map.new(documents, fn {path, body} -> {path, {fingerprint(body), body}} end))
 
+      {:error, reason} ->
+        # Keep the flows already loaded; the next tick tries again.
+        Logger.warning("Factory scan failed dir=#{dir} reason=#{inspect(reason, limit: 5)}")
+        state
+    end
+  end
+
+  defp apply_scan(%{seen: seen} = state, current) do
     for {path, {print, body}} <- current, Map.get(seen, path) != print, do: load_file(path, body, map_size(seen) > 0)
 
     for path <- Map.keys(seen) -- Map.keys(current), {:ok, key} <- [file_key(path)] do

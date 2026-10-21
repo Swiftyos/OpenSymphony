@@ -1783,12 +1783,15 @@ API design notes:
 
 ### 14.3 Partial State Recovery (Restart)
 
-Current design is intentionally in-memory for scheduler state.
+Running sessions live in process memory and are not assumed recoverable. The retry queue and
+session metadata are persisted (implementations may keep them in files or a database).
 
 After restart:
 
-- No retry timers are restored from prior process memory.
-- No running sessions are assumed recoverable.
+- Persisted retry entries are restored: each issue is claimed again and its timer re-armed for the
+  remaining delay (immediately if overdue), keeping its attempt number.
+- No running sessions are assumed recoverable; an interrupted session may be resumed by the next
+  run for the same issue and stage when its metadata was persisted.
 - Service recovers by:
   - startup terminal workspace cleanup
   - fresh polling of active issues
@@ -2302,7 +2305,8 @@ Use the same validation profiles as Section 17:
   app-server session using configured Symphony auth.
 - Optional operator messages to running agents (Section 10.8) and a structured per-issue transcript
   (Section 10.9).
-- TODO: Persist retry queue and session metadata across process restarts.
+- Retry queue and session metadata persisted across process restarts (Section 14.3), optionally in
+  Postgres.
 - TODO: Make observability settings configurable in workflow front matter without prescribing UI
   implementation details.
 - TODO: Add first-class tracker write APIs (comments/state transitions) in the orchestrator instead

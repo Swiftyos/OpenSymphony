@@ -389,7 +389,7 @@ defmodule SymphonyElixir.AgentInbox do
     queued = for {_id, _identifier, %{status: "queued"} = message} <- :ets.tab2list(@table), do: message
     body = Jason.encode!(%{version: @format_version, queued: Enum.sort_by(queued, &order_key/1)})
 
-    case SymphonyElixir.PrivateFile.write(path, body) do
+    case SymphonyElixir.StateStore.write(path, body) do
       :ok -> :ok
       {:error, reason} -> Logger.warning("Agent inbox write failed path=#{path} reason=#{inspect(reason)}")
     end
@@ -398,7 +398,7 @@ defmodule SymphonyElixir.AgentInbox do
   defp load(nil), do: :ok
 
   defp load(path) do
-    with {:ok, body} <- File.read(path),
+    with {:ok, body} <- SymphonyElixir.StateStore.read(path),
          {:ok, %{"queued" => queued}} when is_list(queued) <- Jason.decode(body) do
       queued |> Enum.flat_map(&load_message/1) |> Enum.each(&put/1)
     else

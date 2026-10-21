@@ -9,14 +9,14 @@ defmodule SymphonyElixir.SessionStore do
   that survives means the run was interrupted, and the next run for the same
   issue, stage, backend and workspace resumes it (`AgentRunner`).
 
-  Kept in `~/.symphony/sessions.json` (owner-only); in memory when the path is
-  nil (tests).
+  Kept in `~/.symphony/sessions.json` (owner-only, or Postgres; see
+  `StateStore`); in memory when the path is nil (tests).
   """
 
   use GenServer
   require Logger
 
-  alias SymphonyElixir.PrivateFile
+  alias SymphonyElixir.StateStore
 
   @type record :: %{String.t() => String.t()}
 
@@ -65,7 +65,7 @@ defmodule SymphonyElixir.SessionStore do
   defp save(%{path: nil} = state), do: state
 
   defp save(%{path: path, sessions: sessions} = state) do
-    case PrivateFile.write(path, Jason.encode!(%{"version" => 1, "sessions" => sessions}, pretty: true)) do
+    case StateStore.write(path, Jason.encode!(%{"version" => 1, "sessions" => sessions}, pretty: true)) do
       :ok -> :ok
       {:error, reason} -> Logger.error("Session store save failed path=#{path} reason=#{inspect(reason)}")
     end
@@ -76,7 +76,7 @@ defmodule SymphonyElixir.SessionStore do
   defp load(nil), do: %{}
 
   defp load(path) do
-    with {:ok, body} <- File.read(path),
+    with {:ok, body} <- StateStore.read(path),
          {:ok, %{"sessions" => %{} = sessions}} <- Jason.decode(body) do
       sessions
     else

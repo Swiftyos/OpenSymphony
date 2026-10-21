@@ -131,12 +131,12 @@ defmodule SymphonyElixir.HttpServer do
   end
 
   defp persisted_secret_key_base(path) do
-    case File.read(path) do
+    case SymphonyElixir.StateStore.read(path) do
       {:ok, secret} when byte_size(secret) >= 64 ->
         String.trim(secret)
 
       _ ->
-        case SymphonyElixir.PrivateFile.create_once(path, generate_secret_key_base()) do
+        case SymphonyElixir.StateStore.create_once(path, generate_secret_key_base()) do
           {:ok, secret} when byte_size(secret) >= 64 -> String.trim(secret)
           _error -> generate_secret_key_base()
         end

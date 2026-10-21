@@ -72,4 +72,25 @@ defmodule SymphonyElixir.FactoryReloadTest do
     refute log =~ "reloaded from disk"
     assert Store.get("PAY")["version"] == saved["version"]
   end
+
+  defmodule UnavailableStateStore do
+    @moduledoc false
+    def list(_dir), do: {:error, :database_down}
+  end
+
+  test "a failed scan keeps the flows already loaded" do
+    loaded = Store.get("PAY")
+    Application.put_env(:symphony_elixir, :state_store, UnavailableStateStore)
+
+    log =
+      try do
+        capture_log(fn -> :ok = Store.reload() end)
+      after
+        Application.delete_env(:symphony_elixir, :state_store)
+      end
+
+    assert log =~ "Factory scan failed"
+    assert log =~ ":database_down"
+    assert Store.get("PAY") == loaded
+  end
 end

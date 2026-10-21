@@ -471,6 +471,23 @@ A restart doesn't throw away an agent's work in progress. While a run is going, 
 - **Fallback.** If the session can't be resumed (for example, its sandbox was recreated), or the issue has moved on, the run starts fresh as before.
 - **OpenCode** sessions always start fresh.
 
+### Retry queue
+
+Issues waiting for a retry or a continuation check are saved in `~/.symphony/retries.json` with their attempt number, backoff due time and run metadata.
+- **On restart** each one is claimed again and re-armed for its remaining delay, so the first poll doesn't dispatch it early and its attempt count isn't reset.
+- **Overdue retries.** A retry that came due while Symphony was down runs right away.
+
+### State in Postgres
+
+By default Symphony keeps its state in owner-only files under `~/.symphony`: sessions, retries, usage, users, the agent inbox, factory flows and the dashboard session secret. Set `SYMPHONY_DATABASE_URL` (for example `ecto://symphony:secret@db:5432/symphony`) and the same documents are kept in Postgres instead, in a `state_documents` table keyed by their path under `~/.symphony` (`sessions.json`, `factories/PAY.json`).
+- **Why.** The controller can be replaced, rescheduled or rebuilt without losing state. This is the first step towards running it on Kubernetes.
+- **Schema.** Migrations run at start-up, before any store loads. They are safe when two instances start together.
+- **Flows.** Flows are rescanned from the table every couple of seconds, as they are from disk, so a flow saved by another instance is picked up the same way.
+- **Pool size** comes from `SYMPHONY_DATABASE_POOL_SIZE` (default 10).
+- **Not moved yet.** Managed account credentials (`accounts.store_root`) stay on disk, because the agent CLIs read them from there.
+- **Moving existing state.** Nothing is copied automatically. To keep the current files, insert each one as a row: `key` is its path relative to `~/.symphony`, `body` its contents.
+- **Tests.** The store's tests are tagged `:postgres` and run when `SYMPHONY_TEST_DATABASE_URL` points at a database (`ecto://postgres@localhost/symphony_test`). Coverage only reaches its threshold with them, so CI starts a Postgres service.
+
 ### Delayed restart
 
 A delayed restart lets you deploy without cutting off running agents.

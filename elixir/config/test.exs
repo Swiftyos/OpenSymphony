@@ -33,6 +33,7 @@ config :symphony_elixir,
   # Tests reload the factory store explicitly (Store.reload/0).
   factories_reload_ms: 0,
   sessions_path: nil,
+  retries_path: nil,
   # Never trap SIGHUP or stop the VM from tests.
   handle_sighup: false,
   delayed_restart_stop: {Kernel, :send, [:delayed_restart_test_probe, :stopped]},

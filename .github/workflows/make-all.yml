@@ -13,6 +13,24 @@ jobs:
       run:
         working-directory: elixir
 
+    # The Postgres state store's tests (tagged :postgres) run against this.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: symphony_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      SYMPHONY_TEST_DATABASE_URL: ecto://postgres:postgres@localhost:5432/symphony_test
+
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4

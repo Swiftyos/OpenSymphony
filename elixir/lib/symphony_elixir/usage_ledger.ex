@@ -305,7 +305,7 @@ defmodule SymphonyElixir.UsageLedger do
       snapshot = snapshot()
       body = Jason.encode!(%{version: @format_version, usage: snapshot.usage, flow: snapshot.flow})
 
-      case SymphonyElixir.PrivateFile.write(path, body) do
+      case SymphonyElixir.StateStore.write(path, body) do
         :ok -> :ok
         {:error, reason} -> Logger.warning("Usage ledger flush failed path=#{path} reason=#{inspect(reason)}")
       end
@@ -317,7 +317,7 @@ defmodule SymphonyElixir.UsageLedger do
   defp load(nil), do: :ok
 
   defp load(path) do
-    with {:ok, body} <- File.read(path),
+    with {:ok, body} <- SymphonyElixir.StateStore.read(path),
          {:ok, %{"usage" => usage, "flow" => flow}} <- Jason.decode(body) do
       Enum.each(usage, &load_usage_row/1)
       Enum.each(Map.get(flow, "edges", []), &load_edge/1)
