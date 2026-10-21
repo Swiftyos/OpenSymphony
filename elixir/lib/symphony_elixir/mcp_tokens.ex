@@ -13,7 +13,8 @@ defmodule SymphonyElixir.McpTokens do
   (`SymphonyElixir.Auth.restrict_to/2`).
 
   Tokens are 256-bit random strings shown once at creation. Only their SHA-256
-  is stored (in `~/.symphony/mcp_tokens.json`, mode 0600), so the file can't be
+  is stored (`~/.symphony/mcp_tokens.json` through `SymphonyElixir.StateStore`, so
+  a file at mode 0600 or a Postgres row), so the file can't be
   used to call the API. Every token expires; the longest lifetime is
   `server.mcp.token_max_days`.
   """
@@ -274,7 +275,7 @@ defmodule SymphonyElixir.McpTokens do
       |> Enum.map(fn {hash, record} -> Map.put(record, :hash, hash) end)
       |> Enum.sort_by(& &1.created_at)
 
-    case SymphonyElixir.PrivateFile.write(path, Jason.encode!(%{version: 1, tokens: tokens}, pretty: true)) do
+    case SymphonyElixir.StateStore.write(path, Jason.encode!(%{version: 1, tokens: tokens}, pretty: true)) do
       :ok -> :ok
       {:error, reason} -> Logger.error("MCP token save failed path=#{path} reason=#{inspect(reason)}")
     end
@@ -283,7 +284,7 @@ defmodule SymphonyElixir.McpTokens do
   defp load(nil), do: :ok
 
   defp load(path) do
-    with {:ok, body} <- File.read(path),
+    with {:ok, body} <- SymphonyElixir.StateStore.read(path),
          {:ok, %{"tokens" => tokens}} when is_list(tokens) <- Jason.decode(body) do
       Enum.each(tokens, &load_record/1)
     else
