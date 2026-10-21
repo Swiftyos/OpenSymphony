@@ -295,8 +295,12 @@ agent:
 - `{spec}` — the run's owner-only `spec.json`.
 - `{run_id}` — the run id, useful for a stable unit name.
 
-The command must return immediately after starting the runner. The default uses `setsid` and
-prints the OS pid; Symphony stores `process:<pid>`. The VM template uses a transient systemd
+The command must return immediately after starting the runner. The default uses `setsid` (or,
+where `setsid` is missing, as on macOS, `perl -e 'setpgrp; exec @ARGV'`) and prints the OS pid;
+Symphony stores `process:<pid>:<start time>`, so a reused pid is never mistaken for the run. The
+runner's output goes to `~/.symphony/runs/<run_id>/runner.log`. Dispatch does not wait for the
+runner: its watcher checks it a second later, and a runner that has already exited is retried with
+the end of that log as the error. The VM template uses a transient systemd
 unit outside `symphony.service`'s cgroup:
 
 ```yaml
@@ -314,6 +318,11 @@ last-seen time) keep stall detection honest while the controller is restarted. A
 seqs are persisted in `~/.symphony/runs.json`, so a replayed outbox is deduplicated after a
 restart; a crash in the small window before that write can duplicate transcript entries, which
 is harmless and bounded to one batch.
+
+A runner exits only after the controller has acknowledged its `finished` event (or fenced the run).
+While the controller is down it keeps retrying for up to `agent.runner_finish_flush_ms` (default
+`3600000`, one hour), and a restarted controller that finds a finished run, in `runs.json` or in a
+dead runner's `outbox.jsonl`, completes it instead of retrying it as interrupted.
 
 In short: the controller, dashboard and polling can restart; the runner, its agent process,
 workspace, transcript events and session continue, and the issue is moved exactly once by the

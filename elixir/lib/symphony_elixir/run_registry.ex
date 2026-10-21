@@ -19,12 +19,14 @@ defmodule SymphonyElixir.RunRegistry do
   survives a controller restart.
 
   Kept in `~/.symphony/runs.json` through `StateStore`; not kept when the path
-  is nil (tests).
+  is nil (tests). Every write is serialised through `SymphonyElixir.RunRegistry.Server`
+  (started before the orchestrator); reads go to the document directly.
   """
 
   require Logger
 
   alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.RunRegistry.Server
   alias SymphonyElixir.RunSpec
   alias SymphonyElixir.StateStore
 
@@ -52,80 +54,102 @@ defmodule SymphonyElixir.RunRegistry do
   its epoch forward.
   """
   @spec record(String.t(), map()) :: :ok
-  def record(issue_id, entry) when is_binary(issue_id) and is_map(entry) do
-    case path() do
-      nil ->
-        :ok
-
-      path ->
-        {runs, epochs} = read(path)
-        epoch = normalize_epoch(entry)
-        runs = Map.put(runs, issue_id, normalize_entry(entry, epoch))
-        epochs = Map.update(epochs, issue_id, epoch, &max(&1, epoch))
-        save(path, runs, epochs)
-    end
-  end
+  def record(issue_id, entry) when is_binary(issue_id) and is_map(entry), do: write({:record, issue_id, entry})
 
   @doc "Forgets the run for `issue_id`, keeping its epoch."
   @spec delete(String.t()) :: :ok
-  def delete(issue_id) when is_binary(issue_id) do
-    case path() do
-      nil ->
-        :ok
-
-      path ->
-        {runs, epochs} = read(path)
-        save(path, Map.delete(runs, issue_id), epochs)
-    end
-  end
+  def delete(issue_id) when is_binary(issue_id), do: write({:delete, issue_id})
 
   @doc """
   Records the last event seq applied for a run, and its finished reason once
-  it has ended. Writes are batched by the runner protocol (one call per event
-  batch), not one per event. A write for an older run is ignored.
+  it has ended. A write for an older run is ignored.
+
+  Progress without a finished reason is coalesced by `RunRegistry.Server` and
+  persisted at most once a second per document; `load/0` already sees it. A
+  finished reason is written before this returns, so the controller acks a
+  `finished` event only once it is durable.
   """
   @spec advance_progress(String.t(), String.t(), non_neg_integer(), String.t() | nil) :: :ok
   def advance_progress(issue_id, run_id, last_seq, finished \\ nil)
 
-  def advance_progress(issue_id, run_id, last_seq, finished)
+  def advance_progress(issue_id, run_id, last_seq, nil)
       when is_binary(issue_id) and is_binary(run_id) and is_integer(last_seq) and last_seq >= 0 do
-    case path() do
-      nil -> :ok
-      path -> advance_progress_at(path, issue_id, run_id, last_seq, finished)
+    with path when is_binary(path) <- path(),
+         false <- Server.buffer_progress(path, issue_id, run_id, last_seq) do
+      write({:progress, issue_id, run_id, last_seq, nil})
+    else
+      _buffered_or_no_path -> :ok
     end
+  end
+
+  def advance_progress(issue_id, run_id, last_seq, finished)
+      when is_binary(issue_id) and is_binary(run_id) and is_integer(last_seq) and last_seq >= 0 and
+             is_binary(finished) do
+    write({:progress, issue_id, run_id, last_seq, finished})
   end
 
   def advance_progress(_issue_id, _run_id, _last_seq, _finished), do: :ok
 
-  defp advance_progress_at(path, issue_id, run_id, last_seq, finished) do
-    {runs, epochs} = read(path)
+  @doc "Writes any coalesced progress now (shutdown and tests)."
+  @spec flush() :: :ok
+  def flush, do: Server.flush()
 
-    case Map.get(runs, issue_id) do
-      %{run_id: ^run_id} = entry -> save_progress(path, runs, epochs, issue_id, entry, last_seq, finished)
-      _ -> :ok
+  # Every write goes through the single `RunRegistry.Server`, so read-modify-
+  # write cycles from the orchestrator and the runner endpoints never
+  # interleave. Without the server (a runner, or a test without the app) the
+  # write is applied in the caller.
+  defp write(op) do
+    case path() do
+      nil -> :ok
+      path -> if Server.write(path, op), do: :ok, else: apply_ops(path, [op])
     end
   end
 
-  defp save_progress(path, runs, epochs, issue_id, entry, last_seq, finished) do
-    next = %{
-      entry
-      | last_seq: max(entry.last_seq, last_seq),
-        finished: finished || entry.finished
-    }
+  @doc false
+  # Applies writes to the document at `path` in one read-modify-write. Called
+  # by `RunRegistry.Server` only (or the caller when it isn't running).
+  @spec apply_ops(Path.t(), [tuple()]) :: :ok
+  def apply_ops(path, ops) when is_list(ops) do
+    {runs, epochs} = document = read(path)
 
-    if next == entry do
-      :ok
-    else
-      save(path, Map.put(runs, issue_id, next), epochs)
+    case Enum.reduce(ops, document, &apply_op/2) do
+      {^runs, ^epochs} -> :ok
+      {next_runs, next_epochs} -> save(path, next_runs, next_epochs)
     end
+  end
+
+  defp apply_op({:record, issue_id, entry}, {runs, epochs}) do
+    epoch = normalize_epoch(entry)
+    {Map.put(runs, issue_id, normalize_entry(entry, epoch)), Map.update(epochs, issue_id, epoch, &max(&1, epoch))}
+  end
+
+  defp apply_op({:delete, issue_id}, {runs, epochs}), do: {Map.delete(runs, issue_id), epochs}
+
+  defp apply_op({:progress, issue_id, run_id, last_seq, finished}, {runs, epochs}) do
+    case Map.get(runs, issue_id) do
+      %{run_id: ^run_id} = entry -> {Map.put(runs, issue_id, progressed(entry, last_seq, finished)), epochs}
+      _ -> {runs, epochs}
+    end
+  end
+
+  defp progressed(entry, last_seq, finished) do
+    %{entry | last_seq: max(entry.last_seq, last_seq), finished: finished || entry.finished}
   end
 
   @doc "The recorded runs, by issue id; empty when nothing was saved or it can't be read."
   @spec load() :: %{String.t() => entry()}
   def load do
     case path() do
-      nil -> %{}
-      path -> path |> read() |> elem(0)
+      nil ->
+        %{}
+
+      path ->
+        {runs, _epochs} = read(path)
+
+        # Coalesced progress not yet written is still visible to readers.
+        Enum.reduce(Server.pending(path), runs, fn {issue_id, {run_id, last_seq}}, acc ->
+          apply_op({:progress, issue_id, run_id, last_seq, nil}, {acc, %{}}) |> elem(0)
+        end)
     end
   end
 

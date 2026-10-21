@@ -585,6 +585,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:default_effort, :string)
       field(:launcher, :string, default: "local")
       field(:runner_command, :string, default: "setsid {symphony} runner {spec} --i-understand-that-this-will-be-running-without-the-usual-guardrails")
+      field(:runner_finish_flush_ms, :integer, default: 3_600_000)
       field(:max_concurrent_agents, :integer, default: 10)
       field(:max_turns, :integer, default: 20)
       field(:max_retry_backoff_ms, :integer, default: 300_000)
@@ -603,6 +604,7 @@ defmodule SymphonyElixir.Config.Schema do
           :default_effort,
           :launcher,
           :runner_command,
+          :runner_finish_flush_ms,
           :max_concurrent_agents,
           :max_turns,
           :max_retry_backoff_ms,
@@ -643,6 +645,7 @@ defmodule SymphonyElixir.Config.Schema do
           [runner_command: "must include {symphony}, {spec} and {run_id} placeholders"]
         end
       end)
+      |> validate_number(:runner_finish_flush_ms, greater_than: 0)
       |> validate_number(:max_concurrent_agents, greater_than: 0)
       |> validate_number(:max_turns, greater_than: 0)
       |> validate_number(:max_retry_backoff_ms, greater_than: 0)

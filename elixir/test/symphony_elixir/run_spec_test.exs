@@ -22,6 +22,18 @@ defmodule SymphonyElixir.RunSpecTest do
     %{root: root}
   end
 
+  test "delete removes only the spec, and is ok when it is already gone" do
+    spec = %RunSpec{run_id: "run-delete", epoch: 1}
+    assert {:ok, path} = RunSpec.write(spec)
+    log = Path.join(RunSpec.dir("run-delete"), "runner.log")
+    File.write!(log, "kept")
+
+    assert :ok = RunSpec.delete("run-delete")
+    refute File.exists?(path)
+    assert File.read!(log) == "kept"
+    assert :ok = RunSpec.delete("run-delete")
+  end
+
   test "write/read round-trips every field and rebuilds the Linear issue", %{root: root} do
     issue = %Issue{
       id: "issue-1",

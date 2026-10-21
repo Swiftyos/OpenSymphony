@@ -123,8 +123,88 @@ defmodule SymphonyElixir.RunnerTest do
     SymphonyElixir.RunnerCommands.reset()
   end
 
+  test "the runner keeps retrying its finished event while the controller can't apply it", %{root: root, endpoint: endpoint} do
+    {spec_path, run_id, issue_id} = unacked_runner_spec!(root, endpoint, "keep", [])
+    :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.RunnerCommands)
+
+    task = Task.async(fn -> SymphonyElixir.Runner.run(spec_path) end)
+
+    try do
+      # The finished event is written, but the controller answers 503.
+      assert wait_for(fn -> SymphonyElixir.RunOutbox.finished_reason(RunSpec.dir(run_id)) == "normal" end, 10_000)
+      assert Task.yield(task, 1_500) == nil
+    after
+      {:ok, _pid} = Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.RunnerCommands)
+    end
+
+    assert :ok = Task.await(task, 15_000)
+    assert_receive {:orchestrator_message, {:run_finished, ^issue_id, ^run_id, "normal"}}, 1_000
+    SymphonyElixir.RunnerCommands.reset()
+  end
+
+  test "the finished flush gives up after agent.runner_finish_flush_ms", %{root: root, endpoint: endpoint} do
+    {spec_path, run_id, issue_id} = unacked_runner_spec!(root, endpoint, "cap", agent_runner_finish_flush_ms: 300)
+    :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.RunnerCommands)
+
+    try do
+      assert :ok = SymphonyElixir.Runner.run(spec_path)
+      assert SymphonyElixir.RunOutbox.finished_reason(RunSpec.dir(run_id)) == "normal"
+      refute_received {:orchestrator_message, {:run_finished, ^issue_id, _run_id, _reason}}
+    after
+      {:ok, _pid} = Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.RunnerCommands)
+    end
+  end
+
   test "a missing spec is reported without starting anything" do
     assert {:error, :enoent} = SymphonyElixir.Runner.run(Path.join(System.tmp_dir!(), "missing-runner-spec.json"))
+  end
+
+  defp unacked_runner_spec!(root, endpoint, suffix, workflow_overrides) do
+    issue_id = "issue-runner-#{suffix}"
+    run_id = "run-runner-#{suffix}"
+    identifier = "MT-RUNNER-#{String.upcase(suffix)}"
+    issue = Support.issue_fixture(issue_id, identifier)
+
+    write_workflow_file!(
+      Workflow.workflow_file_path(),
+      [
+        tracker_kind: "memory",
+        agent_backend: "claude",
+        workspace_root: Path.join(root, "workspaces"),
+        hook_after_create: "printf '# test\\n' > README.md",
+        claude_command: Support.write_fake_claude_launcher!(root),
+        max_turns: 1
+      ] ++ workflow_overrides
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    record = Support.record_run!(issue_id, run_id, identifier: identifier, backend: "claude", epoch: 1)
+
+    spec = %RunSpec{
+      run_id: run_id,
+      epoch: record.epoch,
+      attempt: 0,
+      issue: issue,
+      backend: "claude",
+      controller_url: endpoint.url,
+      token: RunToken.sign(run_id, record.epoch)
+    }
+
+    {:ok, spec_path} = RunSpec.write(spec)
+    {spec_path, run_id, issue_id}
+  end
+
+  defp wait_for(fun, timeout_ms) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+
+    Stream.repeatedly(fn ->
+      cond do
+        fun.() -> true
+        System.monotonic_time(:millisecond) > deadline -> false
+        true -> Process.sleep(20) && nil
+      end
+    end)
+    |> Enum.find(&is_boolean/1)
   end
 
   defp watch_session(issue_id, timeout_ms) do

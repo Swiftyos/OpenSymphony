@@ -10,9 +10,10 @@ defmodule SymphonyElixir.RunOutbox do
   The controller acknowledges with `applied_through`; events up to that seq are
   dropped. While the controller is unreachable the sender backs off up to 5
   seconds and keeps buffering, which is what lets a run outlive a controller
-  restart. A `409` (a stale epoch, see `SymphonyElixir.RunToken`) means this
-  runner has been fenced: the outbox stops it with
-  `{:shutdown, :stale_epoch}`.
+  restart. A `409` (a stale epoch, see `SymphonyElixir.RunToken`, or a run
+  already finished) means this runner has been fenced: the outbox stops it
+  with `{:shutdown, :stale_epoch}`. A `404` (the controller no longer has the
+  run) fences it the same way, with `{:shutdown, :run_not_found}`.
   """
 
   use GenServer
@@ -70,6 +71,24 @@ defmodule SymphonyElixir.RunOutbox do
   catch
     :exit, _reason -> :ok
   end
+
+  @doc """
+  The reason of the `finished` event in a run dir's outbox file, or nil. The
+  file keeps every event the runner appended, acknowledged or not, so this
+  tells a restarted controller that a runner which died had already finished.
+  """
+  @spec finished_reason(Path.t() | nil) :: String.t() | nil
+  def finished_reason(dir) do
+    {events, _next_seq} = load_pending(outbox_path(dir, nil))
+
+    Enum.find_value(events, fn
+      %{type: "finished", data: data} -> event_reason(RunEvents.decode(data))
+      _event -> nil
+    end)
+  end
+
+  defp event_reason({:ok, %{reason: reason}}) when is_binary(reason), do: reason
+  defp event_reason(_decoded), do: "finished"
 
   @impl true
   def init(opts) do
@@ -256,6 +275,12 @@ defmodule SymphonyElixir.RunOutbox do
       {:ok, %Req.Response{status: 409}} ->
         Logger.warning("Runner fenced by controller: stale epoch run_id=#{run_id}")
         exit({:shutdown, :stale_epoch})
+
+      {:ok, %Req.Response{status: 404}} ->
+        # The controller no longer knows the run (it ended, or another run
+        # replaced it): fenced, like a stale epoch.
+        Logger.warning("Runner fenced by controller: unknown run run_id=#{run_id}")
+        exit({:shutdown, :run_not_found})
 
       {:ok, %Req.Response{status: status}} ->
         Logger.warning("Run outbox post failed run_id=#{run_id} status=#{status}; retrying")

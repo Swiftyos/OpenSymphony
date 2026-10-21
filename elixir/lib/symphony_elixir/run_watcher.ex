@@ -9,7 +9,13 @@ defmodule SymphonyElixir.RunWatcher do
   The watcher exits with the run's `finished` reason (`:normal` for a normal
   end, otherwise `{:runner_failed, reason}`). If the OS process disappears
   without a finished event, it waits a short grace period for the runner's
-  outbox to replay one, then exits `:runner_lost`. Heartbeats and every other
+  outbox to replay one, then exits `:runner_lost`.
+
+  A watcher started with `log:` (a just-launched runner's `runner.log`) checks
+  the runner once after `startup_check_ms` (1s) before its regular polling. A
+  runner already gone then, with no finished event, never really started: the
+  watcher exits `{:launch_failed, log_tail}` with the last 2000 bytes of its log,
+  so the launcher itself never waits for the runner. Heartbeats and every other
   event for the run update `last_seen_at`, which the orchestrator uses for
   stall detection while a process run's agent updates are in flight.
   """
@@ -22,6 +28,8 @@ defmodule SymphonyElixir.RunWatcher do
   @supervisor SymphonyElixir.RunWatcher.Supervisor
   @poll_interval_ms 5_000
   @lost_grace_ms 10_000
+  @startup_check_ms 1_000
+  @log_tail_bytes 2_000
 
   @type run :: %{run_id: String.t(), issue_id: String.t() | nil}
 
@@ -34,7 +42,9 @@ defmodule SymphonyElixir.RunWatcher do
       ref: ref,
       launcher: Keyword.get(opts, :launcher, SymphonyElixir.RunLauncher.Process),
       poll_interval_ms: Keyword.get(opts, :poll_interval_ms, @poll_interval_ms),
-      lost_grace_ms: Keyword.get(opts, :lost_grace_ms, @lost_grace_ms)
+      lost_grace_ms: Keyword.get(opts, :lost_grace_ms, @lost_grace_ms),
+      log: Keyword.get(opts, :log),
+      startup_check_ms: Keyword.get(opts, :startup_check_ms, @startup_check_ms)
     }
 
     case Process.whereis(@supervisor) do
@@ -129,7 +139,12 @@ defmodule SymphonyElixir.RunWatcher do
       Registry.register(@registry, args.run_id, nil)
     end
 
-    schedule_poll(args.poll_interval_ms)
+    # A just-launched runner is checked once at startup_check_ms; regular
+    # polling starts after that check passes.
+    case Map.get(args, :log) do
+      nil -> schedule_poll(args.poll_interval_ms)
+      _log -> Process.send_after(self(), :startup_check, max(Map.get(args, :startup_check_ms, @startup_check_ms), 0))
+    end
 
     {:ok,
      %{
@@ -139,6 +154,7 @@ defmodule SymphonyElixir.RunWatcher do
        launcher: args.launcher,
        poll_interval_ms: args.poll_interval_ms,
        lost_grace_ms: args.lost_grace_ms,
+       log: Map.get(args, :log),
        last_seen_ms: now_ms(),
        gone_since_ms: nil
      }}
@@ -158,6 +174,17 @@ defmodule SymphonyElixir.RunWatcher do
   end
 
   @impl true
+  def handle_info(:startup_check, state) do
+    if alive?(state) do
+      schedule_poll(state.poll_interval_ms)
+      {:noreply, state}
+    else
+      tail = log_tail(state.log)
+      Logger.warning("Run watcher: runner exited at launch run_id=#{state.run_id} ref=#{state.ref} log_tail=#{inspect(tail)}")
+      {:stop, {:launch_failed, tail}, state}
+    end
+  end
+
   def handle_info(:poll, state) do
     if alive?(state) do
       schedule_poll(state.poll_interval_ms)
@@ -192,8 +219,23 @@ defmodule SymphonyElixir.RunWatcher do
     _error -> false
   end
 
-  defp exit_reason("normal"), do: :normal
-  defp exit_reason(reason), do: {:runner_failed, reason}
+  @doc "The exit reason for a run's finished reason: `:normal`, or `{:runner_failed, reason}`."
+  @spec exit_reason(String.t()) :: :normal | {:runner_failed, String.t()}
+  def exit_reason("normal"), do: :normal
+  def exit_reason(reason), do: {:runner_failed, reason}
+
+  defp log_tail(log) do
+    case File.read(log) do
+      {:ok, body} when byte_size(body) > @log_tail_bytes ->
+        binary_part(body, byte_size(body) - @log_tail_bytes, @log_tail_bytes)
+
+      {:ok, body} ->
+        body
+
+      {:error, _reason} ->
+        ""
+    end
+  end
 
   defp schedule_poll(interval_ms) when is_integer(interval_ms) and interval_ms > 0,
     do: Process.send_after(self(), :poll, interval_ms)

@@ -77,6 +77,8 @@ defmodule SymphonyElixir.Application do
       SymphonyElixir.GitMirror.Limiter,
       SymphonyElixir.RunnerCommands,
       SymphonyElixir.Capacity.Metrics,
+      # The single writer of runs.json; before the orchestrator and the runner endpoints.
+      SymphonyElixir.RunRegistry.Server,
       {Registry, keys: :unique, name: SymphonyElixir.RunWatcher.Registry},
       {DynamicSupervisor, strategy: :one_for_one, name: SymphonyElixir.RunWatcher.Supervisor},
       SymphonyElixir.Orchestrator,

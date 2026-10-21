@@ -108,11 +108,24 @@ Kubernetes they move behind a tool gateway.
 4. **Process launcher and watchers.** This step makes runs real processes:
    - **Launcher.** It is selected with `agent.launcher: local | process`. `process` starts
      `symphony runner <spec>` with the `agent.runner_command` template. Placeholders are
-     `{symphony}` (the escript path, or `SYMPHONY_BIN`), `{spec}` and `{run_id}`. The default
-     template detaches the runner with `setsid`. On the VM the template is `systemd-run --user
+     `{symphony}` (the escript path, or `SYMPHONY_BIN`), `{spec}` and `{run_id}`, each
+     shell-quoted. The default template detaches the runner with `setsid`; on a host without
+     `setsid` (macOS) a leading `setsid` runs as `perl -e 'setpgrp; exec @ARGV'`, so the runner
+     still leads its own process group. On the VM the template is `systemd-run --user
      --unit=symphony-run-{run_id} --collect --property=KillMode=mixed {symphony} runner
      {spec} --i-understand-that-this-will-be-running-without-the-usual-guardrails`, outside
      `symphony.service`'s cgroup.
+     - A backgrounded runner's stdin is `/dev/null` and its output is appended to
+       `<run dir>/runner.log`. Dispatch returns as soon as the runner is spawned; the run's
+       watcher checks it once after 1s, and a runner already gone (with no `finished`) makes
+       the watcher exit `{:launch_failed, log_tail}`. The orchestrator's `:DOWN` handler stops
+       and cleans up the run in a task and schedules a failure retry whose error is the log's
+       tail.
+     - The reference is `process:<pid>:<start time>` (`ps -o lstart=`): `alive?` and `stop`
+       treat a pid whose start time differs as another process.
+     - The run is recorded in the registry (with a `pending:` reference) before the runner
+       starts, so its first events find it; a failed launch deletes it again.
+     - `spec.json` (it holds the run token) is deleted when the run ends or is stopped.
    - **Watchers.** Each process run has a watcher process in the controller (under a
      DynamicSupervisor). The orchestrator monitors that watcher, so its existing `:DOWN`
      handling is unchanged.
@@ -124,9 +137,23 @@ Kubernetes they move behind a tool gateway.
      `launcher.alive?(ref)` and whose launcher is still available: it starts a watcher, rebuilds
      the running entry from the registry metadata, and puts the run back in `running` without
      bumping the epoch or scheduling a retry. A run that is gone is retried with attempt + 1.
+     - A run whose `finished` reason is already in the registry, or whose dead runner left a
+       `finished` event in `<run dir>/outbox.jsonl`, has ended: it is deleted and gets exactly
+       what the `:DOWN` handler gives that reason (a continuation check for `normal`, a
+       failure retry otherwise), and a runner still alive is stopped.
+   - **Finishing.** The runner exits only once its `finished` event is acknowledged or the run
+     is fenced (`409`, or `404` for a run the controller no longer has). The outbox keeps
+     retrying with backoff while the controller is down, for up to
+     `agent.runner_finish_flush_ms` (one hour by default).
+   - **Lost watchers.** When a process run's watcher goes down for any reason but a normal
+     finish, the orchestrator stops the runner before the retry is dispatched. `stop` can wait
+     up to 20s, so the orchestrator always runs it in a task under `TaskSupervisor`.
    - **Event progress.** `RunnerCommands` seeds its per-run `last_seq` from `runs.json` after a
      restart, and the controller writes the applied batch's `last_seq` (and the finished reason)
-     back to the registry. A crash between a batch being applied and that one write can still
+     back to the registry. Every registry write goes through `SymphonyElixir.RunRegistry.Server`,
+     so the orchestrator's records and deletes and the endpoints' progress never overwrite each
+     other. Progress is coalesced per run and written at most once a second (readers in the
+     controller see it at once); a finished reason is written before the batch is acknowledged. A crash between a batch being applied and that one write can still
      replay the batch's transcript entries; it cannot apply a stage result twice because Linear
      writes are idempotent.
    - **Cancellation** stops the systemd unit, or kills the process group (`TERM`, then `KILL`

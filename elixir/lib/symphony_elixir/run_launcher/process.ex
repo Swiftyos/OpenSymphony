@@ -6,10 +6,24 @@ defmodule SymphonyElixir.RunLauncher.Process do
   template is run detached. The command must return at once: the default
   `setsid` template backgrounds the runner and prints its pid, while the VM's
   `systemd-run --user --unit=...` template returns after starting the unit.
+
+  A backgrounded runner gets stdin from `/dev/null` and its stdout and stderr
+  appended to `<run dir>/runner.log`. A template that starts with `setsid` runs
+  through `perl -e 'setpgrp; exec @ARGV'` instead on a host without `setsid`
+  (macOS), so the runner still leads its own process group. If the runner is
+  gone at its watcher's startup check (1s), the watcher exits
+  `{:launch_failed, log_tail}`; `start_process/2` itself returns as soon as the
+  runner is spawned.
+
   The reference records how to check and stop the run:
 
-    * `process:<os pid>` — `kill -0`, and a process-group `TERM` then `KILL`.
+    * `process:<os pid>:<start time>` — `kill -0` and `ps -o lstart=`, so a
+      reused pid is not mistaken for the run, and a process-group `TERM` then
+      `KILL`.
     * `systemd:<unit>` — `systemctl --user is-active`, and `systemctl --user stop`.
+
+  `stop/1` waits up to 20s for the process to exit; callers that must not block
+  (the orchestrator) run it in a task.
 
   A `SymphonyElixir.RunWatcher` is started for the run; the orchestrator
   monitors that watcher. See `docs/durable-runs.md`.
@@ -25,6 +39,9 @@ defmodule SymphonyElixir.RunLauncher.Process do
 
   @kill_grace_ms 10_000
   @poll_ms 100
+  # The start time of a runner already gone when its pid was read.
+  @gone_start "gone"
+  @setsid_fallback "perl -e 'setpgrp; exec @ARGV'"
 
   @impl true
   def start(%RunSpec{} = spec, opts), do: start_process(spec, opts)
@@ -40,14 +57,14 @@ defmodule SymphonyElixir.RunLauncher.Process do
   def start_process(%RunSpec{} = spec, opts \\ []) do
     with {:ok, spec_path} <- RunSpec.write(spec),
          {:ok, command} <- render_command(command_template(opts), spec, spec_path, opts),
-         {:ok, ref} <- spawn_process(command, spec.run_id),
+         {:ok, ref} <- spawn_process(detach_command(command, opts), spec.run_id),
          {:ok, watcher_pid} <-
            RunWatcher.start(
              %{run_id: spec.run_id, issue_id: Map.get(spec.issue || %{}, :id)},
              ref,
              Keyword.merge(
-               [launcher: __MODULE__],
-               Keyword.take(opts, [:poll_interval_ms, :lost_grace_ms])
+               [launcher: __MODULE__] ++ startup_check(ref, spec.run_id),
+               Keyword.take(opts, [:poll_interval_ms, :lost_grace_ms, :startup_check_ms])
              )
            ) do
       Logger.info("Started process run run_id=#{spec.run_id} ref=#{ref} watcher=#{inspect(watcher_pid)}")
@@ -60,13 +77,10 @@ defmodule SymphonyElixir.RunLauncher.Process do
   end
 
   @impl true
-  def alive?("process:" <> pid) when pid != "" do
-    case Integer.parse(pid) do
-      {pid_number, ""} when pid_number > 0 ->
-        process_alive?(pid_number)
-
-      _ ->
-        false
+  def alive?("process:" <> rest) do
+    case parse_process_ref(rest) do
+      {:ok, pid, start} -> process_alive?(pid, start)
+      :error -> false
     end
   end
 
@@ -84,16 +98,11 @@ defmodule SymphonyElixir.RunLauncher.Process do
 
   @doc "Stops a reference, waiting at most `timeout_ms` before sending KILL."
   @spec stop(String.t(), non_neg_integer()) :: :ok
-  def stop("process:" <> pid, timeout_ms) when pid != "" do
-    case Integer.parse(pid) do
-      {pid_number, ""} when pid_number > 0 ->
-        stop_process_group(pid_number, timeout_ms)
-
-      _ ->
-        :ok
+  def stop("process:" <> rest, timeout_ms) do
+    case parse_process_ref(rest) do
+      {:ok, pid, start} -> stop_process_group(pid, start, timeout_ms)
+      :error -> :ok
     end
-
-    :ok
   end
 
   def stop("systemd:" <> unit, _timeout_ms) when unit != "" do
@@ -136,7 +145,7 @@ defmodule SymphonyElixir.RunLauncher.Process do
     symphony = symphony_binary(opts)
 
     values = %{
-      "{run_id}" => spec.run_id,
+      "{run_id}" => shell_escape(spec.run_id),
       "{spec}" => shell_escape(spec_path),
       "{symphony}" => shell_escape(symphony)
     }
@@ -156,6 +165,23 @@ defmodule SymphonyElixir.RunLauncher.Process do
 
   defp render_command(_template, _spec, _spec_path, _opts), do: {:error, :invalid_runner_command}
 
+  # The default template's `setsid` is Linux (util-linux); where it is missing
+  # the same group-leader detach is done with perl, which macOS ships. `setsid`
+  # may follow `NAME=value` assignments.
+  @setsid_prefix ~r/^(\s*(?:\w+=\S*\s+)*)setsid\s+/
+
+  defp detach_command(command, opts) do
+    if Regex.match?(@setsid_prefix, command) and not setsid_available?(opts) do
+      Regex.replace(@setsid_prefix, command, "\\1" <> @setsid_fallback <> " ")
+    else
+      command
+    end
+  end
+
+  defp setsid_available?(opts) do
+    Keyword.get_lazy(opts, :setsid_available, fn -> System.find_executable("setsid") != nil end)
+  end
+
   defp spawn_process(command, run_id) do
     if systemd_command?(command) do
       spawn_systemd(command)
@@ -163,6 +189,13 @@ defmodule SymphonyElixir.RunLauncher.Process do
       spawn_background(command, run_id)
     end
   end
+
+  # A backgrounded runner is checked by its watcher shortly after start; a
+  # systemd unit is started (and its failures reported) by systemd-run itself.
+  defp startup_check("process:" <> _rest, run_id), do: [log: runner_log(run_id)]
+  defp startup_check(_ref, _run_id), do: []
+
+  defp runner_log(run_id), do: Path.join(RunSpec.dir(run_id), "runner.log")
 
   defp systemd_command?(command), do: Regex.match?(~r/(^|\s)systemd-run(\s|$)/, command)
 
@@ -180,14 +213,17 @@ defmodule SymphonyElixir.RunLauncher.Process do
   end
 
   defp spawn_background(command, run_id) do
+    log = runner_log(run_id)
+
     # One shell backgrounds the runner and prints the started pid, so the
-    # controller does not wait for (or own) the run process.
-    wrapper = command <> " >/dev/null 2>&1 & echo $!"
+    # controller does not wait for (or own) the run process. The runner's
+    # output goes to its log, so a runner that fails at once can be explained.
+    wrapper = command <> " </dev/null >>" <> shell_escape(log) <> " 2>&1 & echo $!"
 
     case System.cmd("sh", ["-c", wrapper], stderr_to_stdout: true) do
       {output, 0} ->
         case Integer.parse(String.trim(output)) do
-          {pid, ""} when pid > 0 -> {:ok, "process:" <> Integer.to_string(pid)}
+          {pid, ""} when pid > 0 -> started_ref(pid)
           _ -> {:error, {:invalid_pid_output, run_id, output}}
         end
 
@@ -196,39 +232,84 @@ defmodule SymphonyElixir.RunLauncher.Process do
     end
   end
 
+  # The reference carries the process start time, read now, so a later
+  # `alive?/1` or `stop/1` never acts on another process that reused the pid.
+  # A runner already gone gets a start time that never matches. Whether the
+  # runner really started is the watcher's startup check, so this returns at
+  # once instead of blocking the caller (the orchestrator).
+  defp started_ref(pid) do
+    case process_info(pid) do
+      {:ok, _stat, start} -> {:ok, "process:#{pid}:#{start}"}
+      :error -> {:ok, "process:#{pid}:#{@gone_start}"}
+    end
+  end
+
   defp systemd_unit(command) do
     regex = ~r/--unit(?:=|\s+)(?:'(?<single>[^']+)'|"(?<double>[^"]+)"|(?<plain>\S+))/
 
     case Regex.named_captures(regex, command) do
       %{"single" => single, "double" => double, "plain" => plain} ->
-        Enum.find([single, double, plain], &(&1 not in [nil, ""]))
+        # A rendered `{run_id}` is shell-quoted inside the plain form.
+        Enum.find([single, double, String.replace(plain, ["'", "\""], "")], &(&1 not in [nil, ""]))
 
       nil ->
         nil
     end
   end
 
-  defp process_alive?(pid) do
+  # `process:<pid>:<start>`; a bare `process:<pid>` (no start time) is still
+  # accepted and checked by pid only.
+  defp parse_process_ref(rest) do
+    {pid, start} =
+      case String.split(rest, ":", parts: 2) do
+        [pid, start] -> {pid, start}
+        [pid] -> {pid, nil}
+      end
+
+    case Integer.parse(pid) do
+      {pid_number, ""} when pid_number > 0 -> {:ok, pid_number, start}
+      _ -> :error
+    end
+  end
+
+  defp process_alive?(pid, start) do
     with {_output, 0} <- System.cmd("kill", ["-0", Integer.to_string(pid)], stderr_to_stdout: true),
-         {stat, 0} <- System.cmd("ps", ["-o", "stat=", "-p", Integer.to_string(pid)], stderr_to_stdout: true) do
-      not String.starts_with?(String.trim(stat), "Z")
+         {:ok, stat, actual_start} <- process_info(pid) do
+      not String.starts_with?(stat, "Z") and (is_nil(start) or start == actual_start)
     else
       _ -> false
     end
   end
 
-  defp stop_process_group(pid, timeout_ms) when is_integer(pid) and pid > 0 do
-    if alive?("process:" <> Integer.to_string(pid)) do
+  # The process state and its start time (`ps -o lstart=`, in the C locale,
+  # with spaces as underscores so it fits in a reference).
+  defp process_info(pid) do
+    case System.cmd("ps", ["-o", "stat=", "-o", "lstart=", "-p", Integer.to_string(pid)], stderr_to_stdout: true, env: [{"LC_ALL", "C"}]) do
+      {output, 0} ->
+        case String.split(output) do
+          [stat | [_ | _] = start] -> {:ok, stat, Enum.join(start, "_")}
+          _ -> :error
+        end
+
+      _ ->
+        :error
+    end
+  end
+
+  defp stop_process_group(pid, start, timeout_ms) do
+    ref = process_ref(pid, start)
+
+    if alive?(ref) do
       # Always signal the process itself as well as its group: the default
       # template makes the runner a group leader, while a custom command may
       # not have created its own group.
       signal_group(pid, "TERM")
       signal_pid(pid, "TERM")
 
-      unless wait_dead(pid, timeout_ms) do
+      unless wait_dead(ref, timeout_ms) do
         signal_group(pid, "KILL")
         signal_pid(pid, "KILL")
-        wait_dead(pid, timeout_ms)
+        wait_dead(ref, timeout_ms)
       end
     end
 
@@ -244,14 +325,17 @@ defmodule SymphonyElixir.RunLauncher.Process do
     :ok
   end
 
-  defp wait_dead(pid, timeout_ms) do
+  defp process_ref(pid, nil), do: "process:#{pid}"
+  defp process_ref(pid, start), do: "process:#{pid}:#{start}"
+
+  defp wait_dead(ref, timeout_ms) do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
-    do_wait_dead(pid, deadline)
+    do_wait_dead(ref, deadline)
   end
 
-  defp do_wait_dead(pid, deadline) do
+  defp do_wait_dead(ref, deadline) do
     cond do
-      not alive?("process:" <> Integer.to_string(pid)) ->
+      not alive?(ref) ->
         true
 
       System.monotonic_time(:millisecond) >= deadline ->
@@ -259,7 +343,7 @@ defmodule SymphonyElixir.RunLauncher.Process do
 
       true ->
         Process.sleep(@poll_ms)
-        do_wait_dead(pid, deadline)
+        do_wait_dead(ref, deadline)
     end
   end
 

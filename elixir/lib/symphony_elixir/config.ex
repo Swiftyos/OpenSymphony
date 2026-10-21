@@ -208,6 +208,13 @@ defmodule SymphonyElixir.Config do
   @spec agent_runner_command() :: String.t()
   def agent_runner_command, do: settings!().agent.runner_command
 
+  @doc """
+  How long a runner keeps retrying to deliver its `finished` event (and the
+  events before it) before exiting anyway; one hour by default.
+  """
+  @spec agent_runner_finish_flush_ms() :: pos_integer()
+  def agent_runner_finish_flush_ms, do: settings!().agent.runner_finish_flush_ms
+
   @spec agent_stall_timeout_ms(String.t() | nil) :: non_neg_integer()
   def agent_stall_timeout_ms(backend \\ nil) do
     settings = settings!()

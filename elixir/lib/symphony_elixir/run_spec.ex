@@ -132,6 +132,16 @@ defmodule SymphonyElixir.RunSpec do
     end
   end
 
+  @doc """
+  Deletes the run's spec once the run has ended or been stopped: it holds the
+  run token. The rest of the run dir (`outbox.jsonl`, `runner.log`) is kept.
+  """
+  @spec delete(String.t()) :: :ok
+  def delete(run_id) when is_binary(run_id) do
+    _ = File.rm(path(run_id))
+    :ok
+  end
+
   @doc "Reads a spec written with `write/1`."
   @spec read(Path.t()) :: {:ok, t()} | {:error, term()}
   def read(path) do

@@ -254,6 +254,7 @@ defmodule SymphonyElixir.TestSupport do
           default_effort: nil,
           agent_launcher: nil,
           agent_runner_command: nil,
+          agent_runner_finish_flush_ms: nil,
           max_concurrent_agents: 10,
           max_turns: 20,
           max_retry_backoff_ms: 300_000,
@@ -337,6 +338,7 @@ defmodule SymphonyElixir.TestSupport do
     default_effort = Keyword.get(config, :default_effort)
     agent_launcher = Keyword.get(config, :agent_launcher)
     agent_runner_command = Keyword.get(config, :agent_runner_command)
+    agent_runner_finish_flush_ms = Keyword.get(config, :agent_runner_finish_flush_ms)
     max_concurrent_agents = Keyword.get(config, :max_concurrent_agents)
     max_turns = Keyword.get(config, :max_turns)
     max_retry_backoff_ms = Keyword.get(config, :max_retry_backoff_ms)
@@ -426,6 +428,7 @@ defmodule SymphonyElixir.TestSupport do
         "  default_effort: #{yaml_value(default_effort)}",
         if(is_nil(agent_launcher), do: nil, else: "  launcher: #{yaml_value(agent_launcher)}"),
         if(is_nil(agent_runner_command), do: nil, else: "  runner_command: #{yaml_value(agent_runner_command)}"),
+        if(is_nil(agent_runner_finish_flush_ms), do: nil, else: "  runner_finish_flush_ms: #{yaml_value(agent_runner_finish_flush_ms)}"),
         "  max_concurrent_agents: #{yaml_value(max_concurrent_agents)}",
         "  max_turns: #{yaml_value(max_turns)}",
         "  max_retry_backoff_ms: #{yaml_value(max_retry_backoff_ms)}",
@@ -546,6 +549,7 @@ defmodule SymphonyElixir.TestSupport do
           default_effort: nil,
           agent_launcher: nil,
           agent_runner_command: nil,
+          agent_runner_finish_flush_ms: nil,
           max_concurrent_agents: 10,
           max_turns: 20,
           max_retry_backoff_ms: 300_000,
@@ -625,6 +629,7 @@ defmodule SymphonyElixir.TestSupport do
     default_effort = Keyword.get(config, :default_effort)
     agent_launcher = Keyword.get(config, :agent_launcher)
     agent_runner_command = Keyword.get(config, :agent_runner_command)
+    agent_runner_finish_flush_ms = Keyword.get(config, :agent_runner_finish_flush_ms)
     max_concurrent_agents = Keyword.get(config, :max_concurrent_agents)
     max_turns = Keyword.get(config, :max_turns)
     max_retry_backoff_ms = Keyword.get(config, :max_retry_backoff_ms)
@@ -710,6 +715,7 @@ defmodule SymphonyElixir.TestSupport do
         "  default_effort: #{yaml_value(default_effort)}",
         if(is_nil(agent_launcher), do: nil, else: "  launcher: #{yaml_value(agent_launcher)}"),
         if(is_nil(agent_runner_command), do: nil, else: "  runner_command: #{yaml_value(agent_runner_command)}"),
+        if(is_nil(agent_runner_finish_flush_ms), do: nil, else: "  runner_finish_flush_ms: #{yaml_value(agent_runner_finish_flush_ms)}"),
         "  max_concurrent_agents: #{yaml_value(max_concurrent_agents)}",
         "  max_turns: #{yaml_value(max_turns)}",
         "  max_retry_backoff_ms: #{yaml_value(max_retry_backoff_ms)}",

@@ -18,6 +18,7 @@ defmodule SymphonyElixir.Orchestrator do
     IssueStage,
     RetryStore,
     RunLauncher,
+    RunOutbox,
     RunRegistry,
     RunSpec,
     RunToken,
@@ -237,44 +238,10 @@ defmodule SymphonyElixir.Orchestrator do
           else: record_session_history(issue_id, running_entry, :crashed, "agent exited: #{inspect(reason)}")
 
         session_id = running_entry_session_id(running_entry)
-
-        state =
-          case reason do
-            :normal ->
-              Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
-
-              state
-              |> complete_issue(issue_id)
-              |> schedule_issue_retry(
-                issue_id,
-                1,
-                %{
-                  identifier: running_entry.identifier,
-                  delay_type: :continuation,
-                  worker_host: Map.get(running_entry, :worker_host),
-                  workspace_path: Map.get(running_entry, :workspace_path)
-                }
-                |> Map.merge(retry_issue_metadata(running_entry))
-              )
-
-            _ ->
-              Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
-
-              next_attempt = next_retry_attempt_from_running(running_entry)
-
-              schedule_issue_retry(
-                state,
-                issue_id,
-                next_attempt,
-                %{
-                  identifier: running_entry.identifier,
-                  error: "agent exited: #{inspect(reason)}",
-                  worker_host: Map.get(running_entry, :worker_host),
-                  workspace_path: Map.get(running_entry, :workspace_path)
-                }
-                |> Map.merge(retry_issue_metadata(running_entry))
-              )
-          end
+        # A process run whose watcher went down without a normal finish may
+        # still be running: stop it (off this process) before its retry runs.
+        cleanup_process_run(running_entry, reason != :normal)
+        state = schedule_after_run_exit(state, issue_id, running_entry, reason)
 
         Logger.info("Agent task finished for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}")
 
@@ -819,6 +786,58 @@ defmodule SymphonyElixir.Orchestrator do
     if running_entry_backend(running_entry) == "codex", do: "codex", else: "agent"
   end
 
+  # What a run leaving `running` schedules: a continuation check after a normal
+  # end, a backoff retry otherwise. Shared by the :DOWN handler and a run
+  # recovered with its finished reason already known.
+  defp schedule_after_run_exit(%State{} = state, issue_id, running_entry, reason) do
+    session_id = running_entry_session_id(running_entry)
+
+    case reason do
+      :normal ->
+        Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
+
+        state
+        |> complete_issue(issue_id)
+        |> schedule_issue_retry(
+          issue_id,
+          1,
+          %{
+            identifier: running_entry.identifier,
+            delay_type: :continuation,
+            worker_host: Map.get(running_entry, :worker_host),
+            workspace_path: Map.get(running_entry, :workspace_path)
+          }
+          |> Map.merge(retry_issue_metadata(running_entry))
+        )
+
+      _ ->
+        Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
+
+        next_attempt = next_retry_attempt_from_running(running_entry)
+
+        schedule_issue_retry(
+          state,
+          issue_id,
+          next_attempt,
+          %{
+            identifier: running_entry.identifier,
+            error: run_exit_error(reason),
+            worker_host: Map.get(running_entry, :worker_host),
+            workspace_path: Map.get(running_entry, :workspace_path)
+          }
+          |> Map.merge(retry_issue_metadata(running_entry))
+        )
+    end
+  end
+
+  # A process runner that was gone at its watcher's startup check: the retry
+  # carries the end of its runner.log, which says why.
+  defp run_exit_error({:launch_failed, log_tail}) when is_binary(log_tail) do
+    "runner failed to start: " <> String.trim(log_tail)
+  end
+
+  defp run_exit_error(reason), do: "agent exited: #{inspect(reason)}"
+
   defp stop_running_task(%{launcher: launcher, run_ref: run_ref} = running_entry)
        when is_atom(launcher) and is_binary(run_ref) do
     case Map.get(running_entry, :run_id) do
@@ -826,10 +845,10 @@ defmodule SymphonyElixir.Orchestrator do
       _ -> :ok
     end
 
-    if Code.ensure_loaded?(launcher) and function_exported?(launcher, :stop, 1) do
-      launcher.stop(run_ref)
+    if process_launcher?(launcher) do
+      cleanup_process_run(running_entry, true)
     else
-      :ok
+      launcher_stop(launcher, run_ref)
     end
   end
 
@@ -1378,7 +1397,6 @@ defmodule SymphonyElixir.Orchestrator do
     launcher = RunLauncher.launcher()
     run_id = RunRegistry.new_run_id()
     epoch = RunRegistry.next_epoch(issue.id)
-    spec = run_spec(issue, attempt, worker_host, route, issue_config, account, run_id, epoch)
 
     fun = fn ->
       AgentRunner.run(
@@ -1392,7 +1410,17 @@ defmodule SymphonyElixir.Orchestrator do
       )
     end
 
-    case RunLauncher.start(launcher, %{fun: fun, spec: spec}, []) do
+    run = %{
+      issue: issue,
+      attempt: attempt,
+      worker_host: worker_host,
+      route: route,
+      account: account,
+      run_id: run_id,
+      epoch: epoch
+    }
+
+    case start_run(launcher, run, issue_config, fun) do
       {:ok, pid, run_ref} ->
         ref = Process.monitor(pid)
 
@@ -1404,16 +1432,7 @@ defmodule SymphonyElixir.Orchestrator do
           new_running_entry(issue, pid, ref, worker_host, attempt, route, account)
           |> Map.merge(%{run_id: run_id, epoch: epoch, launcher: launcher, run_ref: run_ref})
 
-        :ok =
-          RunRegistry.record(issue.id, %{
-            run_id: run_id,
-            attempt: running_entry.retry_attempt,
-            epoch: epoch,
-            launcher: launcher,
-            ref: run_ref,
-            started_at_unix_ms: DateTime.to_unix(running_entry.started_at, :millisecond),
-            metadata: run_registry_metadata(running_entry)
-          })
+        :ok = RunRegistry.record(issue.id, registry_entry(running_entry))
 
         running = Map.put(state.running, issue.id, running_entry)
 
@@ -1437,6 +1456,98 @@ defmodule SymphonyElixir.Orchestrator do
         )
     end
   end
+
+  defp registry_entry(running_entry) do
+    %{
+      run_id: running_entry.run_id,
+      attempt: running_entry.retry_attempt,
+      epoch: running_entry.epoch,
+      launcher: running_entry.launcher,
+      ref: running_entry.run_ref,
+      started_at_unix_ms: DateTime.to_unix(running_entry.started_at, :millisecond),
+      metadata: run_registry_metadata(running_entry)
+    }
+  end
+
+  # The local launcher gets the run function exactly as before; only a process
+  # launcher needs (and pays for) the run spec, and only it can fail building it.
+  defp start_run(launcher, run, issue_config, fun) do
+    if process_launcher?(launcher) do
+      start_process_run(launcher, run, issue_config, fun)
+    else
+      RunLauncher.start(launcher, fun, [])
+    end
+  end
+
+  defp start_process_run(launcher, run, issue_config, fun) do
+    case build_run_spec(run, issue_config) do
+      {:ok, spec} ->
+        # Recorded before the runner starts: a runner's first events must find
+        # its run, since the runner treats an unknown run as fenced.
+        pending =
+          new_running_entry(run.issue, nil, nil, run.worker_host, run.attempt, run.route, run.account)
+          |> Map.merge(%{run_id: run.run_id, epoch: run.epoch, launcher: launcher, run_ref: "pending:" <> run.run_id})
+
+        :ok = RunRegistry.record(run.issue.id, registry_entry(pending))
+
+        case RunLauncher.start(launcher, %{fun: fun, spec: spec}, []) do
+          {:ok, _pid, _run_ref} = started ->
+            started
+
+          {:error, _reason} = error ->
+            RunRegistry.delete(run.issue.id)
+            delete_run_spec(run.run_id)
+            error
+        end
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp build_run_spec(run, issue_config) do
+    {:ok, run_spec(run.issue, run.attempt, run.worker_host, run.route, issue_config, run.account, run.run_id, run.epoch)}
+  rescue
+    error -> {:error, {:run_spec_failed, Exception.message(error)}}
+  end
+
+  defp process_launcher?(launcher) when is_atom(launcher) and not is_nil(launcher) do
+    Code.ensure_loaded?(launcher) and function_exported?(launcher, :start_process, 2)
+  end
+
+  defp process_launcher?(_launcher), do: false
+
+  # Stops a process run's OS process (when `stop?`) and deletes its spec, which
+  # holds the run token. `stop/1` can wait for the process to exit, so it runs
+  # in a task and the orchestrator never blocks on it.
+  defp cleanup_process_run(%{launcher: launcher, run_ref: run_ref} = running_entry, stop?)
+       when is_binary(run_ref) do
+    if process_launcher?(launcher) do
+      run_id = Map.get(running_entry, :run_id)
+      run_async(fn -> stop_and_forget_run(launcher, run_ref, run_id, stop?) end)
+    end
+
+    :ok
+  end
+
+  defp cleanup_process_run(_running_entry, _stop?), do: :ok
+
+  defp stop_and_forget_run(launcher, run_ref, run_id, stop?) do
+    if stop?, do: launcher_stop(launcher, run_ref)
+    delete_run_spec(run_id)
+  end
+
+  defp run_async(fun) do
+    case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fun) do
+      {:ok, _pid} -> :ok
+      _error -> spawn(fun)
+    end
+
+    :ok
+  end
+
+  defp delete_run_spec(run_id) when is_binary(run_id), do: RunSpec.delete(run_id)
+  defp delete_run_spec(_run_id), do: :ok
 
   defp run_spec(issue, attempt, worker_host, route, issue_config, account, run_id, epoch) do
     settings = issue_config.settings
@@ -1631,34 +1742,57 @@ defmodule SymphonyElixir.Orchestrator do
 
     Enum.reduce(RunRegistry.load(), state, fn {issue_id, entry}, acc ->
       launcher = entry_launcher(entry.launcher, current_launcher)
+      alive? = launcher_alive?(launcher, entry.ref)
 
-      if launcher_alive?(launcher, entry.ref) do
-        adopt_run(acc, issue_id, entry, launcher)
-      else
-        retry_recovered_run(acc, issue_id, entry)
+      # A run whose finished event the controller already applied (or that its
+      # runner wrote to the outbox before dying) has ended; it is never adopted
+      # or retried as interrupted.
+      case entry.finished || (not alive? && outbox_finished_reason(entry.run_id)) do
+        reason when is_binary(reason) -> recover_finished_run(acc, issue_id, entry, launcher, reason, alive?)
+        _ when alive? -> adopt_run(acc, issue_id, entry, launcher)
+        _ -> retry_recovered_run(acc, issue_id, entry)
       end
     end)
   end
 
-  defp adopt_run(%State{} = state, issue_id, entry, launcher) do
-    issue = recovered_issue(issue_id, entry.metadata)
+  defp outbox_finished_reason(run_id) do
+    run_id |> RunSpec.dir() |> RunOutbox.finished_reason()
+  end
 
+  defp recover_finished_run(%State{} = state, issue_id, entry, launcher, reason, alive?) do
+    RunRegistry.delete(issue_id)
+    running_entry = recovered_running_entry(issue_id, entry, launcher, nil, nil)
+    # A finished runner exits by itself; one still alive is stopped anyway.
+    cleanup_process_run(running_entry, alive?)
+
+    Logger.info("Recovered finished run issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} run_id=#{entry.run_id} reason=#{inspect(reason)}")
+
+    state
+    |> claim_issue(issue_id)
+    |> schedule_after_run_exit(issue_id, running_entry, RunWatcher.exit_reason(reason))
+  end
+
+  defp recovered_running_entry(issue_id, entry, launcher, pid, ref) do
+    issue = recovered_issue(issue_id, entry.metadata)
+    backend = entry.metadata[:backend] || Config.agent_backend()
+    route = %AgentRoute{backend: backend, effort: entry.metadata[:effort], warnings: []}
+
+    new_running_entry(issue, pid, ref, entry.metadata[:worker_host], entry.attempt, route, nil)
+    |> Map.merge(%{
+      run_id: entry.run_id,
+      epoch: entry.epoch,
+      launcher: launcher,
+      run_ref: entry.ref,
+      started_at: recovered_started_at(entry.started_at_unix_ms),
+      workspace_path: entry.metadata[:workspace_path]
+    })
+  end
+
+  defp adopt_run(%State{} = state, issue_id, entry, launcher) do
     case RunWatcher.start(%{run_id: entry.run_id, issue_id: issue_id}, entry.ref, launcher: launcher) do
       {:ok, watcher_pid} ->
         ref = Process.monitor(watcher_pid)
-        backend = entry.metadata[:backend] || Config.agent_backend()
-        route = %AgentRoute{backend: backend, effort: entry.metadata[:effort], warnings: []}
-
-        running_entry =
-          new_running_entry(issue, watcher_pid, ref, entry.metadata[:worker_host], entry.attempt, route, nil)
-          |> Map.merge(%{
-            run_id: entry.run_id,
-            epoch: entry.epoch,
-            launcher: launcher,
-            run_ref: entry.ref,
-            started_at: recovered_started_at(entry.started_at_unix_ms),
-            workspace_path: entry.metadata[:workspace_path]
-          })
+        running_entry = recovered_running_entry(issue_id, entry, launcher, watcher_pid, ref)
 
         Logger.info(
           "Adopted live run issue_id=#{issue_id} issue_identifier=#{entry.metadata[:identifier] || issue_id} attempt=#{entry.attempt} run_id=#{entry.run_id} launcher=#{inspect(launcher)} ref=#{entry.ref}"
@@ -1669,7 +1803,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, reason} ->
         Logger.error("Unable to adopt live run issue_id=#{issue_id} run_id=#{entry.run_id}: #{inspect(reason)}; stopping it and retrying")
-        launcher_stop(launcher, entry.ref)
+        stop_unadopted_run(launcher, entry.ref)
         retry_recovered_run(state, issue_id, entry)
     end
   end
@@ -1699,6 +1833,14 @@ defmodule SymphonyElixir.Orchestrator do
     Code.ensure_loaded?(launcher) and function_exported?(launcher, :alive?, 1) and launcher.alive?(ref)
   rescue
     _error -> false
+  end
+
+  defp stop_unadopted_run(launcher, ref) do
+    if process_launcher?(launcher) do
+      run_async(fn -> launcher_stop(launcher, ref) end)
+    else
+      launcher_stop(launcher, ref)
+    end
   end
 
   defp launcher_stop(launcher, ref) do

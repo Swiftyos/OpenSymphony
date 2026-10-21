@@ -5,7 +5,9 @@ defmodule SymphonyElixir.Runner do
   It reads the run spec, starts the reduced runner application (see
   `SymphonyElixir.Application`), runs the issue through `AgentRunner.run/3`
   with `SymphonyElixir.RunHost.Remote`, then posts a `finished` event and
-  flushes the outbox before returning. The CLI maps `:ok` to exit status 0 and
+  flushes the outbox before returning: it waits (up to
+  `agent.runner_finish_flush_ms`, an hour by default) until the controller has
+  acknowledged the event or fenced the run. The CLI maps `:ok` to exit status 0 and
   an error to 1. Everything the run does reaches the controller through the
   runner protocol; see `docs/durable-runs.md`.
   """
@@ -15,13 +17,12 @@ defmodule SymphonyElixir.Runner do
   alias SymphonyElixir.Accounts
   alias SymphonyElixir.AgentRoute
   alias SymphonyElixir.AgentRunner
+  alias SymphonyElixir.Config
   alias SymphonyElixir.IssueConfig
   alias SymphonyElixir.RunHost.Remote
   alias SymphonyElixir.RunnerCommandPoller
   alias SymphonyElixir.RunOutbox
   alias SymphonyElixir.RunSpec
-
-  @flush_timeout_ms 10_000
 
   @doc "Runs the spec, returning `:ok` or an error; never raises for a failed run."
   @spec run(Path.t()) :: :ok | {:error, term()}
@@ -135,15 +136,25 @@ defmodule SymphonyElixir.Runner do
               {:error, message}
           end
         after
-          RunOutbox.flush(@flush_timeout_ms)
+          flush_finished()
         end
 
       {:error, reason} ->
         message = "runner config failed: #{inspect(reason, limit: 10)}"
         finish(host, message)
+        flush_finished()
         {:error, message}
     end
   end
+
+  # The run must not end with its `finished` event unacknowledged: a lost
+  # finished turns a completed run into an interrupted one. The outbox keeps
+  # retrying with backoff while the controller is down; the wait ends when
+  # everything is acked, when the outbox is fenced (409/404 stop it), or after
+  # `agent.runner_finish_flush_ms`.
+  defp flush_finished, do: RunOutbox.flush(finish_flush_ms())
+
+  defp finish_flush_ms, do: Config.agent_runner_finish_flush_ms()
 
   # The spec carries everything the controller resolved at dispatch: the
   # project route, its workspace root and the backend/effort. The runner uses

@@ -6,6 +6,7 @@ defmodule SymphonyElixir.RunOutboxTest do
 
   import ExUnit.CaptureLog
 
+  alias SymphonyElixir.RunEvents
   alias SymphonyElixir.RunnerCommands
   alias SymphonyElixir.RunnerTestSupport, as: Support
   alias SymphonyElixir.RunOutbox
@@ -164,6 +165,48 @@ defmodule SymphonyElixir.RunOutboxTest do
     after
       Process.flag(:trap_exit, false)
     end
+  end
+
+  test "an unknown run (404) fences the outbox like a stale epoch", %{root: root, endpoint: endpoint} do
+    name = :"outbox-#{System.unique_integer([:positive])}"
+    Process.flag(:trap_exit, true)
+
+    {:ok, outbox} =
+      RunOutbox.start_link(
+        name: name,
+        run_id: "run-unknown",
+        base_url: endpoint.url,
+        token: RunToken.sign("run-unknown", 1),
+        dir: Path.join(root, "runs/run-unknown")
+      )
+
+    try do
+      capture_log(fn ->
+        RunOutbox.append(outbox, "heartbeat", %{})
+        assert_receive {:EXIT, ^outbox, {:shutdown, :run_not_found}}, 5_000
+      end)
+    after
+      Process.flag(:trap_exit, false)
+    end
+  end
+
+  test "finished_reason reads a run dir's outbox file, acknowledged events included", %{root: root} do
+    dir = Path.join(root, "runs/run-finished")
+    File.mkdir_p!(dir)
+    file = Path.join(dir, "outbox.jsonl")
+
+    assert RunOutbox.finished_reason(dir) == nil
+    assert RunOutbox.finished_reason(nil) == nil
+
+    File.write!(file, Jason.encode!(%{seq: 1, type: "heartbeat", data: RunEvents.encode(%{})}) <> "\nnot json\n")
+    assert RunOutbox.finished_reason(dir) == nil
+
+    File.write!(file, Jason.encode!(%{seq: 2, type: "finished", data: RunEvents.encode(%{reason: "boom"})}) <> "\n", [:append])
+    assert RunOutbox.finished_reason(dir) == "boom"
+
+    # A finished event without a readable reason still means the run ended.
+    File.write!(file, Jason.encode!(%{seq: 1, type: "finished", data: "!!"}) <> "\n")
+    assert RunOutbox.finished_reason(dir) == "finished"
   end
 
   test "an unconfigured outbox ignores events and flushes immediately", %{root: root} do

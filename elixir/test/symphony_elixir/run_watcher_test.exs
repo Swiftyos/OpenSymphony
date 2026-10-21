@@ -135,6 +135,75 @@ defmodule SymphonyElixir.RunWatcherTest do
     assert :ok = RunWatcher.stop(run_id)
   end
 
+  test "a launched runner gone at the startup check exits {:launch_failed, log_tail}", %{run_id: run_id} do
+    dir = Path.join(System.tmp_dir!(), "run-watcher-log-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(dir)
+    on_exit(fn -> File.rm_rf(dir) end)
+    log = Path.join(dir, "runner.log")
+    File.write!(log, String.duplicate("x", 3_000) <> "sh: no-such-runner: not found\n")
+
+    assert {:ok, watcher} =
+             RunWatcher.start(%{run_id: run_id, issue_id: "issue-1"}, "fake:" <> run_id,
+               launcher: FakeLauncher,
+               log: log,
+               startup_check_ms: 20,
+               poll_interval_ms: 10,
+               lost_grace_ms: 10_000
+             )
+
+    monitor = Process.monitor(watcher)
+    assert_receive {:DOWN, ^monitor, :process, ^watcher, {:launch_failed, tail}}, 1_000
+    assert byte_size(tail) == 2_000
+    assert tail =~ "not found"
+
+    # No log at all still fails the launch, with an empty tail.
+    other = run_id <> "-nolog"
+
+    assert {:ok, watcher} =
+             RunWatcher.start(%{run_id: other, issue_id: "issue-1"}, "fake:" <> other,
+               launcher: FakeLauncher,
+               log: Path.join(dir, "missing.log"),
+               startup_check_ms: 0
+             )
+
+    monitor = Process.monitor(watcher)
+    assert_receive {:DOWN, ^monitor, :process, ^watcher, {:launch_failed, ""}}, 1_000
+
+    # A short log is kept whole.
+    short = run_id <> "-short"
+    File.write!(Path.join(dir, "short.log"), "exit 127\n")
+
+    assert {:ok, watcher} =
+             RunWatcher.start(%{run_id: short, issue_id: "issue-1"}, "fake:" <> short,
+               launcher: FakeLauncher,
+               log: Path.join(dir, "short.log"),
+               startup_check_ms: 0
+             )
+
+    monitor = Process.monitor(watcher)
+    assert_receive {:DOWN, ^monitor, :process, ^watcher, {:launch_failed, "exit 127\n"}}, 1_000
+  end
+
+  test "a launched runner alive at the startup check is then polled as usual", %{run_id: run_id} do
+    ref = "fake:" <> run_id
+    FakeLauncher.set(ref, true)
+
+    assert {:ok, watcher} =
+             RunWatcher.start(%{run_id: run_id, issue_id: "issue-1"}, ref,
+               launcher: FakeLauncher,
+               log: "/nonexistent/runner.log",
+               startup_check_ms: 20,
+               poll_interval_ms: 10,
+               lost_grace_ms: 30
+             )
+
+    monitor = Process.monitor(watcher)
+    refute_receive {:DOWN, ^monitor, _, _, _}, 100
+    # Gone after a good start is a lost runner, not a failed launch.
+    FakeLauncher.set(ref, false)
+    assert_receive {:DOWN, ^monitor, :process, ^watcher, :runner_lost}, 1_000
+  end
+
   test "a launcher that raises is treated as gone" do
     run_id = "run-raises-#{System.unique_integer([:positive])}"
 
@@ -151,7 +220,7 @@ defmodule SymphonyElixir.RunWatcherTest do
   end
 
   test "stopping a pid that is not a GenServer is harmless" do
-    pid = spawn(fn -> Process.sleep(1_000) end)
+    pid = spawn(fn -> Process.sleep(5_000) end)
     assert :ok = RunWatcher.stop(pid)
     Process.exit(pid, :kill)
   end
