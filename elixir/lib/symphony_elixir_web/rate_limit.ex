@@ -14,7 +14,9 @@ defmodule SymphonyElixirWeb.RateLimit do
   @limits %{
     login: {20, 15 * 60_000},
     signup: {5, 60 * 60_000},
-    reset: {10, 60 * 60_000}
+    reset: {10, 60 * 60_000},
+    # The MCP endpoint, per client IP; generous for busy agents.
+    mcp: {600, 60_000}
   }
 
   @spec init(atom()) :: atom()

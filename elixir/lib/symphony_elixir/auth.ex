@@ -321,6 +321,52 @@ defmodule SymphonyElixir.Auth do
   def can_grant?(%User{team_admin: admin_of} = user, scope) when is_binary(scope), do: can_control?(user) or scope in admin_of
   def can_grant?(user, _scope), do: can_control?(user)
 
+  @doc """
+  Whether the user may give an MCP token access to `resource`: `"*"`
+  (everything) for admins only, a team key for its members, `project:<slug>`
+  for people who may work in that project. Admins may pick any team or project.
+  """
+  @spec token_resource_allowed?(User.t() | nil, String.t()) :: boolean()
+  def token_resource_allowed?(user, "*"), do: can_control?(user)
+  def token_resource_allowed?(%User{local: true}, _resource), do: true
+  def token_resource_allowed?(%User{admin: true}, _resource), do: true
+
+  def token_resource_allowed?(%User{teams: teams, projects: projects}, "project:" <> slug),
+    do: slug in projects or Enum.any?(teams, &(&1.key in project_teams(slug)))
+
+  def token_resource_allowed?(%User{teams: teams}, team) when is_binary(team), do: Enum.any?(teams, &(&1.key == team))
+  def token_resource_allowed?(_user, _resource), do: false
+
+  @doc """
+  The user as an MCP token limited to `resources` sees them: `["*"]` keeps an
+  admin's full access; otherwise only the listed teams and projects the user
+  may still work in, and never admin rights. Fails when nothing is left, or
+  when a `"*"` token's owner is no longer an admin.
+  """
+  @spec restrict_to(User.t(), [String.t()]) :: {:ok, User.t()} | {:error, :scope_unavailable}
+  def restrict_to(user, ["*"]), do: if(can_control?(user), do: {:ok, user}, else: {:error, :scope_unavailable})
+
+  def restrict_to(user, resources) do
+    case Enum.filter(resources, &(&1 != "*" and token_resource_allowed?(user, &1))) do
+      [] ->
+        {:error, :scope_unavailable}
+
+      allowed ->
+        {project_scopes, teams} = Enum.split_with(allowed, &String.starts_with?(&1, "project:"))
+        known = Map.new(user.teams, &{&1.key, &1})
+
+        {:ok,
+         %{
+           user
+           | admin: false,
+             local: false,
+             teams: Enum.map(teams, &(known[&1] || %{id: nil, key: &1, name: nil})),
+             team_admin: Enum.filter(user.team_admin, &(&1 in teams)),
+             projects: Enum.map(project_scopes, &String.replace_prefix(&1, "project:", ""))
+         }}
+    end
+  end
+
   defp project_teams(slug), do: get_in(UsageLedger.projects(), [slug, :teams]) || []
 
   @doc false

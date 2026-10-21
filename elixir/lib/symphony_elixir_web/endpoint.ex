@@ -35,6 +35,7 @@ defmodule SymphonyElixirWeb.Endpoint do
   )
 
   plug(:proxy_headers)
+  plug(:mcp_host_only)
   plug(:local_host_only)
   plug(Plug.MethodOverride)
   plug(Plug.Head)
@@ -43,6 +44,7 @@ defmodule SymphonyElixirWeb.Endpoint do
 
   defp proxy_headers(conn, opts), do: SymphonyElixirWeb.RequestGuards.proxy_headers(conn, opts)
   defp local_host_only(conn, opts), do: SymphonyElixirWeb.RequestGuards.local_host_only(conn, opts)
+  defp mcp_host_only(conn, opts), do: SymphonyElixirWeb.RequestGuards.mcp_host_only(conn, opts)
 
   # Built per request so the cookie is marked Secure whenever the request is https
   # (directly or via a trusted proxy).

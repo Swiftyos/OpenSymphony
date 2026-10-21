@@ -831,6 +831,83 @@ Sign-in follows where the server listens. On a loopback address (the default `12
 there is no sign-in and you are the local operator. On any other address, accounts are
 required. Override this with `server.auth: local | accounts`.
 
+### MCP endpoint for agents
+
+Agents (Claude Code, Codex, n8n, or anything that speaks MCP) can watch and steer Symphony
+through an [MCP](https://modelcontextprotocol.io) server at `/mcp` (Streamable HTTP, JSON
+responses, stateless). It's off until you turn it on:
+
+```yaml
+server:
+  mcp:
+    enabled: true
+    # host: mcp.symphony.example.com   # a hostname that serves only /mcp (see below)
+    # allowed_origins: []               # browser origins allowed to call it (agents send none)
+    # token_max_days: 90                # longest token lifetime; every token expires
+```
+
+**Tokens.** Each person creates their own on their **Account** page (`/account`). A token has a name,
+read-only or read-and-write access, what it can reach, and a lifetime. It can reach either specific
+teams and projects, or **everything**, which is for admins only. Members can pick only the teams they
+belong to and the projects they work in. A token limited to teams or projects never has admin
+rights, even if its owner is an admin, so it can't edit the default flow or force agent-only moves.
+An "everything" token stops working if its owner stops being an admin. The token is shown once. Symphony stores only its SHA-256, in
+`~/.symphony/mcp_tokens.json` (0600). A token acts as its owner and can never do more than they
+can. Every request re-checks the account, so disabling someone, or them losing a Linear team or
+admin rights, applies to their tokens at once. Revoke a token from the same page. Without sign-in
+(`local` mode), the local operator gets the same page at `/account`. Their tokens act as the local
+operator and stop working if Symphony switches to accounts.
+
+Connect Claude Code:
+
+```bash
+claude mcp add --transport http symphony https://symphony.example.com/mcp \
+  --header "Authorization: Bearer symp_..."
+```
+
+**Tools.** Read: `symphony_status`, `list_flows`, `get_flow`, `list_issues`, `get_issue`,
+`get_transcript`. Write (needs a read-and-write token): `save_flow` (version-checked like the
+editor: a stale `base_version` returns the current one), `set_stage_control` (paused,
+max_agents, backend, effort, approval), `set_autopilot`, `reset_flow`, `move_issue`,
+`review_issue`, `send_agent_message`, `refresh`. Results are trimmed by the same rules as the
+dashboard. Flow and stage changes and moves follow `server.controls`, and the Linear comments and
+flow history name the person and the token ("mia via MCP (ops bot)"). Every tool call is logged
+with the user and token.
+
+**Security.** `/mcp` never accepts the dashboard cookie or `server.api_token`, only MCP tokens.
+That's true in every auth mode, so it's safe to expose. Requests that carry an `Origin` header
+(browsers) must come from `server.public_url` or `server.mcp.allowed_origins`, which stops web
+pages and DNS rebinding from driving it. Each client IP gets 600 requests a minute. Tokens are
+256-bit random values, so the limit is about load, not guessing.
+
+#### Exposing /mcp without a sign-in proxy (e.g. Google IAP)
+
+If the dashboard sits behind an identity-aware proxy such as Google Cloud IAP, agents can't get
+through its browser sign-in. Give MCP its own route that skips the proxy and let Symphony's
+tokens guard it:
+
+1. Set `server.mcp.host` to a dedicated hostname, e.g. `mcp.symphony.example.com`. Requests for
+   that host only reach `/mcp`. Everything else, including the dashboard, login and the JSON
+   API, answers `404`, so a route that forwards every path still can't expose the dashboard.
+2. On the load balancer, add a host rule for that hostname pointing at a **second backend
+   service** for the same instances (or NEG) with IAP **off**. IAP is per backend service, so
+   the dashboard's backend keeps IAP on. Better still, route only the path `/mcp` on that host.
+3. Keep TLS on that hostname (a managed certificate covering both names), keep
+   `server.trust_proxy: true` and `server.public_url` as they are, and optionally add a Cloud
+   Armor policy (rate limiting, geo or IP allow-lists) to the MCP backend service.
+
+On GCP that comes down to roughly this:
+
+```bash
+gcloud compute backend-services create symphony-mcp --global --protocol=HTTP \
+  --health-checks=symphony-hc --port-name=http
+gcloud compute backend-services add-backend symphony-mcp --global \
+  --instance-group=symphony-ig --instance-group-zone=ZONE
+# IAP stays enabled on the dashboard's backend service only.
+gcloud compute url-maps add-path-matcher symphony-lb --path-matcher-name=mcp \
+  --new-hosts=mcp.symphony.example.com --default-service=symphony-mcp
+```
+
 ### Cost
 
 Token usage is recorded per project, team, task, harness, and model in

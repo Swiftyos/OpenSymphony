@@ -692,10 +692,45 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule ServerMcp do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      # Off by default: /mcp answers 404 until this is true.
+      field(:enabled, :boolean, default: false)
+      # Optional hostname that serves only /mcp (e.g. mcp.symphony.example.com),
+      # so a proxy route without browser sign-in in front (no IAP) can't reach
+      # the dashboard even if it forwards every path.
+      field(:host, :string)
+      # Browser origins allowed to call /mcp. Agents don't send Origin; any
+      # request that does must match one of these, or server.public_url.
+      field(:allowed_origins, {:array, :string}, default: [])
+      # Longest lifetime of an MCP token, in days. Every token expires.
+      field(:token_max_days, :integer, default: 90)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:enabled, :host, :allowed_origins, :token_max_days], empty_values: [])
+      |> update_change(:host, &normalize_host/1)
+      |> validate_format(:host, ~r/^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$/, message: "must be a bare hostname such as mcp.symphony.example.com")
+      |> validate_number(:token_max_days, greater_than: 0, less_than_or_equal_to: 366)
+    end
+
+    # Only strings reach this (cast already checked the type).
+    defp normalize_host(host), do: host |> String.trim() |> String.downcase() |> then(&if(&1 == "", do: nil, else: &1))
+  end
+
   defmodule Server do
     @moduledoc false
     use Ecto.Schema
     import Ecto.Changeset
+
+    alias SymphonyElixir.Config.Schema.ServerMcp
 
     @primary_key false
     embedded_schema do
@@ -718,6 +753,8 @@ defmodule SymphonyElixir.Config.Schema do
       # Signs and encrypts session cookies. nil = generated once and kept in
       # ~/.symphony/secret_key_base so sessions survive restarts.
       field(:secret_key_base, :string)
+      # The MCP endpoint for agents (/mcp, bearer tokens); see ServerMcp.
+      embeds_one(:mcp, ServerMcp, on_replace: :update, defaults_to_struct: true)
     end
 
     @server_fields [:port, :host, :controls, :auth, :secret_key_base, :api_token, :trust_proxy, :public_url]
@@ -731,6 +768,7 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_length(:api_token, min: 24)
       |> validate_length(:secret_key_base, min: 64)
       |> validate_number(:port, greater_than_or_equal_to: 0)
+      |> cast_embed(:mcp, with: &ServerMcp.changeset/2)
     end
 
     defp validate_public_url(field, url) do

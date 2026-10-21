@@ -41,6 +41,9 @@ The experimental Elixir implementation currently supports:
 - A live dashboard that shows and steers the factory, with cost tracking by project, team, task, and harness.
 - Per-issue agent transcripts (messages, commands, edits, thinking), and messages to the agent
   working on an issue, delivered into a running Codex turn or at the start of the next turn.
+- An MCP endpoint (`/mcp`) so your own agents can watch the factory and edit flows, move issues,
+  and message agents with per-person, scoped, expiring tokens. It's safe to expose without a
+  sign-in proxy.
 
 If you want to try those features, start with [elixir/README.md](elixir/README.md), which now
 documents backend support, multi-project setup, and label-routing behavior in detail.

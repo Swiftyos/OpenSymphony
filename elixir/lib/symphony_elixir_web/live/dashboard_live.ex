@@ -15,7 +15,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   import SymphonyElixirWeb.Topbar
   require Logger
 
-  alias SymphonyElixir.{AgentInbox, Auth, Config, FactoryControls, IssueStage, Orchestrator, Tracker, Transcript}
+  alias SymphonyElixir.{AgentInbox, Auth, Config, FactoryControls, IssueMoves, IssueStage, Transcript}
   alias SymphonyElixir.Factory.{Assistant, Definition, Store}
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.UsageLedger
@@ -127,7 +127,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
     reply =
       with :ok <- authorize(socket, &Auth.can_edit_factory?(&1, team), :not_team_editor),
            {:ok, saved} <- Store.put(team, definition, version, actor(socket)) do
-        sync_stage_labels(team, saved)
+        IssueMoves.sync_stage_labels(team, saved)
         ObservabilityPubSub.broadcast_update()
         %{ok: true, definition: saved}
       else
@@ -289,102 +289,21 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   defp review_issue(socket, id, verdict) do
-    approval = IssueStage.approval_label()
-
-    with :ok <- authorize(socket, fn _user -> true end, :signed_out),
-         {:ok, %Issue{} = issue} <- fetch_movable_issue(id),
-         :ok <- authorize(socket, &Auth.can_move_issue?(&1, issue.identifier, issue.project_slug), :not_team_member),
-         true <- IssueStage.awaiting_approval?(issue) || {:error, :not_awaiting_approval},
-         definition = IssueStage.definition(issue),
-         %{} = from <- Definition.stage(definition, UsageLedger.previous_node(issue.identifier)) || {:error, :unknown_origin},
-         target = if(verdict == :approved, do: IssueStage.stage_definition(issue), else: from),
-         :ok <- Tracker.set_stage(issue.id, target["linear_state"], target["label"], drop_labels: [approval]) do
-      Store.record_review(IssueStage.flow_scope(issue) || Store.default_team(), from["id"], verdict, actor(socket))
-      if verdict == :sent_back, do: record_move(issue.id, socket.assigns.current_user, target)
-      labels = issue.labels |> replace_stage_label(target["label"]) |> Enum.reject(&(String.downcase(&1) == approval))
-      UsageLedger.observe_issue(%{issue | state: target["linear_state"], labels: labels})
-      if verdict == :approved, do: SymphonyElixir.StageResult.finished(issue, target, definition)
-
-      Orchestrator.request_refresh()
-      ObservabilityPubSub.broadcast_update()
-      :ok
+    with {:ok, user} <- authorize(socket, fn _user -> true end, :signed_out) |> with_user(socket) do
+      IssueMoves.review(user, id, verdict, actor: actor(socket))
     end
   end
 
   defp move_issue(socket, id, to) do
-    with :ok <- authorize(socket, fn _user -> true end, :signed_out),
-         {:ok, %Issue{} = issue} <- fetch_movable_issue(id),
-         :ok <- authorize(socket, &Auth.can_move_issue?(&1, issue.identifier, issue.project_slug), :not_team_member),
-         {:ok, target} <- allowed_move(socket, issue, to),
-         approval = IssueStage.approval_label(),
-         :ok <- Tracker.set_stage(issue.id, target["linear_state"], target["label"], drop_labels: [approval]) do
-      record_move(issue.id, socket.assigns.current_user, target)
-      labels = issue.labels |> replace_stage_label(target["label"]) |> Enum.reject(&(String.downcase(&1) == approval))
-      UsageLedger.observe_issue(%{issue | state: target["linear_state"], labels: labels})
-      SymphonyElixir.StageResult.finished(issue, target, IssueStage.definition(issue))
-
-      Orchestrator.request_refresh()
-      ObservabilityPubSub.broadcast_update()
-      :ok
+    with {:ok, user} <- authorize(socket, fn _user -> true end, :signed_out) |> with_user(socket) do
+      IssueMoves.move(user, id, to, actor: actor(socket))
     end
   end
 
-  # Members make the person-moved connections of their flow; admins can make
-  # any connection the flow defines.
-  defp allowed_move(socket, issue, to) do
-    definition = IssueStage.definition(issue)
-    from = IssueStage.stage(issue)
-
-    with %{} = target <- Definition.stage(definition, to) || {:error, :unknown_target},
-         %{} = transition <- Enum.find(definition["transitions"], &(&1["from"] == from and &1["to"] == to)) || {:error, :not_a_move} do
-      {:ok, user} = UserAuth.refresh_user(socket)
-
-      if transition["by"] == "human" or Auth.can_control?(user), do: {:ok, target}, else: {:error, :agent_move}
-    end
-  end
-
-  # Linear labels belong to teams: a project's flow needs them in every team
-  # whose issues the project holds.
-  defp sync_stage_labels(scope, definition) do
-    labels = definition["stages"] |> Enum.map(& &1["label"]) |> Enum.filter(&is_binary/1)
-
-    teams =
-      case scope do
-        "project:" <> slug -> get_in(UsageLedger.projects(), [slug, :teams]) || []
-        team -> if team == Store.default_team(), do: [], else: [team]
-      end
-
-    if labels != [], do: Enum.each(teams, &sync_team_labels(&1, labels))
-    :ok
-  end
-
-  defp sync_team_labels(team, labels), do: Task.start(fn -> log_label_sync(team, Tracker.ensure_stage_labels(team, labels)) end)
-
-  defp log_label_sync(_team, {:ok, []}), do: :ok
-  defp log_label_sync(team, {:ok, created}), do: Logger.info("Created Linear labels team=#{team} labels=#{Enum.join(created, ",")}")
-  defp log_label_sync(team, {:error, reason}), do: Logger.warning("Linear label sync failed team=#{team} reason=#{inspect(reason)}")
+  defp with_user(:ok, socket), do: UserAuth.refresh_user(socket)
+  defp with_user(error, _socket), do: error
 
   defp actor(socket), do: socket.assigns.current_user.username || "local"
-
-  # Moves are made with Symphony's Linear key, so leave a note saying who did it.
-  defp record_move(_issue_id, %Auth.User{local: true}, _target), do: :ok
-
-  defp record_move(issue_id, user, target) do
-    where = if target["label"], do: "#{target["name"]} (#{target["linear_state"]} · #{IssueStage.label_prefix()}/#{target["label"]})", else: "#{target["name"]} (#{target["linear_state"]})"
-
-    body = "**Agent Factory:** #{escape_markdown(user.name)} (@#{escape_markdown(user.username)}) moved this to **#{escape_markdown(where)}** from the dashboard."
-
-    case Tracker.create_comment(issue_id, body) do
-      :ok ->
-        :ok
-
-      {:error, reason} ->
-        Logger.warning("Move comment failed issue_id=#{issue_id} reason=#{inspect(reason)}")
-    end
-  end
-
-  # Linear display names are user-controlled; keep them from adding links or formatting.
-  defp escape_markdown(text), do: String.replace(to_string(text), ~r/([\\`*_{}\[\]()#+\-.!|<>~])/, "\\\\\\1")
 
   # Server enforces every permission; the client only hides what the user can't use.
   # Checks against a freshly resolved user, so a disabled account or a lost
@@ -413,50 +332,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
     |> Jason.encode!()
   end
 
-  defp fetch_movable_issue(id) do
-    case Tracker.fetch_issue_states_by_ids([id]) do
-      {:ok, [%Issue{} = issue | _]} ->
-        if in_configured_project?(issue), do: {:ok, issue}, else: {:error, :issue_not_found}
-
-      {:ok, []} ->
-        {:error, :issue_not_found}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
-  # Symphony may only move issues from the Linear projects it is configured for.
-  defp in_configured_project?(%Issue{project_slug: slug}) do
-    case Config.linear_project_routes() |> Enum.map(& &1.slug) do
-      [] -> true
-      slugs -> slug in slugs
-    end
-  end
-
-  defp replace_stage_label(labels, stage) do
-    stage = stage && String.downcase(stage)
-    prefix = IssueStage.label_prefix() <> "/"
-    kept = Enum.reject(labels, &String.starts_with?(String.downcase(&1), prefix))
-    if stage, do: kept ++ [prefix <> stage], else: kept
-  end
-
-  defp describe_error(:controls_disabled), do: "This dashboard is read-only (server.controls: false)."
-  defp describe_error(:not_admin), do: "Only Linear admins can do that."
-  defp describe_error(:not_team_editor), do: "Only this team's members and Linear admins can change its flow."
-  defp describe_error(:unknown_target), do: "That stage isn't in this team's flow."
-  defp describe_error(:not_a_move), do: "That move isn't a connection in this team's flow."
-  defp describe_error(:agent_move), do: "Agents make that move. Only admins can force it."
-  defp describe_error(:not_awaiting_approval), do: "That issue isn't waiting for approval any more."
-  defp describe_error(:unknown_origin), do: "Symphony doesn't know which stage that came from. Move it from its stage instead."
-  defp describe_error(:invalid_team), do: "That isn't a valid team."
-  defp describe_error(:not_team_member), do: "You can only move issues from teams you belong to in Linear."
-  defp describe_error({:stage_label_not_found, label}), do: "Create the Linear label #{label} first."
-  defp describe_error(:signed_out), do: "Your session ended. Sign in again."
-  defp describe_error(:pending), do: "Your session ended. Sign in again."
-  defp describe_error(:issue_not_found), do: "That issue isn't in a project this Symphony manages."
-  defp describe_error(:state_not_found), do: "That Linear state does not exist for this team."
-  defp describe_error(reason), do: inspect(reason)
+  defp describe_error(reason), do: IssueMoves.describe_error(reason)
 
   @impl true
   def render(assigns) do

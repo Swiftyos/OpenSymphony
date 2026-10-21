@@ -40,6 +40,9 @@ server:
   # api_token: $SYMPHONY_API_TOKEN   # bearer token for /api/v1/* and /metrics scrapers
   # trust_proxy: true    # behind a TLS proxy: use X-Forwarded-For / X-Forwarded-Proto
   # controls: false      # read-only dashboard for everyone
+  # mcp:                 # MCP endpoint for agents at /mcp (tokens from /account)
+  #   enabled: true
+  #   host: mcp.symphony.example.com   # serves only /mcp: route it around IAP
 
 agent:
   backend: codex

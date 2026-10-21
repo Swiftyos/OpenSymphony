@@ -27,6 +27,23 @@ defmodule SymphonyElixirWeb.Router do
     plug(:require_api_user)
   end
 
+  # MCP for agents: bearer tokens only, no cookies (see McpAuth).
+  pipeline :mcp do
+    plug(SymphonyElixirWeb.RateLimit, :mcp)
+    plug(SymphonyElixirWeb.McpAuth)
+  end
+
+  scope "/", SymphonyElixirWeb do
+    pipe_through(:mcp)
+
+    post("/mcp", McpController, :post)
+  end
+
+  scope "/", SymphonyElixirWeb do
+    match(:get, "/mcp", McpController, :method_not_allowed)
+    match(:delete, "/mcp", McpController, :method_not_allowed)
+  end
+
   scope "/", SymphonyElixirWeb do
     get("/dashboard.css", StaticAssetController, :dashboard_css)
     get("/factory.js", StaticAssetController, :factory_js)
@@ -60,6 +77,8 @@ defmodule SymphonyElixirWeb.Router do
 
     get("/account", AuthController, :account)
     post("/account/password", AuthController, :update_password)
+    post("/account/mcp-tokens", AuthController, :create_mcp_token)
+    post("/account/mcp-tokens/:id/revoke", AuthController, :revoke_mcp_token)
 
     live_session :signed_in, on_mount: {SymphonyElixirWeb.UserAuth, :require_user} do
       live("/", DashboardLive, :index)

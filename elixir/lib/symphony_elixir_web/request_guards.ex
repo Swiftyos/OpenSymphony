@@ -7,7 +7,11 @@ defmodule SymphonyElixirWeb.RequestGuards do
       so per-IP rate limits and the `Secure` cookie flag see the real client.
     * `local_host_only/2` - in `:local` auth mode (no sign-in) only answer
       requests addressed to localhost. Blocks DNS-rebinding pages from driving
-      the local operator's dashboard.
+      the local operator's dashboard. `/mcp` is exempt while enabled: it
+      always needs a token (`SymphonyElixirWeb.McpAuth`).
+    * `mcp_host_only/2` - requests addressed to `server.mcp.host` only reach
+      `/mcp`, so a proxy route for that host without sign-in in front (no IAP)
+      can't expose the dashboard, even if it forwards every path.
   """
 
   import Plug.Conn
@@ -33,9 +37,25 @@ defmodule SymphonyElixirWeb.RequestGuards do
       Application.get_env(:symphony_elixir, :enforce_local_host, true) != true -> conn
       Auth.mode() != :local -> conn
       conn.host in @local_hosts -> conn
+      mcp_request?(conn) and Config.settings!().server.mcp.enabled == true -> conn
       true -> conn |> send_resp(421, "Symphony without sign-in only answers on localhost.") |> halt()
     end
   end
+
+  @spec mcp_host_only(Plug.Conn.t(), term()) :: Plug.Conn.t()
+  def mcp_host_only(conn, _opts) do
+    case Config.settings!().server.mcp.host do
+      host when is_binary(host) ->
+        if String.downcase(conn.host) == host and not mcp_request?(conn),
+          do: conn |> send_resp(404, "Not found") |> halt(),
+          else: conn
+
+      _ ->
+        conn
+    end
+  end
+
+  defp mcp_request?(conn), do: conn.path_info == ["mcp"]
 
   @doc """
   WebSocket origins accepted for LiveView in local mode.

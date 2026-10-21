@@ -4422,3 +4422,54 @@ a.brand:hover {
   max-height: 560px;
   overflow-y: auto;
 }
+
+/* MCP tokens on the account page */
+.mcp-tokens {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line, rgba(0, 0, 0, 0.1));
+}
+
+.mcp-tokens code,
+.mcp-snippet {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.76rem;
+}
+
+.mcp-snippet {
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  border-radius: 9px;
+  background: var(--paper-2, rgba(0, 0, 0, 0.05));
+}
+
+.mcp-token-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+  font-size: 0.8rem;
+  color: var(--ink-2);
+}
+
+.login-link-button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--critical-ink);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.mcp-resources {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}

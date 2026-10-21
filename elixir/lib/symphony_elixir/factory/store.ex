@@ -179,7 +179,7 @@ defmodule SymphonyElixir.Factory.Store do
   Drops a scope's own definition so it inherits again (a project its team's
   flow, a team the `DEFAULT` flow, `DEFAULT` the built-in template).
   """
-  @spec reset_team(String.t()) :: :ok
+  @spec reset_team(String.t()) :: :ok | {:error, :invalid_team}
   def reset_team(team), do: GenServer.call(__MODULE__, {:reset_team, team})
 
   @doc """
