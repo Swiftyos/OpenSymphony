@@ -27,6 +27,7 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.Factory.Definition
   alias SymphonyElixir.Linear.Issue
 
+  @poll_timeout_multiplier 5
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
   # Slightly above the dashboard render interval so "checking now…" can render.
@@ -278,8 +279,7 @@ defmodule SymphonyElixir.Orchestrator do
           running_entry
           |> maybe_put_runtime_value(:worker_host, runtime_info[:worker_host])
           |> maybe_put_runtime_value(:workspace_path, runtime_info[:workspace_path])
-          |> maybe_put_runtime_value(:backend, runtime_info[:backend])
-          |> maybe_put_runtime_value(:effort, runtime_info[:effort])
+          |> put_route(runtime_info)
 
         notify_dashboard()
         {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
@@ -443,7 +443,7 @@ defmodule SymphonyElixir.Orchestrator do
           pid: task.pid,
           fingerprint: fingerprint,
           running_ids: running_ids,
-          timer_ref: start_task_timeout(task.ref)
+          timer_ref: start_task_timeout(task.ref, @poll_timeout_multiplier)
         }
     }
   end
@@ -775,11 +775,13 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp stop_running_task(_running_entry), do: :ok
 
-  defp start_task_timeout(ref) when is_reference(ref) do
+  # A poll fetches the running issues' states and every page of candidates, so
+  # it gets several single-call deadlines.
+  defp start_task_timeout(ref, multiplier \\ 1) when is_reference(ref) do
     Process.send_after(
       self(),
       {:tracker_task_timeout, ref},
-      Config.settings!().agent.tracker_task_timeout_ms
+      Config.settings!().agent.tracker_task_timeout_ms * multiplier
     )
   end
 
@@ -1816,6 +1818,14 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp account_retry_delay_ms(_selection_error), do: nil
+
+  # A route update (after a pick-up) carries the backend and its effort; a nil
+  # effort means the stage's default, so it replaces the old one.
+  defp put_route(running_entry, %{backend: backend} = runtime_info) when is_binary(backend) do
+    Map.merge(running_entry, %{backend: backend, effort: Map.get(runtime_info, :effort)})
+  end
+
+  defp put_route(running_entry, _runtime_info), do: running_entry
 
   defp maybe_put_runtime_value(running_entry, _key, nil), do: running_entry
 
