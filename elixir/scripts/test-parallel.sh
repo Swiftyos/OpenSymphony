@@ -62,6 +62,7 @@ mkdir -p "$TMP_ROOT"
 TMP_ROOT="$(cd "$TMP_ROOT" && pwd -P)"
 mkdir -p "$TMP_ROOT" || exit 1
 RUN_DIR=$(mktemp -d "$TMP_ROOT/run.XXXXXX") || exit 1
+run_started_at=$(date +%s)
 
 partition_database_url() {
   # Append _p<n> to the database name, keeping any query string.
@@ -80,7 +81,7 @@ partition_database_url() {
 }
 
 echo "test-parallel: $PARTITIONS partition(s), mode=$MODE"
-echo "test-parallel: TMPDIR per partition under $TMP_ROOT"
+echo "test-parallel: TMPDIR per partition under $RUN_DIR/tmp"
 
 # Compile once before the partitions race to write the same build.
 if ! MIX_ENV=test "$MIX_BIN" compile >"$RUN_DIR/compile.log" 2>&1; then
@@ -105,8 +106,9 @@ fi
 run_partition() {
   n=$1
   shift
-  part_tmp="$TMP_ROOT/$n"
-  rm -rf "$part_tmp"
+  # Under this run's directory, so concurrent runs (other worktrees) never
+  # share or wipe each other's partition TMPDIRs.
+  part_tmp="$RUN_DIR/tmp/$n"
   mkdir -p "$part_tmp"
 
   (
@@ -206,11 +208,13 @@ done
 
 printf 'total: %s tests, %s failures, %s skipped across %s partitions\n' \
   "$total_tests" "$total_failures" "$total_skipped" "$PARTITIONS"
-printf 'wall time: %ss (worker time summed; partitions run concurrently)\n' "$total_seconds"
+printf 'wall time: %ss (partition time summed: %ss)\n' "$(($(date +%s) - run_started_at))" "$total_seconds"
 
 if [ "$failed" -ne 0 ]; then
+  echo "test-parallel: logs kept in $RUN_DIR" >&2
   echo "test-parallel: FAILED" >&2
   exit 1
 fi
 
+rm -rf "$RUN_DIR"
 echo "test-parallel: PASSED"
