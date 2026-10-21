@@ -1750,7 +1750,13 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     dashboard_name = Module.concat(__MODULE__, :SnapshotDashboard)
 
     {:ok, pid} =
-      StatusDashboard.start_link(name: dashboard_name, enabled: true, refresh_ms: 60_000, snapshot_interval_ms: 200, render_fun: fn _content -> :ok end)
+      StatusDashboard.start_link(
+        name: dashboard_name,
+        enabled: true,
+        refresh_ms: 60_000,
+        snapshot_interval_ms: 200,
+        render_fun: fn _content -> :ok end
+      )
 
     on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :normal) end)
 

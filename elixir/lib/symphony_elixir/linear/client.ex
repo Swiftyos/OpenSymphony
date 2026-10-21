@@ -457,7 +457,9 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp fetch_issue_batch(batch_ids, assignee_filter, graphql_fun) do
-    with {:ok, body} <- graphql_fun.(@query_by_ids, %{ids: batch_ids, first: length(batch_ids), relationFirst: @relation_page_size}) do
+    variables = %{ids: batch_ids, first: length(batch_ids), relationFirst: @relation_page_size}
+
+    with {:ok, body} <- graphql_fun.(@query_by_ids, variables) do
       decode_linear_response(body, assignee_filter)
     end
   end

@@ -752,7 +752,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         else: {:ok, %{"data" => %{"issues" => %{"nodes" => Enum.map(variables.ids, raw_issue)}}}}
     end
 
-    log = capture_log(fn -> send(self(), {:result, Client.fetch_issue_states_by_ids_for_test(issue_ids, failing_fun)}) end)
+    log =
+      capture_log(fn ->
+        send(self(), {:result, Client.fetch_issue_states_by_ids_for_test(issue_ids, failing_fun)})
+      end)
+
     assert log =~ "Linear page of 100 failed"
     assert_received {:result, {:ok, issues}}
     assert Enum.map(issues, & &1.id) == issue_ids
@@ -763,7 +767,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert_received {:fetch_issue_states_page, _query, %{first: 5}}
 
     capture_log(fn ->
-      assert {:error, :boom} = Client.fetch_issue_states_by_ids_for_test(issue_ids, fn _query, _variables -> {:error, :boom} end)
+      boom = fn _query, _variables -> {:error, :boom} end
+      assert {:error, :boom} = Client.fetch_issue_states_by_ids_for_test(issue_ids, boom)
     end)
   end
 
