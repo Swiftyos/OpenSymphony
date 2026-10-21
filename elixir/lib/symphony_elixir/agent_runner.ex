@@ -5,7 +5,6 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
 
-  alias SymphonyElixir.AgentInbox
   alias SymphonyElixir.AgentRoute
   alias SymphonyElixir.AppServer
   alias SymphonyElixir.ClaudeCode.Tooling, as: ClaudeCodeTooling
@@ -16,11 +15,10 @@ defmodule SymphonyElixir.AgentRunner do
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.OpenCode.Tooling
   alias SymphonyElixir.PromptBuilder
+  alias SymphonyElixir.RunHost
   alias SymphonyElixir.Sandbox
-  alias SymphonyElixir.SessionStore
   alias SymphonyElixir.StageResult
   alias SymphonyElixir.Tracker
-  alias SymphonyElixir.Transcript
   alias SymphonyElixir.Workspace
 
   @type worker_host :: String.t() | nil
@@ -37,12 +35,17 @@ defmodule SymphonyElixir.AgentRunner do
       "Starting agent run for #{issue_context(issue)} backend=#{route.backend} effort=#{route.effort || "default"} worker_host=#{worker_host_for_log(worker_host)} account=#{account_label(account)}"
     )
 
+    # The run talks to the controller only through its host; in-process unless
+    # a run host is injected (tests, and later the remote runner).
+    host = Keyword.get(opts, :run_host) || RunHost.local(agent_update_recipient)
+
     run_opts =
       opts
       |> Keyword.put(:route, route)
       |> Keyword.put(:issue_config, issue_config)
+      |> Keyword.put(:run_host, host)
 
-    case run_on_worker_host(issue, agent_update_recipient, run_opts, worker_host) do
+    case run_on_worker_host(issue, host, run_opts, worker_host) do
       :ok ->
         :ok
 
@@ -53,7 +56,7 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp run_on_worker_host(issue, agent_update_recipient, opts, worker_host) do
+  defp run_on_worker_host(issue, host, opts, worker_host) do
     route = Keyword.fetch!(opts, :route)
     issue_config = Keyword.fetch!(opts, :issue_config)
     account = Keyword.get(opts, :account)
@@ -64,17 +67,17 @@ defmodule SymphonyElixir.AgentRunner do
 
     with :ok <- Sandbox.validate_run(route.backend, worker_host, issue_config.settings),
          {:ok, workspace} <- Workspace.create_for_issue(issue, worker_host, settings: issue_config.settings) do
-      run_in_workspace(workspace, issue, agent_update_recipient, opts, worker_host, route, issue_config)
+      run_in_workspace(workspace, issue, host, opts, worker_host, route, issue_config)
     end
   end
 
-  defp run_in_workspace(workspace, issue, agent_update_recipient, opts, worker_host, route, issue_config) do
-    send_worker_runtime_info(agent_update_recipient, issue, worker_host, workspace)
+  defp run_in_workspace(workspace, issue, host, opts, worker_host, route, issue_config) do
+    RunHost.runtime_info(host, issue, worker_host, workspace)
 
     try do
       with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host, settings: issue_config.settings),
            :ok <- prepare_workspace_for_backend(workspace, worker_host, route.backend, issue_config) do
-        run_backend_turns(workspace, issue, agent_update_recipient, opts, worker_host, route)
+        run_backend_turns(workspace, issue, host, opts, worker_host, route)
       end
     after
       Sandbox.reap(workspace, issue_config.settings)
@@ -82,74 +85,36 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp run_backend_turns(workspace, issue, update_recipient, opts, worker_host, route) do
+  defp run_backend_turns(workspace, issue, host, opts, worker_host, route) do
     # Lets dashboard messages (SymphonyElixir.AgentInbox) find this run.
-    AgentInbox.register_runner(issue, route.backend)
+    RunHost.inbox_register(host, issue, route.backend)
 
     try do
       case route.backend do
-        "codex" -> run_codex_turns(workspace, issue, update_recipient, opts, worker_host, route)
-        _ -> run_agent_turns(workspace, issue, update_recipient, opts, worker_host, route)
+        "codex" -> run_codex_turns(workspace, issue, host, opts, worker_host, route)
+        _ -> run_agent_turns(workspace, issue, host, opts, worker_host, route)
       end
     after
-      AgentInbox.unregister_runner(issue.identifier)
+      RunHost.inbox_unregister(host, issue.identifier)
     end
   end
 
-  defp codex_message_handler(recipient, issue) do
-    fn message ->
-      Transcript.record(issue.identifier, message, backend: "codex")
-      send_codex_update(recipient, issue, message)
-    end
+  defp codex_message_handler(host, issue) do
+    fn message -> RunHost.agent_update(host, issue, "codex", message) end
   end
 
-  defp send_codex_update(recipient, %Issue{id: issue_id}, message)
-       when is_binary(issue_id) and is_pid(recipient) do
-    send(recipient, {:codex_worker_update, issue_id, message})
-    :ok
+  defp agent_message_handler(host, issue, backend) do
+    fn message -> RunHost.agent_update(host, issue, backend, message) end
   end
 
-  defp send_codex_update(_recipient, _issue, _message), do: :ok
-
-  defp agent_message_handler(recipient, issue, backend) do
-    fn message ->
-      Transcript.record(issue.identifier, message, backend: backend)
-      send_agent_update(recipient, issue, message)
-    end
-  end
-
-  defp send_agent_update(recipient, %Issue{id: issue_id}, message)
-       when is_binary(issue_id) and is_pid(recipient) do
-    send(recipient, {:agent_worker_update, issue_id, message})
-    :ok
-  end
-
-  defp send_agent_update(_recipient, _issue, _message), do: :ok
-
-  defp send_worker_runtime_info(recipient, %Issue{id: issue_id}, worker_host, workspace)
-       when is_binary(issue_id) and is_pid(recipient) and is_binary(workspace) do
-    send(
-      recipient,
-      {:worker_runtime_info, issue_id,
-       %{
-         worker_host: worker_host,
-         workspace_path: workspace
-       }}
-    )
-
-    :ok
-  end
-
-  defp send_worker_runtime_info(_recipient, _issue, _worker_host, _workspace), do: :ok
-
-  defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host, route) do
+  defp run_codex_turns(workspace, issue, host, opts, worker_host, route) do
     issue_config = Keyword.fetch!(opts, :issue_config)
     max_turns = Keyword.get(opts, :max_turns, issue_config.settings.agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
     StageResult.exclude_from_git(workspace)
     issue = pick_up(issue)
 
-    resume = resumable_session(issue, workspace, "codex")
+    resume = resumable_session(host, issue, workspace, "codex")
 
     case CodexAppServer.start_session(workspace,
            worker_host: worker_host,
@@ -159,40 +124,50 @@ defmodule SymphonyElixir.AgentRunner do
            resume_thread_id: resume && resume["thread_id"]
          ) do
       {:ok, session} ->
-        remember_session(issue, workspace, "codex", %{"thread_id" => session.thread_id})
+        remember_session(host, issue, workspace, "codex", %{"thread_id" => session.thread_id})
         opts = Keyword.put(opts, :resumed, session.resumed)
 
         try do
-          do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
+          do_run_codex_turns(session, workspace, issue, host, opts, issue_state_fetcher, 1, max_turns)
         after
           CodexAppServer.stop_session(session)
-          SessionStore.delete(issue.id)
+          RunHost.session_delete(host, issue.id)
         end
 
       {:error, _reason} = error ->
-        SessionStore.delete(issue.id)
+        RunHost.session_delete(host, issue.id)
         error
     end
   end
 
-  defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
-    prompt = turn_prompt(issue, build_codex_turn_prompt(issue, opts, turn_number, max_turns), turn_number, "codex")
+  defp do_run_codex_turns(app_session, workspace, issue, host, opts, issue_state_fetcher, turn_number, max_turns) do
+    prompt = turn_prompt(host, issue, build_codex_turn_prompt(issue, opts, turn_number, max_turns), turn_number, "codex")
 
     with {:ok, turn_session} <-
            CodexAppServer.run_turn(
              app_session,
              prompt,
              issue,
-             on_message: codex_message_handler(codex_update_recipient, issue),
-             turn_number: turn_number
+             on_message: codex_message_handler(host, issue),
+             turn_number: turn_number,
+             run_host: host
            ) do
       Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
 
-      case after_turn(issue, workspace, issue_state_fetcher) do
+      case after_turn(host, issue, workspace, issue_state_fetcher) do
         {:retry, feedback} when turn_number < max_turns ->
           next_opts = Keyword.put(opts, :result_feedback, feedback)
-          {recipient, fetcher} = {codex_update_recipient, issue_state_fetcher}
-          do_run_codex_turns(app_session, workspace, issue, recipient, next_opts, fetcher, turn_number + 1, max_turns)
+
+          do_run_codex_turns(
+            app_session,
+            workspace,
+            issue,
+            host,
+            next_opts,
+            issue_state_fetcher,
+            turn_number + 1,
+            max_turns
+          )
 
         {:retry, _feedback} ->
           :ok
@@ -204,7 +179,7 @@ defmodule SymphonyElixir.AgentRunner do
             app_session,
             workspace,
             refreshed_issue,
-            codex_update_recipient,
+            host,
             Keyword.delete(opts, :result_feedback),
             issue_state_fetcher,
             turn_number + 1,
@@ -212,8 +187,16 @@ defmodule SymphonyElixir.AgentRunner do
           )
 
         {:continue, refreshed_issue} ->
-          {recipient, fetcher} = {codex_update_recipient, issue_state_fetcher}
-          last_codex_turn(app_session, workspace, refreshed_issue, recipient, opts, fetcher, turn_number, max_turns)
+          last_codex_turn(
+            app_session,
+            workspace,
+            refreshed_issue,
+            host,
+            opts,
+            issue_state_fetcher,
+            turn_number,
+            max_turns
+          )
 
         {:done, _refreshed_issue} ->
           :ok
@@ -224,7 +207,7 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp run_agent_turns(workspace, issue, agent_update_recipient, opts, worker_host, route) do
+  defp run_agent_turns(workspace, issue, host, opts, worker_host, route) do
     issue_config = Keyword.fetch!(opts, :issue_config)
     max_turns = Keyword.get(opts, :max_turns, issue_config.settings.agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
@@ -241,32 +224,32 @@ defmodule SymphonyElixir.AgentRunner do
     StageResult.exclude_from_git(workspace)
     issue = pick_up(issue)
 
-    resume = resumable_session(issue, workspace, route.backend)
+    resume = resumable_session(host, issue, workspace, route.backend)
 
     case AppServer.start_session(workspace, Keyword.put(session_opts, :resume_session_id, resume && resume["session_id"])) do
       {:ok, session} ->
-        remember_session(issue, workspace, route.backend, %{"session_id" => session[:session_id]})
+        remember_session(host, issue, workspace, route.backend, %{"session_id" => session[:session_id]})
         opts = opts |> Keyword.put(:backend, route.backend) |> Keyword.put(:resumed, session[:resumed] == true)
 
         try do
-          do_run_agent_turns(session, workspace, issue, agent_update_recipient, opts, issue_state_fetcher, 1, max_turns)
+          do_run_agent_turns(session, workspace, issue, host, opts, issue_state_fetcher, 1, max_turns)
         after
           AppServer.stop_session(session, backend: route.backend)
-          SessionStore.delete(issue.id)
+          RunHost.session_delete(host, issue.id)
         end
 
       {:error, _reason} = error ->
-        SessionStore.delete(issue.id)
+        RunHost.session_delete(host, issue.id)
         error
     end
   end
 
   # A session recorded by a run that a restart cut off, if it is for this same
   # stage, backend and workspace; a record that no longer matches is dropped.
-  defp resumable_session(%Issue{id: issue_id} = issue, workspace, backend) do
+  defp resumable_session(host, %Issue{id: issue_id} = issue, workspace, backend) do
     stage = IssueStage.stage(issue)
 
-    case SessionStore.get(issue_id) do
+    case RunHost.session_get(host, issue_id) do
       %{"backend" => ^backend, "stage" => ^stage, "workspace" => ^workspace} = record when is_binary(stage) ->
         Logger.info("Resuming interrupted #{backend} session for #{issue_context(issue)} stage=#{stage}")
         record
@@ -275,21 +258,32 @@ defmodule SymphonyElixir.AgentRunner do
         nil
 
       _stale ->
-        SessionStore.delete(issue_id)
+        RunHost.session_delete(host, issue_id)
         nil
     end
   end
 
-  defp resumable_session(_issue, _workspace, _backend), do: nil
+  defp resumable_session(_host, _issue, _workspace, _backend), do: nil
 
-  defp remember_session(%Issue{id: issue_id} = issue, workspace, backend, ids) do
+  defp remember_session(host, %Issue{id: issue_id} = issue, workspace, backend, ids) do
     record = %{"backend" => backend, "stage" => IssueStage.stage(issue), "workspace" => workspace, "identifier" => issue.identifier}
-    SessionStore.put(issue_id, Map.merge(record, ids))
+    RunHost.session_put(host, issue_id, Map.merge(record, ids))
   end
 
-  defp do_run_agent_turns(app_session, workspace, issue, agent_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
+  defp do_run_agent_turns(
+         app_session,
+         workspace,
+         issue,
+         host,
+         opts,
+         issue_state_fetcher,
+         turn_number,
+         max_turns
+       ) do
     backend = Keyword.get(opts, :backend)
-    prompt = turn_prompt(issue, build_agent_turn_prompt(issue, opts, turn_number, max_turns), turn_number, backend)
+
+    prompt =
+      turn_prompt(host, issue, build_agent_turn_prompt(issue, opts, turn_number, max_turns), turn_number, backend)
 
     with {:ok, turn_session} <-
            AppServer.run_turn(
@@ -297,15 +291,25 @@ defmodule SymphonyElixir.AgentRunner do
              prompt,
              issue,
              backend: Keyword.get(opts, :backend),
-             on_message: agent_message_handler(agent_update_recipient, issue, backend)
+             on_message: agent_message_handler(host, issue, backend),
+             run_host: host
            ) do
       Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
 
-      case after_turn(issue, workspace, issue_state_fetcher) do
+      case after_turn(host, issue, workspace, issue_state_fetcher) do
         {:retry, feedback} when turn_number < max_turns ->
           next_opts = Keyword.put(opts, :result_feedback, feedback)
-          {recipient, fetcher} = {agent_update_recipient, issue_state_fetcher}
-          do_run_agent_turns(app_session, workspace, issue, recipient, next_opts, fetcher, turn_number + 1, max_turns)
+
+          do_run_agent_turns(
+            app_session,
+            workspace,
+            issue,
+            host,
+            next_opts,
+            issue_state_fetcher,
+            turn_number + 1,
+            max_turns
+          )
 
         {:retry, _feedback} ->
           :ok
@@ -317,7 +321,7 @@ defmodule SymphonyElixir.AgentRunner do
             app_session,
             workspace,
             refreshed_issue,
-            agent_update_recipient,
+            host,
             Keyword.delete(opts, :result_feedback),
             issue_state_fetcher,
             turn_number + 1,
@@ -325,8 +329,16 @@ defmodule SymphonyElixir.AgentRunner do
           )
 
         {:continue, refreshed_issue} ->
-          {recipient, fetcher} = {agent_update_recipient, issue_state_fetcher}
-          last_agent_turn(app_session, workspace, refreshed_issue, recipient, opts, fetcher, turn_number, max_turns)
+          last_agent_turn(
+            app_session,
+            workspace,
+            refreshed_issue,
+            host,
+            opts,
+            issue_state_fetcher,
+            turn_number,
+            max_turns
+          )
 
         {:done, _refreshed_issue} ->
           :ok
@@ -347,30 +359,30 @@ defmodule SymphonyElixir.AgentRunner do
 
   # Every turn starts with a transcript marker; dashboard messages that are
   # still queued are delivered here, ahead of the turn's own prompt.
-  defp turn_prompt(issue, prompt, turn_number, backend) do
-    Transcript.turn_started(issue.identifier, %{turn: turn_number, stage: IssueStage.stage(issue), backend: backend})
-    AgentInbox.prompt_section(AgentInbox.take_queued(issue.identifier)) <> prompt
+  defp turn_prompt(host, issue, prompt, turn_number, backend) do
+    RunHost.turn_started(host, issue.identifier, %{turn: turn_number, stage: IssueStage.stage(issue), backend: backend})
+    RunHost.inbox_prompt_section(host, RunHost.inbox_take_queued(host, issue.identifier)) <> prompt
   end
 
   # At agent.max_turns the run hands back to the orchestrator, which dispatches
   # the issue again. If people sent messages during the last turn, run one more
   # turn (once per run) so the agent answers them now.
-  defp last_codex_turn(app_session, workspace, issue, recipient, opts, fetcher, turn, max_turns) do
-    case bonus_turn_opts(issue, opts) do
+  defp last_codex_turn(app_session, workspace, issue, host, opts, fetcher, turn, max_turns) do
+    case bonus_turn_opts(host, issue, opts) do
       nil -> :ok
-      next -> do_run_codex_turns(app_session, workspace, issue, recipient, next, fetcher, turn + 1, max_turns + 1)
+      next -> do_run_codex_turns(app_session, workspace, issue, host, next, fetcher, turn + 1, max_turns + 1)
     end
   end
 
-  defp last_agent_turn(app_session, workspace, issue, recipient, opts, fetcher, turn, max_turns) do
-    case bonus_turn_opts(issue, opts) do
+  defp last_agent_turn(app_session, workspace, issue, host, opts, fetcher, turn, max_turns) do
+    case bonus_turn_opts(host, issue, opts) do
       nil -> :ok
-      next -> do_run_agent_turns(app_session, workspace, issue, recipient, next, fetcher, turn + 1, max_turns + 1)
+      next -> do_run_agent_turns(app_session, workspace, issue, host, next, fetcher, turn + 1, max_turns + 1)
     end
   end
 
-  defp bonus_turn_opts(issue, opts) do
-    if Keyword.get(opts, :inbox_bonus_turn) != true and AgentInbox.queued?(issue.identifier) do
+  defp bonus_turn_opts(host, issue, opts) do
+    if Keyword.get(opts, :inbox_bonus_turn) != true and RunHost.inbox_queued?(host, issue.identifier) do
       Logger.info("Running one more turn for #{issue_context(issue)} to deliver dashboard messages")
       opts |> Keyword.delete(:result_feedback) |> Keyword.put(:inbox_bonus_turn, true)
     else
@@ -381,14 +393,14 @@ defmodule SymphonyElixir.AgentRunner do
 
   # Symphony moves the issue: a result file the agent wrote decides the move;
   # without one, the agent keeps working while the issue stays in its stage.
-  defp after_turn(issue, workspace, issue_state_fetcher) do
+  defp after_turn(host, issue, workspace, issue_state_fetcher) do
     case StageResult.process(issue, workspace) do
       {:moved, target} ->
-        Transcript.note(issue.identifier, "Agent Factory moved the issue to #{target["name"]}.")
+        RunHost.transcript_note(host, issue.identifier, "Agent Factory moved the issue to #{target["name"]}.")
         {:done, issue}
 
       {:rejected, feedback} ->
-        Transcript.note(issue.identifier, "Agent Factory didn't accept the result: " <> feedback)
+        RunHost.transcript_note(host, issue.identifier, "Agent Factory didn't accept the result: " <> feedback)
         {:retry, feedback}
 
       :none ->

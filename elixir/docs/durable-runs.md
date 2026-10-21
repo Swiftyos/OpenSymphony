@@ -53,6 +53,9 @@ Kubernetes they move behind a tool gateway.
 1. **Run host seam (no behaviour change).** `AgentRunner` and the backends talk to the
    controller only through a `SymphonyElixir.RunHost` behaviour passed in opts, defaulting
    to `RunHost.Local`, which makes exactly today's calls.
+   Done: `SymphonyElixir.RunHost` (behaviour), `SymphonyElixir.RunHost.Local`
+   (`AgentRunner` builds it from its update recipient unless `run_host:` is given, and
+   threads it to the backends as `run_host:` in `run_turn` opts).
 2. **Run registry and adoption.** Covers run ids, attempts, epochs, the registry document and
    heartbeat-based liveness. The orchestrator records dispatch and completion, and on start
    adopts live runs. It still uses the local launcher.

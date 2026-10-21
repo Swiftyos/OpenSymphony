@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   """
 
   require Logger
-  alias SymphonyElixir.{Accounts, AgentInbox, Codex.DynamicTool, Codex.TraceLog, Config, Sandbox, SSH, Telemetry}
+  alias SymphonyElixir.{Accounts, Codex.DynamicTool, Codex.TraceLog, Config, RunHost, Sandbox, SSH, Telemetry}
 
   @initialize_id 1
   @thread_start_id 2
@@ -94,6 +94,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       ) do
     on_message = Keyword.get(opts, :on_message, &default_on_message/1)
     turn_number = Keyword.get(opts, :turn_number, 1)
+    host = Keyword.get(opts, :run_host) || RunHost.local()
 
     tool_executor =
       Keyword.get(opts, :tool_executor, fn tool, arguments ->
@@ -109,6 +110,7 @@ defmodule SymphonyElixir.Codex.AppServer do
         loop_ctx = %{
           tool_executor: tool_executor,
           auto_approve_requests: auto_approve_requests,
+          host: host,
           issue: issue,
           thread_id: thread_id,
           turn_id: turn_id,
@@ -116,7 +118,7 @@ defmodule SymphonyElixir.Codex.AppServer do
         }
 
         # Dashboard messages for this issue now reach this process to steer the turn.
-        AgentInbox.codex_turn(issue, %{thread_id: thread_id, turn_id: turn_id})
+        RunHost.codex_turn(host, issue, %{thread_id: thread_id, turn_id: turn_id})
 
         try do
           emit_message(
@@ -158,7 +160,7 @@ defmodule SymphonyElixir.Codex.AppServer do
               {:error, reason}
           end
         after
-          AgentInbox.codex_turn(issue, nil)
+          RunHost.codex_turn(host, issue, nil)
           TraceLog.clear_context()
         end
 
@@ -456,14 +458,14 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp steer(port, %{issue: %{identifier: identifier}, turn_id: turn_id} = ctx, message_id)
        when is_binary(identifier) and is_binary(turn_id) do
     with false <- MapSet.member?(ctx.steering, message_id),
-         %{status: "queued"} = message <- AgentInbox.get(identifier, message_id) do
+         %{status: "queued"} = message <- RunHost.inbox_get(ctx.host, identifier, message_id) do
       send_message(port, %{
         "id" => @steer_id_prefix <> message_id,
         "method" => "turn/steer",
         "params" => %{
           "threadId" => ctx.thread_id,
           "expectedTurnId" => turn_id,
-          "input" => [%{"type" => "text", "text" => AgentInbox.steer_text(message)}]
+          "input" => [%{"type" => "text", "text" => RunHost.inbox_steer_text(ctx.host, message)}]
         }
       })
 
@@ -482,7 +484,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     case payload do
       %{"result" => %{}} ->
         Logger.info("Steered Codex turn with a dashboard message #{issue_context(ctx.issue)} message_id=#{message_id}")
-        AgentInbox.mark_delivered(ctx.issue.identifier, message_id, "steered")
+        RunHost.inbox_mark_delivered(ctx.host, ctx.issue.identifier, message_id, "steered")
 
       other ->
         reason = inspect(other["error"] || other, limit: 5)
@@ -494,7 +496,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp track_turn(ctx, %{"method" => "turn/started", "params" => %{"turn" => %{"id" => turn_id}}})
        when is_binary(turn_id) do
-    if turn_id != ctx.turn_id, do: AgentInbox.codex_turn(ctx.issue, %{thread_id: ctx.thread_id, turn_id: turn_id})
+    if turn_id != ctx.turn_id, do: RunHost.codex_turn(ctx.host, ctx.issue, %{thread_id: ctx.thread_id, turn_id: turn_id})
     %{ctx | turn_id: turn_id}
   end
 
