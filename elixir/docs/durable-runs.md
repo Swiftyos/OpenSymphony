@@ -117,12 +117,25 @@ Kubernetes they move behind a tool gateway.
 ## Rules for Phase 3
 
 - **Runners read no controller state.** A runner pod is untrusted and has no database
-  credentials. Everything it needs, including the resolved Linear project route (routes can be
-  added through MCP, `ProjectRoutes`), is in its run spec or comes from the `/runner/v1`
-  endpoints.
+  credentials. Everything it needs is in its run spec or comes from the `/runner/v1` endpoints.
+  That includes the resolved Linear project route, since routes can be added through MCP
+  (`ProjectRoutes`).
+  - The route comes from `Config.linear_project_route/2` at dispatch. It is a
+    `Config.Schema.TrackerProject` struct, or a plain map for the legacy single-project
+    fallback, and is stored with `Map.from_struct/1`.
+  - The resolved workspace root goes into the spec too. `workspace_root_for_route/3` picks
+    `root` or `root/<slug>` by how many routes there are, and a runner can't be relied on to
+    count the same routes as the controller.
 - **Web and ingest run as several replicas.** Stores that serve requests from a per-node ETS copy
   loaded at boot (`McpTokens`, `ProjectRoutes`) must re-read `StateStore` on a short TTL. That
   is at most about 5s, and token verification falls back to the store on a miss. A revoked token
   then stops working on every replica, including the brief overlap of old and new controllers
   during a rollout. `StateStore` change notifications (Postgres `NOTIFY` on write) can later
   replace the TTL.
+- **Each record that several replicas write is its own document.** For example
+  `mcp_tokens/<hash>.json` and `project_routes/<slug>.json`.
+  - Revoke and remove write tombstones.
+  - `last_used_at` lives in a separate document.
+  - With one shared document, concurrent writers lose updates: a stale "touch" rewriting the
+    document would bring a revoked token back.
+  - `StateStore.list/1` already supports this layout on both backends.
