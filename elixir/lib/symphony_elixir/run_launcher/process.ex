@@ -42,6 +42,7 @@ defmodule SymphonyElixir.RunLauncher.Process do
   alias SymphonyElixir.Config
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.GitHubApp.RunCredentials
+  alias SymphonyElixir.RunLauncher.Process.ProcessTable
   alias SymphonyElixir.RunSpec
   alias SymphonyElixir.RunWatcher
 
@@ -89,10 +90,13 @@ defmodule SymphonyElixir.RunLauncher.Process do
     end
   end
 
+  # Watchers check every run every few seconds: the shared `ps` snapshot
+  # (`ProcessTable`) answers for a runner it shows alive, and only the rest
+  # are checked with their own `kill -0` and `ps`.
   @impl true
   def alive?("process:" <> rest) do
     case parse_process_ref(rest) do
-      {:ok, pid, start} -> process_alive?(pid, start)
+      {:ok, pid, start} -> ProcessTable.alive?(pid, start) == true or process_alive?(pid, start)
       :error -> false
     end
   end
@@ -320,23 +324,24 @@ defmodule SymphonyElixir.RunLauncher.Process do
     end
   end
 
+  # Stopping checks the process itself, never the shared snapshot, which can
+  # be up to its TTL old.
   defp stop_process_group(pid, start, timeout_ms) do
-    ref = process_ref(pid, start)
-
-    if alive?(ref) do
+    if process_alive?(pid, start) do
       # Always signal the process itself as well as its group: the default
       # template makes the runner a group leader, while a custom command may
       # not have created its own group.
       signal_group(pid, "TERM")
       signal_pid(pid, "TERM")
 
-      unless wait_dead(ref, timeout_ms) do
+      unless wait_dead(pid, start, timeout_ms) do
         signal_group(pid, "KILL")
         signal_pid(pid, "KILL")
-        wait_dead(ref, timeout_ms)
+        wait_dead(pid, start, timeout_ms)
       end
     end
 
+    ProcessTable.forget(pid)
     :ok
   end
 
@@ -349,17 +354,14 @@ defmodule SymphonyElixir.RunLauncher.Process do
     :ok
   end
 
-  defp process_ref(pid, nil), do: "process:#{pid}"
-  defp process_ref(pid, start), do: "process:#{pid}:#{start}"
-
-  defp wait_dead(ref, timeout_ms) do
+  defp wait_dead(pid, start, timeout_ms) do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
-    do_wait_dead(ref, deadline)
+    do_wait_dead(pid, start, deadline)
   end
 
-  defp do_wait_dead(ref, deadline) do
+  defp do_wait_dead(pid, start, deadline) do
     cond do
-      not alive?(ref) ->
+      not process_alive?(pid, start) ->
         true
 
       System.monotonic_time(:millisecond) >= deadline ->
@@ -367,7 +369,7 @@ defmodule SymphonyElixir.RunLauncher.Process do
 
       true ->
         Process.sleep(@poll_ms)
-        do_wait_dead(ref, deadline)
+        do_wait_dead(pid, start, deadline)
     end
   end
 

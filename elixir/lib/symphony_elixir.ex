@@ -83,6 +83,8 @@ defmodule SymphonyElixir.Application do
       SymphonyElixir.Capacity.RunUsage,
       # The run registry's single writer and cache; before the orchestrator and the runner endpoints.
       SymphonyElixir.RunRegistry.Server,
+      # One shared `ps` snapshot for the process launcher's watchers.
+      SymphonyElixir.RunLauncher.Process.ProcessTable,
       {Registry, keys: :unique, name: SymphonyElixir.RunWatcher.Registry},
       {DynamicSupervisor, strategy: :one_for_one, name: SymphonyElixir.RunWatcher.Supervisor},
       # Deletes finished runner pods and orphaned run Secrets (Kubernetes launcher only).
