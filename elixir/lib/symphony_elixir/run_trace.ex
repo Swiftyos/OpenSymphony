@@ -35,7 +35,18 @@ defmodule SymphonyElixir.RunTrace do
   @version "00"
   @sampled "01"
 
-  defstruct [:trace_id, :span_id, :parent_span_id, :run_id, :attempt, :launcher, :issue_id, :identifier, :project, :backend]
+  defstruct [
+    :trace_id,
+    :span_id,
+    :parent_span_id,
+    :run_id,
+    :attempt,
+    :launcher,
+    :issue_id,
+    :identifier,
+    :project,
+    :backend
+  ]
 
   @type t :: %__MODULE__{
           trace_id: String.t(),

@@ -23,6 +23,9 @@ defmodule SymphonyElixir.Runner do
   alias SymphonyElixir.RunnerCommandPoller
   alias SymphonyElixir.RunOutbox
   alias SymphonyElixir.RunSpec
+  alias SymphonyElixir.RunTrace
+  alias SymphonyElixir.Telemetry
+  alias SymphonyElixir.TraceExporter
 
   @doc "Runs the spec, returning `:ok` or an error; never raises for a failed run."
   @spec run(Path.t()) :: :ok | {:error, term()}
@@ -30,10 +33,13 @@ defmodule SymphonyElixir.Runner do
     with {:ok, spec} <- RunSpec.read(Path.expand(spec_path)),
          :ok <- start_application() do
       started = ensure_runner_processes()
+      # A pod's collector replaces the configured endpoints for this node.
+      :ok = Telemetry.put_otlp_override(RunTrace.spec_otlp_override(spec.telemetry))
 
       try do
         run_spec(spec)
       after
+        Telemetry.put_otlp_override(nil)
         stop_started(started)
       end
     end
@@ -55,6 +61,7 @@ defmodule SymphonyElixir.Runner do
     [
       start_missing(Task.Supervisor, fn -> Task.Supervisor.start_link(name: SymphonyElixir.TaskSupervisor) end),
       start_missing(RunOutbox, fn -> RunOutbox.start_link([]) end),
+      start_missing(TraceExporter, fn -> TraceExporter.start_link([]) end),
       start_missing(RunnerCommandPoller.registry(), fn ->
         Registry.start_link(keys: :unique, name: RunnerCommandPoller.registry())
       end)
@@ -103,6 +110,7 @@ defmodule SymphonyElixir.Runner do
 
     issue = RunSpec.to_issue(spec)
     account = resolve_account(spec.account)
+    trace = RunTrace.from_spec(spec)
 
     case runner_issue_config(spec, issue) do
       {:ok, issue_config} ->
@@ -121,6 +129,7 @@ defmodule SymphonyElixir.Runner do
               route: route,
               issue_config: issue_config,
               workspace_root: spec.workspace_root,
+              trace: trace,
               # A runner without the repo cache (a pod) clones from the controller's mirror.
               git_mirror: spec
             )
@@ -139,15 +148,21 @@ defmodule SymphonyElixir.Runner do
           end
         after
           flush_finished()
+          flush_spans()
         end
 
       {:error, reason} ->
         message = "runner config failed: #{inspect(reason, limit: 10)}"
         finish(host, message)
         flush_finished()
+        flush_spans()
         {:error, message}
     end
   end
+
+  # The run's agent_run span is queued as the run ends; the process exits soon
+  # after, so it is exported now (bounded by the exporter's own timeouts).
+  defp flush_spans, do: TraceExporter.flush(Config.settings!().telemetry.span_export_timeout_ms * 2)
 
   # The run must not end with its `finished` event unacknowledged: a lost
   # finished turns a completed run into an interrupted one. The outbox keeps

@@ -248,7 +248,12 @@ defmodule SymphonyElixir.TraceExporterTest do
     end
 
     test "is nil for gRPC, without an endpoint, and for a gRPC override" do
-      write_workflow_file!(Workflow.workflow_file_path(), telemetry_enabled: true, telemetry_otlp_endpoint: "http://collector.test:4317", telemetry_otlp_protocol: "grpc")
+      write_workflow_file!(Workflow.workflow_file_path(),
+        telemetry_enabled: true,
+        telemetry_otlp_endpoint: "http://collector.test:4317",
+        telemetry_otlp_protocol: "grpc"
+      )
+
       assert TraceExporter.traces_endpoint() == nil
 
       write_workflow_file!(Workflow.workflow_file_path(), telemetry_enabled: true, telemetry_otlp_endpoint: nil)

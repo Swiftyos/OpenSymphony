@@ -150,7 +150,7 @@ defmodule SymphonyElixir.TraceExporter do
     :persistent_term.put({__MODULE__, name}, %{table: table, counters: counters, max_queue_size: limits.max_queue_size})
     Process.flag(:trap_exit, true)
 
-    state = Map.merge(limits, %{name: name, table: table, counters: counters, req_options: Keyword.get(opts, :req_options, req_options()), warned: false})
+    state = Map.merge(limits, %{name: name, table: table, counters: counters, req_options: Keyword.get(opts, :req_options), warned: false})
     {:ok, schedule(state)}
   end
 
@@ -217,7 +217,7 @@ defmodule SymphonyElixir.TraceExporter do
         receive_timeout: state.timeout_ms,
         connect_options: [timeout: state.timeout_ms],
         retry: false
-      ] ++ state.req_options
+      ] ++ (state.req_options || req_options())
 
     case Req.post(request) do
       {:ok, %Req.Response{status: status}} when status in 200..299 ->

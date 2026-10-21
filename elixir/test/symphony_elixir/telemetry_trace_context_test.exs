@@ -93,6 +93,17 @@ defmodule SymphonyElixir.TelemetryTraceContextTest do
     assert Telemetry.otlp_override() == nil
   end
 
+  test "a blank per-signal endpoint falls back to the shared one for Codex" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      telemetry_enabled: true,
+      telemetry_otlp_endpoint: "http://collector.test:4318",
+      telemetry_otlp_protocol: "http/protobuf",
+      telemetry_otlp_traces_endpoint: " "
+    )
+
+    assert ~s(otel.trace_exporter={ otlp-http = { endpoint = "http://collector.test:4318/v1/traces", protocol = "binary" } }) in Telemetry.codex_config_overrides(@issue)
+  end
+
   test "telemetry off means no trace context either", %{root: root} do
     RunTrace.put_current(root)
     write_workflow_file!(Workflow.workflow_file_path(), telemetry_enabled: false)

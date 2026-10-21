@@ -51,6 +51,8 @@ defmodule SymphonyElixir.Application do
       # Postgres (repo and migrations) when SYMPHONY_DATABASE_URL is set; before every store.
       SymphonyElixir.StateStore.Supervisor,
       config_store,
+      # Symphony's own run spans; bounded, so a dead collector costs only spans.
+      SymphonyElixir.TraceExporter,
       SymphonyElixir.UsageLedger,
       SymphonyElixir.SessionStore,
       SymphonyElixir.Transcript,
@@ -108,6 +110,7 @@ defmodule SymphonyElixir.Application do
   #   * Factory.Store — IssueStage/AgentRoute/StageResult resolve the issue's
   #     flow from it, so stages and routing match the controller's.
   #   * RunOutbox — the sender for the run's fire-and-forget events.
+  #   * TraceExporter — exports the run's symphony.agent_run span.
   #   * command poller Registry — lets inbox_register find and stop the poller
   #     for an issue.
   #
@@ -127,6 +130,7 @@ defmodule SymphonyElixir.Application do
       SymphonyElixir.RepoCacheLock,
       SymphonyElixir.GitHubApp.Cache,
       SymphonyElixir.RunOutbox,
+      SymphonyElixir.TraceExporter,
       {Registry, keys: :unique, name: SymphonyElixir.RunnerCommandPoller.registry()}
     ]
   end

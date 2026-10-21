@@ -67,7 +67,8 @@ defmodule SymphonyElixir.RunLauncher do
   instead of the configured telemetry endpoints (a runner pod cannot reach the
   controller host's collector), or nil to use those. Optional.
   """
-  @callback otlp_override(settings :: SymphonyElixir.Config.Schema.t()) :: %{endpoint: String.t(), protocol: String.t()} | nil
+  @callback otlp_override(settings :: SymphonyElixir.Config.Schema.t()) ::
+              %{endpoint: String.t(), protocol: String.t()} | nil
 
   @optional_callbacks status: 1, release: 1, controller_url: 1, otlp_override: 1
 

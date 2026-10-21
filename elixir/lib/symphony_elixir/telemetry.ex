@@ -138,8 +138,10 @@ defmodule SymphonyElixir.Telemetry do
     |> maybe_put("OTEL_EXPORTER_OTLP_METRICS_PROTOCOL", Config.telemetry_otlp_metrics_protocol())
   end
 
-  defp resource_attributes(issue, backend, account),
-    do: Config.telemetry_issue_resource_attributes(issue, backend, account, RunTrace.resource_attributes(RunTrace.current()))
+  defp resource_attributes(issue, backend, account) do
+    run_attributes = RunTrace.resource_attributes(RunTrace.current())
+    Config.telemetry_issue_resource_attributes(issue, backend, account, run_attributes)
+  end
 
   defp put_traceparent(entries) do
     case RunTrace.current() do
@@ -164,8 +166,11 @@ defmodule SymphonyElixir.Telemetry do
   # OTLP spec would otherwise add; gRPC takes the bare collector address.
   defp codex_exporter(telemetry, signal) do
     case otlp_override() do
-      %{endpoint: endpoint, protocol: protocol} -> codex_exporter_table(protocol, otlp_signal_endpoint(endpoint, protocol, signal))
-      nil -> configured_codex_exporter(telemetry, signal)
+      %{endpoint: endpoint, protocol: protocol} ->
+        codex_exporter_table(protocol, otlp_signal_endpoint(endpoint, protocol, signal))
+
+      nil ->
+        configured_codex_exporter(telemetry, signal)
     end
   end
 

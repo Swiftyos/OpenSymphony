@@ -92,7 +92,15 @@ defmodule SymphonyElixir.RunTraceTest do
   test "from_spec continues the spec's traceparent, or derives it from the run id" do
     upstream = "00-#{String.duplicate("c", 32)}-#{String.duplicate("d", 16)}-01"
 
-    spec = %RunSpec{run_id: "run-9", epoch: 1, attempt: 3, issue: @issue, backend: "codex", telemetry: %{"traceparent" => upstream, "launcher" => "process"}}
+    spec = %RunSpec{
+      run_id: "run-9",
+      epoch: 1,
+      attempt: 3,
+      issue: @issue,
+      backend: "codex",
+      telemetry: %{"traceparent" => upstream, "launcher" => "process"}
+    }
+
     context = RunTrace.from_spec(spec)
     assert {context.trace_id, context.span_id} == {String.duplicate("c", 32), String.duplicate("d", 16)}
     assert {context.run_id, context.attempt, context.launcher, context.backend} == {"run-9", 3, "process", "codex"}

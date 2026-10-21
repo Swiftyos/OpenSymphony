@@ -22,6 +22,7 @@ defmodule SymphonyElixir.Orchestrator do
     RunRegistry,
     RunSpec,
     RunToken,
+    RunTrace,
     RunWatcher,
     Sandbox,
     SessionHistory,
@@ -236,6 +237,10 @@ defmodule SymphonyElixir.Orchestrator do
         if reason == :normal,
           do: record_session_history(issue_id, running_entry, :finished),
           else: record_session_history(issue_id, running_entry, :crashed, "agent exited: #{inspect(reason)}")
+
+        if reason == :normal,
+          do: emit_run_span(running_entry, :finished, nil),
+          else: emit_run_span(running_entry, :crashed, "agent exited: #{inspect(reason, limit: 10)}")
 
         session_id = running_entry_session_id(running_entry)
         # A process run whose watcher went down without a normal finish may
@@ -669,6 +674,7 @@ defmodule SymphonyElixir.Orchestrator do
       %{pid: pid, ref: ref, identifier: identifier} = running_entry ->
         state = record_session_completion_totals(state, running_entry)
         record_session_history(issue_id, running_entry, outcome, error)
+        emit_run_span(running_entry, outcome, error)
         worker_host = Map.get(running_entry, :worker_host)
 
         if is_pid(pid) do
@@ -1397,6 +1403,8 @@ defmodule SymphonyElixir.Orchestrator do
     launcher = RunLauncher.launcher()
     run_id = RunRegistry.new_run_id()
     epoch = RunRegistry.next_epoch(issue.id)
+    # The run's trace: its id comes from the run id, so an adopted run keeps it.
+    trace = RunTrace.root(run_id, attempt: normalize_retry_attempt(attempt), launcher: launcher, issue: issue, backend: route.backend)
 
     fun = fn ->
       AgentRunner.run(
@@ -1406,7 +1414,8 @@ defmodule SymphonyElixir.Orchestrator do
         worker_host: worker_host,
         route: route,
         issue_config: issue_config,
-        account: account
+        account: account,
+        trace: trace
       )
     end
 
@@ -1417,10 +1426,15 @@ defmodule SymphonyElixir.Orchestrator do
       route: route,
       account: account,
       run_id: run_id,
-      epoch: epoch
+      epoch: epoch,
+      trace: trace
     }
 
-    case start_run(launcher, run, issue_config, fun) do
+    dispatch_started_at = DateTime.utc_now()
+    started = start_run(launcher, run, issue_config, fun)
+    emit_dispatch_span(trace, dispatch_started_at, started)
+
+    case started do
       {:ok, pid, run_ref} ->
         ref = Process.monitor(pid)
 
@@ -1456,6 +1470,34 @@ defmodule SymphonyElixir.Orchestrator do
         )
     end
   end
+
+  defp emit_dispatch_span(trace, started_at, started) do
+    status =
+      case started do
+        {:ok, _pid, _ref} -> :ok
+        {:error, reason} -> {:error, "failed to spawn agent: " <> inspect(reason, limit: 10)}
+      end
+
+    RunTrace.emit(RunTrace.child(trace), "symphony.dispatch", started_at, status)
+  end
+
+  # The run's root span, once it has left `running` (an adopted run included:
+  # its run id, so its trace, and its start time come from the registry).
+  defp emit_run_span(%{run_id: run_id} = running_entry, outcome, error) when is_binary(run_id) do
+    trace =
+      RunTrace.root(run_id,
+        attempt: Map.get(running_entry, :retry_attempt),
+        launcher: Map.get(running_entry, :launcher),
+        issue: Map.get(running_entry, :issue),
+        backend: Map.get(running_entry, :backend)
+      )
+
+    # A run stopped because its issue moved, closed or paused ended as asked.
+    status = if outcome in [:crashed, :stalled], do: {:error, error || to_string(outcome)}, else: :ok
+    RunTrace.emit(trace, "symphony.run", Map.get(running_entry, :started_at) || DateTime.utc_now(), status, %{"symphony.run.outcome" => to_string(outcome)})
+  end
+
+  defp emit_run_span(_running_entry, _outcome, _error), do: :ok
 
   defp registry_entry(running_entry) do
     %{
@@ -1516,6 +1558,7 @@ defmodule SymphonyElixir.Orchestrator do
       run.issue
       |> run_spec(run.attempt, run.worker_host, run.route, issue_config, run.account, run.run_id, run.epoch)
       |> Map.put(:controller_url, RunLauncher.controller_url(launcher, settings))
+      |> Map.put(:telemetry, RunTrace.to_spec_map(run.trace, RunLauncher.otlp_override(launcher, settings)))
       |> RunSpec.attach_git_mirror(settings)
 
     {:ok, spec}
@@ -1792,6 +1835,7 @@ defmodule SymphonyElixir.Orchestrator do
     running_entry = recovered_running_entry(issue_id, entry, launcher, nil, nil)
     # A finished runner exits by itself; one still alive is stopped anyway.
     cleanup_process_run(running_entry, alive?)
+    emit_run_span(running_entry, if(reason == "normal", do: :finished, else: :crashed), reason)
 
     Logger.info("Recovered finished run issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} run_id=#{entry.run_id} reason=#{inspect(reason)}")
 

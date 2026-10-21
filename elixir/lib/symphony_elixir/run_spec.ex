@@ -214,8 +214,6 @@ defmodule SymphonyElixir.RunSpec do
           :account -> decode_account(raw)
           :environment -> decode_environment(raw)
           :telemetry -> encode_telemetry(raw)
-          :epoch -> raw
-          :attempt -> raw
           _ -> raw
         end
 

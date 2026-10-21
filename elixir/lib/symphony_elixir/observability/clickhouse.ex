@@ -261,7 +261,7 @@ defmodule SymphonyElixir.Observability.ClickHouse do
     FROM otel_traces
     WHERE Timestamp >= fromUnixTimestamp64Milli({from_ms:Int64})#{filter_sql(filters)}
     GROUP BY TraceId
-    HAVING span_count >= {min_spans:UInt32} OR root_name IN ('session_loop', 'claude_code.interaction')
+    HAVING span_count >= {min_spans:UInt32} OR root_name IN ('session_loop', 'claude_code.interaction', 'symphony.run')
     ORDER BY started_ms DESC
     LIMIT {limit:UInt32}
     """

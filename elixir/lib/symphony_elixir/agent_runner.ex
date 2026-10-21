@@ -16,6 +16,7 @@ defmodule SymphonyElixir.AgentRunner do
   alias SymphonyElixir.OpenCode.Tooling
   alias SymphonyElixir.PromptBuilder
   alias SymphonyElixir.RunHost
+  alias SymphonyElixir.RunTrace
   alias SymphonyElixir.Sandbox
   alias SymphonyElixir.StageResult
   alias SymphonyElixir.Tracker
@@ -23,8 +24,39 @@ defmodule SymphonyElixir.AgentRunner do
 
   @type worker_host :: String.t() | nil
 
+  @doc """
+  Runs the issue. With `:trace` (the run's root `SymphonyElixir.RunTrace`,
+  given by the orchestrator or the runner's spec), the run is a
+  `symphony.agent_run` span under it, and that span is the current context, so
+  the agent CLI's `TRACEPARENT` names it.
+  """
   @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
   def run(issue, agent_update_recipient \\ nil, opts \\ []) do
+    case Keyword.get(opts, :trace) do
+      %RunTrace{} = root -> traced_run(RunTrace.child(root), issue, agent_update_recipient, opts)
+      _ -> do_run(issue, agent_update_recipient, opts)
+    end
+  end
+
+  defp traced_run(trace, issue, agent_update_recipient, opts) do
+    started_at = DateTime.utc_now()
+    previous = RunTrace.current()
+    :ok = RunTrace.put_current(trace)
+
+    try do
+      result = do_run(issue, agent_update_recipient, opts)
+      RunTrace.emit(trace, "symphony.agent_run", started_at)
+      result
+    rescue
+      exception ->
+        RunTrace.emit(trace, "symphony.agent_run", started_at, {:error, Exception.message(exception)})
+        reraise exception, __STACKTRACE__
+    after
+      RunTrace.put_current(previous)
+    end
+  end
+
+  defp do_run(issue, agent_update_recipient, opts) do
     issue_config = Keyword.get(opts, :issue_config) || resolve_issue_config!(issue)
     route = Keyword.get(opts, :route) || AgentRoute.resolve(issue, issue_config.settings)
     account = Keyword.get(opts, :account)
