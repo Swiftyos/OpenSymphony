@@ -1075,12 +1075,14 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp issue_routable_to_worker?(_issue), do: true
 
+  # A queued issue (state Todo, or any state its flow queues in, such as
+  # "Ready for pickup") waits while something still blocks it.
   defp todo_issue_blocked_by_non_terminal?(
-         %Issue{state: issue_state, blocked_by: blockers},
+         %Issue{state: issue_state, blocked_by: [_ | _] = blockers} = issue,
          terminal_states
        )
-       when is_binary(issue_state) and is_list(blockers) do
-    normalize_issue_state(issue_state) == "todo" and
+       when is_binary(issue_state) do
+    queued_issue?(issue) and
       Enum.any?(blockers, fn
         %{state: blocker_state} when is_binary(blocker_state) ->
           !terminal_issue_state?(blocker_state, terminal_states)
@@ -1091,6 +1093,10 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp todo_issue_blocked_by_non_terminal?(_issue, _terminal_states), do: false
+
+  defp queued_issue?(%Issue{state: issue_state} = issue) do
+    normalize_issue_state(issue_state) == "todo" or match?(%{"kind" => "queue"}, IssueStage.stage_definition(issue))
+  end
 
   defp terminal_issue_state?(state_name, terminal_states) when is_binary(state_name) do
     MapSet.member?(terminal_states, normalize_issue_state(state_name))

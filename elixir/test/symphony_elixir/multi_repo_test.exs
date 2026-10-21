@@ -261,6 +261,40 @@ defmodule SymphonyElixir.MultiRepoTest do
     end
   end
 
+  describe "queued issues with blockers" do
+    test "wait in a queue state that isn't called Todo, until their blockers are done" do
+      write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", tracker_active_states: ["Ready for pickup", "In Progress"])
+
+      flow =
+        Definition.default_template()
+        |> Map.update!("stages", fn stages ->
+          Enum.map(stages, fn
+            %{"id" => "todo"} = stage -> %{stage | "linear_state" => "Ready for pickup"}
+            stage -> stage
+          end)
+        end)
+
+      {:ok, _} = Store.put("project:project", flow, 0, "test")
+      on_exit(fn -> Store.reset() end)
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 5,
+        running: %{},
+        claimed: MapSet.new(),
+        agent_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      queued = fn blockers ->
+        %Issue{id: "i-9", identifier: "PI-9", title: "Queued", state: "Ready for pickup", labels: [], project_slug: "project", blocked_by: blockers}
+      end
+
+      refute Orchestrator.should_dispatch_issue_for_test(queued.([%{id: "b", identifier: "PI-8", state: "In Progress"}]), state)
+      assert Orchestrator.should_dispatch_issue_for_test(queued.([%{id: "b", identifier: "PI-8", state: "Done"}]), state)
+      assert Orchestrator.should_dispatch_issue_for_test(queued.([]), state)
+    end
+  end
+
   describe "Linear issue reports" do
     setup do
       Application.put_env(:symphony_elixir, :linear_client_module, FakeLinear)
