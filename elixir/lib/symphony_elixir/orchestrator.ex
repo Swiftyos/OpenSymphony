@@ -565,6 +565,12 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec queue_allowance_for_test([Issue.t()], term()) :: non_neg_integer()
+  def queue_allowance_for_test(issues, %State{} = state) when is_list(issues) do
+    queue_allowance_for(issues, state, active_state_set(), terminal_state_set())
+  end
+
+  @doc false
   @spec sort_issues_for_dispatch_for_test([Issue.t()]) :: [Issue.t()]
   def sort_issues_for_dispatch_for_test(issues) when is_list(issues) do
     sort_issues_for_dispatch(issues)
@@ -601,6 +607,11 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.info("Issue no longer routed to this worker: #{issue_context(issue)} assignee=#{inspect(issue.assignee_id)}; stopping active agent")
 
         terminate_running_issue(state, issue.id, false, :moved)
+
+      active_issue_state?(issue.state, active_states) and not IssueStage.opted_in?(issue, Config.settings!()) ->
+        Logger.info("Issue lost the #{Config.settings!().tracker.require_label} label: #{issue_context(issue)}; stopping active agent")
+
+        terminate_running_issue(state, issue.id, false, :paused)
 
       active_issue_state?(issue.state, active_states) and IssueStage.paused?(issue) ->
         Logger.info("Issue moved to paused stage: #{issue_context(issue)} state=#{issue.state} stage=#{IssueStage.stage(issue)}; stopping active agent")
@@ -823,17 +834,18 @@ defmodule SymphonyElixir.Orchestrator do
 
   # Issues further along the flow go first, and an issue leaves a queue stage
   # (Todo) only while fewer issues than there are agent slots are in agent
-  # stages. Done, blocked and other human stages free a slot; an issue between
-  # runs (retrying, waiting on CI) still holds its slot.
+  # stages. Done, blocked and other human stages free a slot, and so does an
+  # issue no agent can be started on (not opted in, awaiting approval, paused);
+  # an issue between runs (retrying, waiting on CI) still holds its slot.
   defp choose_issues(issues, state) do
     active_states = active_state_set()
     terminal_states = terminal_state_set()
     staged = Enum.map(issues, &{&1, dispatch_stage(&1)})
-    limit = state.max_concurrent_agents || Config.settings!().agent.max_concurrent_agents
+    allowance = queue_allowance_for(issues, state, active_states, terminal_states)
 
     staged
     |> order_for_dispatch()
-    |> Enum.reduce_while({state, queue_allowance(staged, limit)}, fn {issue, {kind, _rank}}, {state_acc, allowance} ->
+    |> Enum.reduce_while({state, allowance}, fn {issue, {kind, _rank}}, {state_acc, allowance} ->
       cond do
         available_slots(state_acc) <= 0 ->
           {:halt, {state_acc, allowance}}
@@ -887,6 +899,27 @@ defmodule SymphonyElixir.Orchestrator do
   def queue_allowance(staged, limit) when is_list(staged) and is_integer(limit) do
     max(limit - Enum.count(staged, fn {_issue, {kind, _rank}} -> kind == "agent" end), 0)
   end
+
+  # Only issues that can hold an agent count against the queue: a running one,
+  # or one Symphony would start (or restart) an agent on. An issue that is not
+  # opted in, waits for approval, or sits in a paused stage never gets an agent,
+  # so counting it would keep Todo waiting for a slot that never frees.
+  defp queue_allowance_for(issues, %State{} = state, active_states, terminal_states) do
+    limit = state.max_concurrent_agents || Config.settings!().agent.max_concurrent_agents
+
+    issues
+    |> Enum.filter(&holds_pipeline_slot?(&1, state, active_states, terminal_states))
+    |> Enum.map(&{&1, dispatch_stage(&1)})
+    |> queue_allowance(limit)
+  end
+
+  defp holds_pipeline_slot?(%Issue{id: id} = issue, %State{running: running}, active_states, terminal_states) do
+    Map.has_key?(running, id) or
+      (candidate_issue?(issue, active_states, terminal_states) and
+         !todo_issue_blocked_by_non_terminal?(issue, terminal_states))
+  end
+
+  defp holds_pipeline_slot?(_issue, _state, _active_states, _terminal_states), do: false
 
   defp dispatch_stage(%Issue{} = issue) do
     case IssueStage.stage_definition(issue) do
