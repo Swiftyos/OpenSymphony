@@ -22,6 +22,7 @@ defmodule SymphonyElixir.McpToolsTest do
         query =~ "SymphonyStageLookup" -> {:ok, %{"data" => stage_lookup(variables)}}
         query =~ "SymphonySetStage" -> {:ok, %{"data" => %{"issueUpdate" => %{"success" => true}}}}
         query =~ "SymphonyCreateComment" -> {:ok, %{"data" => %{"commentCreate" => %{"success" => variables.issueId != "id-PAY-2"}}}}
+        query =~ "SymphonyProjectTeams" -> {:ok, %{"data" => %{"projects" => %{"nodes" => project_nodes(variables.slugs)}}}}
         true -> {:ok, %{"data" => %{"teams" => %{"nodes" => []}, "issueLabels" => %{"nodes" => []}}}}
       end
     end
@@ -44,6 +45,8 @@ defmodule SymphonyElixir.McpToolsTest do
          |> Map.put(:project_slug, "project")
        end}
     end
+
+    defp project_nodes(slugs), do: for(slug <- slugs, do: %{"slugId" => slug, "name" => "Project " <> slug, "teams" => %{"nodes" => [%{"key" => "PAY"}]}})
 
     defp member("mia@acme.test"), do: users("Mia", false, ["PAY"])
     defp member("ada@acme.test"), do: users("Ada", true, [])
@@ -287,6 +290,9 @@ defmodule SymphonyElixir.McpToolsTest do
                ok!(admin, "add_project", %{"project" => url, "repo" => "n8n-io/lang-tracer"})
 
       assert note =~ "WORKFLOW.md on main"
+      # Its name and its teams' labels are looked up in Linear in the background.
+      assert_receive {:graphql, "query SymphonyProjectTeams" <> _, %{slugs: ["185b1980c0bc"]}}, 1_000
+      assert eventually(fn -> SymphonyElixir.LabelSync.project_names()["185b1980c0bc"] == "Project 185b1980c0bc" end)
       assert [%{added_by: "ada via MCP (agent)"}] = SymphonyElixir.ProjectRoutes.list()
 
       # This test runs Symphony with a single WORKFLOW.md, where stored projects aren't live.
@@ -555,6 +561,14 @@ defmodule SymphonyElixir.McpToolsTest do
   defp error!(secret, tool, args \\ %{}) do
     %{"result" => %{"isError" => true, "content" => [%{"text" => text}]}} = json_response(call(secret, tool, args), 200)
     text
+  end
+
+  defp eventually(fun, attempts \\ 50) do
+    cond do
+      fun.() -> true
+      attempts == 0 -> false
+      true -> Process.sleep(20) && eventually(fun, attempts - 1)
+    end
   end
 
   defp call(secret, tool, args), do: post_json(secret, %{jsonrpc: "2.0", id: 1, method: "tools/call", params: %{name: tool, arguments: args}})

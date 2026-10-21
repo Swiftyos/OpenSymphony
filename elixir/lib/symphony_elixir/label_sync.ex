@@ -11,7 +11,8 @@ defmodule SymphonyElixir.LabelSync do
       (e.g. `needs-approval`)
 
   Labels that already exist in the team or workspace are left alone. It runs
-  once at startup; saving a flow in the dashboard syncs that flow's labels too.
+  once at startup, and for each project added through MCP (`sync_projects/1`);
+  saving a flow in the dashboard syncs that flow's labels too.
   The project names Linear returns are kept (`project_names/0`) so the
   dashboard can name projects before it has seen any of their issues.
   """
@@ -44,8 +45,16 @@ defmodule SymphonyElixir.LabelSync do
   """
   @spec sync() :: {:ok, %{String.t() => [String.t()]}} | {:error, term()}
   def sync do
+    Config.settings!() |> Config.linear_project_routes() |> Enum.map(& &1.slug) |> Enum.filter(&is_binary/1) |> sync_projects()
+  end
+
+  @doc """
+  Like `sync/0`, for some projects only (e.g. one just added through MCP): learns
+  their names and ensures their teams' labels.
+  """
+  @spec sync_projects([String.t()]) :: {:ok, %{String.t() => [String.t()]}} | {:error, term()}
+  def sync_projects(slugs) when is_list(slugs) do
     settings = Config.settings!()
-    slugs = settings |> Config.linear_project_routes() |> Enum.map(& &1.slug) |> Enum.filter(&is_binary/1)
     plain = Enum.filter([settings.tracker.require_label, settings.tracker.approval_label], &is_binary/1)
 
     case Tracker.project_info(slugs) do

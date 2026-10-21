@@ -38,7 +38,7 @@ defmodule SymphonyElixir.IssueMoves do
       UsageLedger.observe_issue(%{issue | state: target["linear_state"], labels: labels})
       StageResult.finished(issue, target, IssueStage.definition(issue))
 
-      Orchestrator.request_refresh()
+      Orchestrator.request_refresh_async()
       ObservabilityPubSub.broadcast_update()
       :ok
     end
@@ -66,7 +66,7 @@ defmodule SymphonyElixir.IssueMoves do
       UsageLedger.observe_issue(%{issue | state: target["linear_state"], labels: labels})
       if verdict == :approved, do: StageResult.finished(issue, target, definition)
 
-      Orchestrator.request_refresh()
+      Orchestrator.request_refresh_async()
       ObservabilityPubSub.broadcast_update()
       :ok
     end

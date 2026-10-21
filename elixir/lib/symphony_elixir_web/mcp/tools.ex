@@ -21,6 +21,7 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
     Config,
     FactoryControls,
     IssueMoves,
+    LabelSync,
     Orchestrator,
     ProjectRoutes,
     Transcript,
@@ -523,7 +524,11 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
          {:ok, slug} <- project_arg(args),
          :ok <- not_in_config(slug),
          {:ok, route} <- ProjectRoutes.put(Map.put(args, "slug", slug), ctx.actor) do
-      Orchestrator.request_refresh()
+      # The project's name (for the dashboard) and its teams' labels come from Linear.
+      if Config.settings!().tracker.kind == "linear",
+        do: Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn -> LabelSync.sync_projects([route.slug]) end)
+
+      Orchestrator.request_refresh_async()
       ObservabilityPubSub.broadcast_update()
 
       {:ok,

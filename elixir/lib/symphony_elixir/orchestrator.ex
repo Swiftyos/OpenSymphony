@@ -1577,6 +1577,17 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc """
+  Asks for a poll now without waiting: for callers that have already made
+  their change (a move, a new project) and don't need the reply. A call would
+  time out behind a slow poll; the request is coalesced either way.
+  """
+  @spec request_refresh_async(GenServer.server()) :: :ok
+  def request_refresh_async(server \\ __MODULE__) do
+    if Process.whereis(server), do: GenServer.cast(server, :request_refresh)
+    :ok
+  end
+
+  @doc """
   Delayed restart: start no new agent runs (an issue leaving the queue, its
   next stage, retries) and, once the last running agent has finished, stop so
   the supervisor starts Symphony again. Asking again changes nothing.
@@ -1680,10 +1691,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   def handle_call(:request_refresh, _from, state) do
-    now_ms = System.monotonic_time(:millisecond)
-    already_due? = is_integer(state.next_poll_due_at_ms) and state.next_poll_due_at_ms <= now_ms
-    coalesced = state.poll_check_in_progress == true or already_due?
-    state = if coalesced, do: state, else: schedule_tick(state, 0)
+    {coalesced, state} = queue_refresh(state)
 
     {:reply,
      %{
@@ -1692,6 +1700,20 @@ defmodule SymphonyElixir.Orchestrator do
        requested_at: DateTime.utc_now(),
        operations: ["poll", "reconcile"]
      }, state}
+  end
+
+  @impl true
+  def handle_cast(:request_refresh, state) do
+    {_coalesced, state} = queue_refresh(state)
+    {:noreply, state}
+  end
+
+  # A poll now, unless one is running or already due (then it's coalesced).
+  defp queue_refresh(state) do
+    now_ms = System.monotonic_time(:millisecond)
+    already_due? = is_integer(state.next_poll_due_at_ms) and state.next_poll_due_at_ms <= now_ms
+    coalesced = state.poll_check_in_progress == true or already_due?
+    {coalesced, if(coalesced, do: state, else: schedule_tick(state, 0))}
   end
 
   defp delayed_restart_payload(%State{delayed_restart: %{requested_at: at, requested_by: by}, running: running}),
