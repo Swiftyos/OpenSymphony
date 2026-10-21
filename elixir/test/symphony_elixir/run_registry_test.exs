@@ -469,10 +469,11 @@ defmodule SymphonyElixir.RunRegistryTest do
     end)
 
     send(pid, {:DOWN, monitor_ref, :process, task_pid, :boom})
-    Process.sleep(50)
 
+    # The :DOWN is handled before the state is read.
     state = :sys.get_state(pid)
     assert RunRegistry.load() == %{}
+    assert RunRegistry.find_run("run-1") == nil
     refute Map.has_key?(state.running, issue_id)
     assert %{attempt: 2, error: "agent exited: :boom"} = state.retry_attempts[issue_id]
 
