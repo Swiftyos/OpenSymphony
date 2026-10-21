@@ -22,7 +22,8 @@ To answer "what is this?", start here; for the live state, call `symphony_status
   listens to (see `list_projects`) and its current stage is one agents run.
 - **Project**: a Linear project mapped to a GitHub repo, and optionally more repos. An issue's
   agent works in a fresh clone of its repo, on the branch `symphony/<issue identifier>`, and
-  the primary repo's `WORKFLOW.md` gives every stage its setup steps and base instructions. In
+  Symphony gives every stage its base instructions (its built-in agent prompt, or the project's
+  own prompt) and runs the project's setup hooks; the repo needs no Symphony files. In
   a multi-repo project an issue's repo is the one its `repo/<name>` label names (else the
   primary), and the other repos are checked out read-only beside it.
 - **Flow**: the stages issues move through and the connections between them. Each team has a
@@ -54,7 +55,7 @@ To answer "what is this?", start here; for the live state, call `symphony_status
 1. Someone files an issue in a project Symphony listens to. It starts in the flow's queue
    stage (usually Todo).
 2. On its next poll Symphony picks it up and starts an agent for the first agent stage. The
-   agent gets the issue, the repo's `WORKFLOW.md` prompt, its stage's instructions, and the
+   agent gets the issue, Symphony's agent prompt, its stage's instructions, and the
    moves it may make.
 3. The agent works, commits and pushes on `symphony/<issue>`, and ends its stage by writing a
    result: a summary (posted on the Linear issue as a comment) and the move it chose.
@@ -129,9 +130,8 @@ Changes to flows apply to the next stage an agent starts; running agents finish 
 `get_issue` and `get_transcript`.
 
 **Start working a new repo.**
-1. Make sure the repo has a `WORKFLOW.md` on its default branch (setup hook plus base prompt;
-   copy one from a repo Symphony already works) and that Symphony's GitHub access can push and
-   open PRs there.
+1. Make sure Symphony's GitHub access can push and open PRs on the repo. The repo needs no
+   Symphony files; setup hooks for a project are set in Symphony's config.
 2. Create a Linear project for it in the team whose flow should apply.
 3. `add_project` with the project's URL and the repo (`owner/name`).
 4. File an issue in the project; it starts on the next poll.

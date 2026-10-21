@@ -12,7 +12,7 @@ defmodule SymphonyElixir.ProjectRoutesTest do
   test "routes are validated narrowly: GitHub repos, repo-relative workflows, no host paths" do
     good = %{"slug" => "0A1B2C3D4E5F", "repo" => "acme/widgets"}
 
-    assert {:ok, %{slug: "0a1b2c3d4e5f", repo: "acme/widgets", workflow: "WORKFLOW.md", default_branch: "main", backend: nil, added_by: "ada"}} =
+    assert {:ok, %{slug: "0a1b2c3d4e5f", repo: "acme/widgets", workflow: nil, default_branch: "main", backend: nil, added_by: "ada"}} =
              ProjectRoutes.put(good, "ada")
 
     for {key, value, message} <- [

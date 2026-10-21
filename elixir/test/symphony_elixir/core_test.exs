@@ -117,7 +117,9 @@ defmodule SymphonyElixir.CoreTest do
     projects = Map.get(config, "projects", [])
     assert Enum.map(projects, &Map.get(&1, "linear_project")) == ["project-a", "project-b"]
     assert Enum.all?(projects, &(is_binary(Map.get(&1, "repo")) and Map.get(&1, "repo") != ""))
-    assert Enum.all?(projects, &(is_binary(Map.get(&1, "workflow")) and Map.get(&1, "workflow") != ""))
+    # The example projects run on Symphony's own prompt; hooks live in symphony.yml.
+    assert Enum.all?(projects, &is_nil(Map.get(&1, "workflow")))
+    assert get_in(hd(projects), ["hooks", "after_create"]) =~ "mise exec -- mix deps.get"
     assert Enum.all?(projects, &(is_binary(Map.get(&1, "workspace_root")) and Map.get(&1, "workspace_root") != ""))
     assert Enum.all?(projects, &(Map.get(&1, "backend") in ["codex", "claude"]))
 

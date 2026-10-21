@@ -286,10 +286,11 @@ defmodule SymphonyElixir.McpToolsTest do
     test "admins add and remove projects; members can only look", %{admin_token: admin, mia_token: mia} do
       url = "https://linear.app/acme/project/widgets-0a1b2c3d4e5f/"
 
-      assert %{"added" => %{"slug" => "0a1b2c3d4e5f", "repo" => "acme/widgets", "workflow" => "WORKFLOW.md"}, "note" => note} =
+      assert %{"added" => %{"slug" => "0a1b2c3d4e5f", "repo" => "acme/widgets", "workflow" => nil}, "note" => note} =
                ok!(admin, "add_project", %{"project" => url, "repo" => "acme/widgets"})
 
-      assert note =~ "WORKFLOW.md on main"
+      assert note =~ "push and pull-request rights on acme/widgets"
+      refute note =~ "WORKFLOW.md"
       # Its name and its teams' labels are looked up in Linear in the background.
       assert_receive {:graphql, "query SymphonyProjectTeams" <> _, %{slugs: ["0a1b2c3d4e5f"]}}, 1_000
       assert eventually(fn -> SymphonyElixir.LabelSync.project_names()["0a1b2c3d4e5f"] == "Project 0a1b2c3d4e5f" end)

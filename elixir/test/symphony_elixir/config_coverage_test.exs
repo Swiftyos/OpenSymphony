@@ -81,7 +81,7 @@ defmodule SymphonyElixir.ConfigCoverageTest do
       assert issue_config.workflow_path == Workflow.workflow_file_path()
     end
 
-    test "global mode reports missing routes and routes without a workflow", %{root: root} do
+    test "global mode reports missing routes; a route without a workflow gets Symphony's prompt", %{root: root} do
       config_path = Path.join(root, "symphony.yml")
 
       File.write!(config_path, """
@@ -96,11 +96,95 @@ defmodule SymphonyElixir.ConfigCoverageTest do
       SymphonyConfig.set_config_file_path(config_path)
       assert Config.startup_mode() == :global
 
-      assert {:error, {:missing_project_workflow, "alpha"}} = IssueConfig.resolve(%{project_slug: "alpha"})
+      assert {:ok, %IssueConfig{mode: :global, workflow: nil, workflow_path: nil} = issue_config} =
+               IssueConfig.resolve(%{project_slug: "alpha"})
+
+      assert issue_config.prompt_template == SymphonyElixir.AgentPrompt.template()
 
       assert {:error, {:missing_project_route, "beta"}} = IssueConfig.resolve(%{project_slug: "beta"})
       assert {:error, {:missing_project_route, "gamma"}} = IssueConfig.resolve(%{"project_slug" => "gamma"})
       assert {:error, {:missing_project_route, nil}} = IssueConfig.resolve(%{identifier: "MT-2"})
+    end
+
+    test "a project without a workflow runs on symphony.yml: its hooks, backend and prompt", %{root: root} do
+      config_path = Path.join(root, "symphony.yml")
+      repo = Path.join(root, "repo")
+      File.mkdir_p!(repo)
+      File.write!(Path.join(root, "payments-prompt.md"), "Payments agent for {{ issue.identifier }}.")
+
+      File.write!(config_path, """
+      tracker:
+        kind: linear
+        api_key: token
+      workspace:
+        root: #{Path.join(root, "workspaces")}
+      hooks:
+        after_create: echo global-create
+        before_run: echo global-run
+        timeout_ms: 5000
+      projects:
+        - linear_project: payments
+          repo: #{repo}
+          backend: claude
+          prompt: payments-prompt.md
+          hooks:
+            after_create: echo payments-create
+        - linear_project: billing
+          repo: #{repo}
+      """)
+
+      SymphonyConfig.set_config_file_path(config_path)
+      assert :ok = Config.validate!()
+
+      assert {:ok, payments} = IssueConfig.resolve(%{project_slug: "payments"})
+      assert payments.prompt_template == "Payments agent for {{ issue.identifier }}."
+      assert payments.settings.agent.backend == "claude"
+      assert payments.settings.hooks.after_create == "echo payments-create"
+      assert payments.settings.hooks.before_run == "echo global-run"
+      assert payments.settings.hooks.timeout_ms == 5000
+
+      assert {:ok, billing} = IssueConfig.resolve(%{project_slug: "billing"})
+      assert billing.prompt_template == SymphonyElixir.AgentPrompt.template()
+      assert billing.settings.hooks.after_create == "echo global-create"
+
+      issue = %Issue{identifier: "PAY-1", title: "Fix it", state: "In Progress", labels: []}
+      prompt = PromptBuilder.build_prompt(issue, issue_config: billing)
+      assert prompt =~ "You are working on the Linear issue `PAY-1`."
+      assert prompt =~ "## Symphony Workpad"
+    end
+
+    test "a project's prompt file and hooks are checked", %{root: root} do
+      config_path = Path.join(root, "symphony.yml")
+      repo = Path.join(root, "repo")
+      File.mkdir_p!(repo)
+
+      write = fn project ->
+        File.write!(config_path, """
+        tracker:
+          kind: linear
+          api_key: token
+        projects:
+          - linear_project: payments
+            repo: #{repo}
+        #{project}
+        """)
+
+        SymphonyConfig.set_config_file_path(config_path)
+        if Process.whereis(SymphonyElixir.SymphonyConfigStore), do: SymphonyElixir.SymphonyConfigStore.force_reload()
+      end
+
+      write.("    prompt: missing.md")
+      assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+      assert message =~ "prompt file does not exist"
+
+      write.("    hooks:\n      after_merge: echo nope")
+      assert {:error, _} = Config.settings()
+
+      write.("    hooks:\n      after_create: 3")
+      assert {:error, _} = Config.settings()
+
+      write.("    hooks:\n      timeout_ms: -1")
+      assert {:error, _} = Config.settings()
     end
   end
 end

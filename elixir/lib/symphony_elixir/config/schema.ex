@@ -80,11 +80,18 @@ defmodule SymphonyElixir.Config.Schema do
     alias SymphonyElixir.Config.Schema.TrackerProjectRepo
 
     @primary_key false
+    @hook_keys ["after_create", "before_run", "after_run", "before_remove", "timeout_ms"]
+    @fields [:slug, :repo, :workflow, :prompt, :hooks, :backend, :default_branch, :workspace_root]
 
     embedded_schema do
       field(:slug, :string)
       field(:repo, :string)
+      # Optional repo-local WORKFLOW.md; without one Symphony's own prompt and config apply.
       field(:workflow, :string)
+      # Optional prompt template file (relative to symphony.yml) replacing the built-in one.
+      field(:prompt, :string)
+      # Workspace hooks for this project, over the top-level `hooks`.
+      field(:hooks, :map)
       field(:backend, :string)
       field(:default_branch, :string)
       field(:workspace_root, :string)
@@ -95,10 +102,11 @@ defmodule SymphonyElixir.Config.Schema do
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:slug, :repo, :workflow, :backend, :default_branch, :workspace_root], empty_values: [])
+      |> cast(attrs, @fields, empty_values: [])
       |> update_change(:slug, &Schema.normalize_optional_string/1)
       |> update_change(:repo, &Schema.normalize_optional_string/1)
       |> update_change(:workflow, &Schema.normalize_optional_string/1)
+      |> update_change(:prompt, &Schema.normalize_optional_string/1)
       |> update_change(:backend, &Schema.normalize_optional_string/1)
       |> update_change(:default_branch, &Schema.normalize_optional_string/1)
       |> update_change(:workspace_root, &Schema.normalize_optional_string/1)
@@ -109,8 +117,25 @@ defmodule SymphonyElixir.Config.Schema do
           [backend: "must be one of: codex, opencode, claude"]
         end
       end)
+      |> validate_change(:hooks, &validate_hooks/2)
       |> cast_embed(:repos, with: &TrackerProjectRepo.changeset/2)
       |> validate_required([:slug])
+    end
+
+    defp validate_hooks(:hooks, hooks) do
+      cond do
+        Enum.any?(Map.keys(hooks), &(to_string(&1) not in @hook_keys)) ->
+          [hooks: "may only set #{Enum.join(@hook_keys, ", ")}"]
+
+        Enum.any?(hooks, fn {key, value} -> to_string(key) != "timeout_ms" and not (is_binary(value) or is_nil(value)) end) ->
+          [hooks: "commands must be strings"]
+
+        not (is_nil(hooks["timeout_ms"]) or (is_integer(hooks["timeout_ms"]) and hooks["timeout_ms"] > 0)) ->
+          [hooks: "timeout_ms must be a positive integer"]
+
+        true ->
+          []
+      end
     end
   end
 
@@ -1218,6 +1243,7 @@ defmodule SymphonyElixir.Config.Schema do
       | slug: normalize_optional_string(project.slug),
         repo: resolve_repo_value(project.repo, base_dir),
         workflow: resolve_optional_workflow_path_value(project.workflow, base_dir),
+        prompt: resolve_optional_path_value(project.prompt, nil, base_dir),
         backend: normalize_optional_string(project.backend),
         default_branch: normalize_optional_string(project.default_branch),
         workspace_root: resolve_optional_path_value(project.workspace_root, default_workspace_root, base_dir)
@@ -1537,14 +1563,7 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
-  defp validate_global_only_config(config, :global) when is_map(config) do
-    if Map.has_key?(config, "hooks") do
-      {:error, {:invalid_workflow_config, "`hooks` must be defined in repo-local WORKFLOW.md files when using symphony.yml"}}
-    else
-      :ok
-    end
-  end
-
+  # symphony.yml may set `hooks` for every project (and each project its own).
   defp validate_global_only_config(_config, _mode), do: :ok
 
   defp unsupported_opencode_key(config) when is_map(config) do

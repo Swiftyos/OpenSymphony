@@ -281,6 +281,12 @@ Fields:
 
 ## 5. Workflow Specification (Repository Contract)
 
+Extension: in multi-project mode (`symphony.yml` with `projects:`) the repository contract is
+optional. A project without a `workflow` runs on the service config (including per-project
+`hooks`) and a built-in agent prompt the implementation ships, optionally replaced by a
+per-project `prompt` template file; the repository then needs no Symphony files. A project that
+names a `workflow` uses this section's contract for it.
+
 ### 5.1 File Discovery and Path Resolution
 
 Workflow file path precedence:

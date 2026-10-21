@@ -110,9 +110,14 @@ telemetry:
 projects:
   - linear_project: project-a
     repo: your-org/project-a
-    workflow: WORKFLOW.md
     workspace_root: ~/work/symphony-workspaces/project-a
     backend: codex
+    # Workspace hooks for this project (over a top-level `hooks:` block).
+    hooks:
+      after_create: |
+        if [ -f mise.toml ]; then mise trust && mise exec -- mix deps.get; fi
+    # Optional: replace Symphony's built-in agent prompt with your own template.
+    # prompt: prompts/project-a.md
     # Other repos this project's issues may need work in. An issue is worked in the
     # repo its `repo/<name>` label names, else `repo`; see README "Multi-repo projects".
     # repos:
@@ -123,7 +128,8 @@ projects:
 
   - linear_project: project-b
     repo: your-org/project-b
-    workflow: WORKFLOW.md
+    # Optional: take the prompt and agent settings from a WORKFLOW.md in the repo instead.
+    # workflow: WORKFLOW.md
     default_branch: main
     workspace_root: ~/work/symphony-workspaces/project-b
     backend: claude

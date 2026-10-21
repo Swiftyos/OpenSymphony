@@ -31,7 +31,8 @@ Symphony stops the active agent for that issue and cleans up matching workspaces
 ## Features
 
 - Multi-backend orchestration with Codex, OpenCode, and Claude Code.
-- Multi-project routing from one Symphony instance to multiple repos and repo-local `WORKFLOW.md`
+- Multi-project routing from one Symphony instance to multiple repos, with prompts and config kept
+  in Symphony (repos need no Symphony files; a repo-local `WORKFLOW.md` is optional)
   files.
 - Per-project backend defaults in `symphony.yml`.
 - Per-ticket backend switching through Linear labels like `codex`, `claude`, and `opencode`.
@@ -48,13 +49,12 @@ Symphony stops the active agent for that issue and cleans up matching workspaces
 2. Get a new personal token in Linear via Settings → Security & access → Personal API keys, and
    set it as the `LINEAR_API_KEY` environment variable.
 3. Copy this directory's `symphony.yml` somewhere outside your repo or into an ops/config repo.
-4. Copy this directory's `WORKFLOW.md` into each repo Symphony should operate on.
 4. Optionally copy the `commit`, `push`, `pull`, `land`, and `linear` skills to your repo.
    - The `linear` skill expects Symphony's `linear_graphql` app-server tool for raw Linear GraphQL
      operations such as comment editing or upload flows.
 5. Customize `symphony.yml` with your Linear, backend, and project-routing config.
-6. Customize each copied repo-local `WORKFLOW.md` with that repo's hooks, prompt, and local agent
-   overrides.
+6. Give each project its workspace `hooks` (and optionally its own `prompt`) in `symphony.yml`;
+   see "Prompts and hooks" below. Stage instructions and skills live in each team's flow.
    - To get a Linear project's slug, right-click the project and copy its URL. The slug is part of
      the URL.
    - Configure the exact Linear workflow states listed in the `Linear setup` section below.
@@ -110,8 +110,10 @@ Optional flags:
 - `--port` also starts the Phoenix observability service and overrides `server.port`
   (default: disabled)
 
-`symphony.yml` is the global runtime config. Repo-local `WORKFLOW.md` files contain YAML front
-matter for project-local workflow settings plus a Markdown body used as the agent session prompt.
+`symphony.yml` is the runtime config, including each project's workspace hooks. Agents get
+Symphony's built-in prompt (`priv/prompts/agent.md`: the issue, unattended ground rules, the Linear
+workpad and follow-up conventions, the PR hand-off) plus their stage's section from the flow. A
+repo-local `WORKFLOW.md` is optional; see "Prompts and hooks".
 
 Minimal example:
 
@@ -223,6 +225,26 @@ projects:
   that comment. A cancelled blocker, or a Blocked issue with no blockers, still waits for a person.
 - Projects added with the MCP `add_project` tool take the same `repos` list (GitHub repos only).
 
+Prompts and hooks:
+
+```yaml
+hooks:                         # every project's workspaces
+  timeout_ms: 120000
+projects:
+  - linear_project: payments
+    repo: your-org/payments-api
+    hooks:                     # this project's, over the top-level ones
+      after_create: |
+        mise trust && mise exec -- mix deps.get
+    prompt: prompts/payments.md   # optional; relative to symphony.yml
+```
+
+The prompt is a Liquid template with `issue` (identifier, title, description, state, labels,
+url, ...), `attempt`, `stage` (id, name, kind, instructions), `repo` (name, others) and
+`factory.label_prefix`. Symphony appends the stage section (instructions, skill, allowed moves)
+unless the template places `{{ stage.prompt }}` itself, and the repositories section for
+multi-repo projects.
+
 Provider switching example:
 
 ```text
@@ -243,14 +265,19 @@ Notes:
   `project.slugId`.
 - `projects[].repo` is optional. When set, Symphony clones that repo into a brand-new workspace
   before running `hooks.after_create`.
-- `projects[].workflow` is required in `symphony.yml` and must point at the repo-local
-  `WORKFLOW.md` Symphony should use for that Linear project.
+- `projects[].workflow` is optional: a repo-local `WORKFLOW.md` (relative to the repo root) whose
+  front matter and prompt body replace Symphony's for that project. Without it the project runs on
+  `symphony.yml` and the built-in prompt.
+- `projects[].prompt` is optional: a prompt template file (relative to `symphony.yml`) used
+  instead of the built-in one (or the workflow's body).
+- `projects[].hooks` is optional: `after_create`, `before_run`, `after_run`, `before_remove` and
+  `timeout_ms` for that project's workspaces, over the top-level `hooks`.
 - `projects[].workspace_root` is optional. When omitted, Symphony uses
   `workspace.root/<project-slug>/<issue-identifier>` for multi-project workflows so different
   projects do not collide under the shared root.
 - `projects[].backend` is optional. When omitted, Symphony falls back to `agent.backend`.
-- In multi-project mode, repo-local `WORKFLOW.md` files may define `hooks.*`,
-  `agent.default_effort`, `agent.max_turns`, and the prompt body only.
+- In multi-project mode, repo-local `WORKFLOW.md` files (when a project names one) may define
+  `hooks.*`, `agent.default_effort`, `agent.max_turns`, and the prompt body only.
 - `tracker.project_slug` remains the legacy single-project shorthand when you explicitly start
   Symphony with a `WORKFLOW.md` path.
 - `agent.backend` accepts `codex`, `opencode`, or `claude`. If omitted, Symphony infers the
@@ -979,14 +1006,14 @@ with `add_project`, from the next poll with no restart. Stored routes are kept i
 `~/.symphony/project_routes.json` (through the state store) and are narrower than file routes:
 
 - the repo must be a GitHub `owner/name` (never a local path or another URL)
-- the workflow must be a repo-relative `.md` path (default `WORKFLOW.md`)
+- the workflow is optional (no default); when given it must be a repo-relative `.md` path
 - the workspace is always `workspace.root/<project slug>`
 
 A project in `symphony.yml` always wins over a stored one with the same slug, and can't be
 changed through MCP. Stored routes apply only in multi-project mode (a `symphony.yml` with
-`projects:`), not when Symphony runs from a single `WORKFLOW.md`. Before filing issues, the repo
-needs its workflow file on the default branch, and Symphony's GitHub access needs push and
-pull-request rights on it.
+`projects:`), not when Symphony runs from a single `WORKFLOW.md`. Before filing issues, Symphony's
+GitHub access needs push and pull-request rights on the repo (and the repo needs the workflow
+file on its default branch if the route names one).
 
 #### Exposing /mcp without a sign-in proxy (e.g. Google IAP)
 

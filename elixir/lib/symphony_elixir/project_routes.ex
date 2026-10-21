@@ -9,9 +9,10 @@ defmodule SymphonyElixir.ProjectRoutes do
   one with the same slug. Changes apply on the next poll, no restart.
 
   Stored routes are deliberately narrower than file routes: the repo must be a
-  GitHub `owner/name` (never a local path or another URL), the workflow a
-  repo-relative path, and the workspace is always `workspace.root/<slug>`, so
-  agents can't point Symphony at host paths.
+  GitHub `owner/name` (never a local path or another URL), the optional
+  workflow a repo-relative path, and the workspace is always
+  `workspace.root/<slug>`, so agents can't point Symphony at host paths.
+  Without a workflow the project runs on Symphony's own config and prompt.
 
   Persisted through `SymphonyElixir.StateStore` (`~/.symphony/project_routes.json`).
   """
@@ -36,7 +37,7 @@ defmodule SymphonyElixir.ProjectRoutes do
   @type route :: %{
           slug: String.t(),
           repo: String.t(),
-          workflow: String.t(),
+          workflow: String.t() | nil,
           default_branch: String.t(),
           backend: String.t() | nil,
           repos: [%{name: String.t(), repo: String.t(), default_branch: String.t(), description: String.t() | nil}],
@@ -139,7 +140,7 @@ defmodule SymphonyElixir.ProjectRoutes do
   defp validate(attrs, added_by) do
     slug = attrs |> string("slug") |> String.downcase()
     repo = string(attrs, "repo")
-    workflow = string(attrs, "workflow", "WORKFLOW.md")
+    workflow = string(attrs, "workflow", nil)
     branch = string(attrs, "default_branch", "main")
     backend = string(attrs, "backend", nil)
 
@@ -150,13 +151,13 @@ defmodule SymphonyElixir.ProjectRoutes do
       not Regex.match?(@repo_pattern, repo) ->
         {:error, "repo must be a GitHub repository as owner/name, e.g. acme/widgets."}
 
-      not safe_workflow_path?(workflow) ->
+      not optional_workflow?(workflow) ->
         {:error, "workflow must be a path inside the repo, e.g. WORKFLOW.md."}
 
       not Regex.match?(@branch_pattern, branch) or String.contains?(branch, "..") ->
         {:error, "default_branch isn't a valid branch name."}
 
-      not (is_nil(backend) or backend in @backends) ->
+      backend not in [nil | @backends] ->
         {:error, "backend must be one of #{Enum.join(@backends, ", ")}, or left out for the default."}
 
       true ->
@@ -238,6 +239,9 @@ defmodule SymphonyElixir.ProjectRoutes do
       _ -> default
     end
   end
+
+  defp optional_workflow?(nil), do: true
+  defp optional_workflow?(path), do: safe_workflow_path?(path)
 
   defp safe_workflow_path?(path) do
     Path.type(path) == :relative and not String.starts_with?(path, "~") and

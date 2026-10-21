@@ -196,11 +196,11 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
       name: "add_project",
       scope: "write",
       description:
-        "Admins: make Symphony listen to a Linear project and work its issues in a GitHub repo, from the next poll. Issues follow the project's flow, else its team's. The repo must have the workflow file (default WORKFLOW.md) on its default branch, and Symphony's GitHub access must be able to push to it. Adding an existing slug updates it.",
+        "Admins: make Symphony listen to a Linear project and work its issues in a GitHub repo, from the next poll. Issues follow the project's flow, else its team's, and agents get Symphony's own prompt: the repo needs no Symphony files. Symphony's GitHub access must be able to push to it. Adding an existing slug updates it.",
       properties: %{
         project: %{type: "string", description: "The Linear project's URL or slug id (e.g. 0a1b2c3d4e5f)."},
         repo: %{type: "string", description: "GitHub repository as owner/name, e.g. acme/widgets."},
-        workflow: %{type: "string", description: "Path of the workflow file in the repo (default WORKFLOW.md)."},
+        workflow: %{type: "string", description: "Optional: a WORKFLOW.md in the repo whose prompt and agent settings replace Symphony's. Leave it out to use Symphony's."},
         default_branch: %{type: "string", description: "Branch PRs target (default main)."},
         backend: %{type: "string", enum: ["codex", "claude", "opencode"], description: "Default harness (stage settings and labels still win)."},
         repos: %{
@@ -550,8 +550,9 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
        %{
          added: Map.take(route, [:slug, :repo, :workflow, :default_branch, :backend, :repos]),
          note:
-           "Symphony polls this project from now on. Before filing issues: #{route.repo} needs #{route.workflow} on #{route.default_branch}, " <>
-             "and Symphony's GitHub access needs push and pull-request rights on it."
+           "Symphony polls this project from now on. Before filing issues: " <>
+             if(route.workflow, do: "#{route.repo} needs #{route.workflow} on #{route.default_branch}, and ", else: "") <>
+             "Symphony's GitHub access needs push and pull-request rights on #{route.repo}."
        }}
     end
   end

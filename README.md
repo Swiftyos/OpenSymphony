@@ -31,7 +31,8 @@ The experimental Elixir implementation currently supports:
 
 - Codex, Claude Code, and OpenCode as unattended agent backends.
 - Multi-project routing from one Symphony instance across multiple repos.
-- Repo-local `WORKFLOW.md` files with a global `symphony.yml` runtime config.
+- One `symphony.yml` runtime config with Symphony's own agent prompt; repos need no Symphony
+  files (a repo-local `WORKFLOW.md` is optional).
 - Linear label-based backend switching with labels like `codex`, `claude`, and `opencode`.
 - Linear label-based thinking/effort switching with labels like `thinking/high` and
   `thinking/max`.

@@ -62,6 +62,8 @@ defmodule SymphonyElixir.Config do
           slug: String.t(),
           repo: String.t() | nil,
           workflow: String.t() | nil,
+          prompt: String.t() | nil,
+          hooks: map() | nil,
           backend: String.t() | nil,
           default_branch: String.t() | nil,
           workspace_root: String.t() | nil,
@@ -922,24 +924,35 @@ defmodule SymphonyElixir.Config do
     end)
   end
 
+  # `workflow` (a repo-local WORKFLOW.md) is optional: without it the project
+  # runs on Symphony's own config and agent prompt.
   defp validate_global_project_route(%{slug: slug, workflow: workflow_path} = route) do
-    cond do
-      not (is_binary(workflow_path) and String.trim(workflow_path) != "") ->
-        {:error, {:invalid_workflow_config, "projects #{inspect(slug)} must set an explicit workflow path"}}
+    prompt = Map.get(route, :prompt)
+    error = &{:error, {:invalid_workflow_config, "projects #{inspect(slug)} " <> &1}}
 
+    cond do
       not (is_binary(route.repo) and String.trim(route.repo) != "") ->
-        {:error, {:invalid_workflow_config, "projects #{inspect(slug)} must set an explicit repo"}}
+        error.("must set an explicit repo")
 
       local_repo_path?(route.repo) and not File.exists?(route.repo) ->
-        {:error, {:invalid_workflow_config, "projects #{inspect(slug)} repo path does not exist: #{route.repo}"}}
+        error.("repo path does not exist: #{route.repo}")
 
-      not repo_relative_workflow_path?(workflow_path) ->
-        {:error, {:invalid_workflow_config, "projects #{inspect(slug)} workflow must be relative to the repo root: #{workflow_path}"}}
+      missing_file?(prompt) ->
+        error.("prompt file does not exist: #{prompt}")
+
+      not optional_repo_relative_path?(workflow_path) ->
+        error.("workflow must be relative to the repo root: #{workflow_path}")
 
       true ->
         validate_project_repos(slug, project_repos(route))
     end
   end
+
+  defp missing_file?(nil), do: false
+  defp missing_file?(path), do: not File.regular?(path)
+
+  defp optional_repo_relative_path?(nil), do: true
+  defp optional_repo_relative_path?(path), do: repo_relative_workflow_path?(path)
 
   defp validate_project_repos(slug, repos) do
     duplicate =
