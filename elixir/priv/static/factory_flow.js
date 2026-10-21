@@ -426,8 +426,9 @@
     var first = this.scope === undefined;
     if (data.scope !== this.scope) {
       this.scope = data.scope;
-      if (data.scope && teams.indexOf(data.scope) !== -1 && this.mode !== "edit") {
-        this.team = data.scope;
+      if (this.mode !== "edit" && (data.scope ? teams.indexOf(data.scope) !== -1 : !first)) {
+        // Back to all teams: the busiest flow, as on a fresh load.
+        this.team = data.scope || busiest(data);
         this.selected = null;
         this.view = null;
       }
@@ -450,8 +451,10 @@
         return t && teams.indexOf(t) !== -1;
       })[0];
     }
-    // Server updates never clobber an unsaved draft.
-    var key = JSON.stringify([this.team, this.mode, this.definition(), this.flow()]);
+    // Server updates never clobber an unsaved draft. The flows on offer and
+    // the top bar's scope are part of what's drawn (the flow picker), so a
+    // change to either redraws even when the shown flow is the same.
+    var key = JSON.stringify([this.team, this.mode, this.definition(), this.flow(), teams, data.scope]);
     if (key === this.lastKey) return;
     this.lastKey = key;
     this.render();

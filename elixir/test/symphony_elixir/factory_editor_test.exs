@@ -98,9 +98,10 @@ defmodule SymphonyElixir.FactoryEditorTest do
     def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: Keyword.fetch!(opts, :name))
     def init(opts), do: {:ok, opts}
 
-    # Tests set running agents with :sys.replace_state/2.
+    # Tests set running agents with :sys.replace_state/2; :snapshots counts the calls.
     def handle_call(:snapshot, _from, state) do
       totals = %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      state = Keyword.update(state, :snapshots, 1, &(&1 + 1))
       {:reply, %{running: Keyword.get(state, :running, []), retrying: [], agent_totals: totals, rate_limits: nil}, state}
     end
 
@@ -688,6 +689,12 @@ defmodule SymphonyElixir.FactoryEditorTest do
       html = view |> element("#sessions-filter") |> render_change(%{"query" => "nothing like it"})
       assert html =~ "No sessions match"
 
+      # Filtering never waits on the orchestrator.
+      snapshots = :sys.get_state(ctx.orchestrator)[:snapshots]
+      render_click(view, "sessions_view", %{"view" => "live"})
+      view |> element("#sessions-filter") |> render_change(%{"query" => "", "window" => "week"})
+      assert :sys.get_state(ctx.orchestrator)[:snapshots] == snapshots
+
       {:ok, view, _html} = live(session_for(ctx.ada), "/")
       html = render_click(view, "sessions_view", %{"view" => "completed"})
       assert html =~ "WEB-9"
@@ -705,6 +712,18 @@ defmodule SymphonyElixir.FactoryEditorTest do
       assert html =~ "row-stuck"
       # Cost lives on the traces and metrics page now.
       refute html =~ ~s(id="spend")
+      # Users is in the account menu, not the page links; Sessions is gone.
+      refute html =~ ~s(class="topnav-link" href="/admin/users")
+      refute html =~ ~s(href="/#sessions")
+      assert html =~ ~s(<a href="/admin/users">Users</a>)
+
+      UsageLedger.observe_issue(%Issue{id: "1", identifier: "PAY-1", state: "Todo", project_slug: "checkout"})
+      {:ok, view, html} = live(session_for(ctx.ada), "/insights?team=PAY")
+      assert html =~ ~s(id="team-picker")
+      assert html =~ ~s(<option value="PAY" selected="")
+      assert html =~ ~s(id="cost-by-stage")
+      render_change(element(view, "#team-picker"), %{"team" => "all"})
+      assert_patch(view, "/insights?range=day")
     end
 
     test "AI drafts run in the background and are pushed when ready", %{mia: mia} do

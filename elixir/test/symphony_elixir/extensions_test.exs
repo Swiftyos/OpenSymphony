@@ -746,7 +746,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
 
     {:ok, view, html} = live(build_conn(), "/")
-    assert html =~ "Operations Dashboard"
+    assert html =~ "Agent Factory"
     assert html =~ "MT-HTTP"
     assert html =~ "MT-RETRY"
     assert html =~ "rendered"
@@ -814,13 +814,14 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "snapshot_unavailable"
   end
 
-  test "dashboard liveview includes configured instance name in title and header" do
+  test "dashboard liveview names the instance in the title; the header says Agent Factory" do
     write_workflow_file!(Workflow.workflow_file_path(), instance_name: "Madrid Runner")
     start_test_endpoint(orchestrator: Module.concat(__MODULE__, :NamedDashboardOrchestrator), snapshot_timeout_ms: 5)
 
     {:ok, _view, html} = live(build_conn(), "/")
-    assert html =~ "<title>Madrid Runner · Symphony Observability</title>"
-    assert html =~ "Madrid Runner Operations Dashboard"
+    assert html =~ "<title>Madrid Runner · Agent Factory</title>"
+    assert html =~ ~s(<span class="brand-name" aria-hidden="true">Agent Factory</span>)
+    refute html =~ "Madrid Runner Operations Dashboard"
   end
 
   test "http server serves embedded assets, accepts form posts, and rejects invalid hosts" do

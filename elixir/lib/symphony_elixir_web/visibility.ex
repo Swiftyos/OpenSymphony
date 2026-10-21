@@ -70,6 +70,28 @@ defmodule SymphonyElixirWeb.Visibility do
     |> put_counts()
   end
 
+  @doc """
+  The sessions (live or ended entries) a person may see, without host details
+  unless they see everything. Like `filter_payload/2`, for a bare list.
+  """
+  @spec filter_sessions([map()], Auth.User.t() | nil) :: [map()]
+  def filter_sessions(sessions, user) do
+    case visible_teams(user) do
+      :all ->
+        sessions
+
+      teams ->
+        visible? = visible_fun(MapSet.new(teams), user.projects)
+        for e <- sessions, visible?.(e.issue_identifier, Map.get(e, :project_slug)), do: drop_host_fields(e)
+    end
+  end
+
+  @doc "Sessions narrowed to one project, else one team, else left alone."
+  @spec scope_sessions([map()], String.t() | nil, String.t() | nil) :: [map()]
+  def scope_sessions(sessions, _team, project) when is_binary(project), do: Enum.filter(sessions, &(Map.get(&1, :project_slug) == project))
+  def scope_sessions(sessions, team, _project) when is_binary(team), do: Enum.filter(sessions, &(team(&1.issue_identifier) == team))
+  def scope_sessions(sessions, _team, _project), do: sessions
+
   @spec filter_issue(map(), Auth.User.t() | nil, String.t()) :: {:ok, map()} | :hidden
   def filter_issue(payload, user, identifier) do
     case visible_teams(user) do

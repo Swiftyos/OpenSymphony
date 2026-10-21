@@ -397,6 +397,19 @@ defmodule SymphonyElixir.ObservabilityTest do
       refute_received {:request, _, _, _, _, _}
     end
 
+    test "factory_overview narrows to a team or to a project's issues" do
+      assert {:ok, _overview} = Observability.factory_overview(:hour, team: "PAY")
+      assert_received {:request, "ch.test", _path, body, params, _auth}
+      assert body =~ "startsWith(ResourceAttributes['linear.issue.identifier'], {team_prefix:String})"
+      assert params["param_team_prefix"] == "PAY-"
+      flush_requests()
+
+      assert {:ok, _overview} = Observability.factory_overview(:hour, issues: ["PAY-1", "WEB-2"])
+      assert_received {:request, "ch.test", _path, body, params, _auth}
+      assert body =~ "has({issues:Array(String)}, ResourceAttributes['linear.issue.identifier'])"
+      assert params["param_issues"] == "['PAY-1','WEB-2']"
+    end
+
     test "custom ranges in seconds pick a bucket" do
       assert {:ok, %{bucket_seconds: 120, range: 7_200}} = Observability.factory_overview(7_200)
       assert {:ok, %{bucket_seconds: 60}} = Observability.factory_overview(600)

@@ -23,7 +23,11 @@ defmodule SymphonyElixirWeb.DashboardLive do
   alias SymphonyElixir.UsageLedger
   alias SymphonyElixir.Users
   alias SymphonyElixirWeb.{Endpoint, FactoryPresenter, ObservabilityPubSub, Presenter, UserAuth, Visibility}
+  alias SymphonyElixirWeb.ScopePicker
   @runtime_tick_ms 1_000
+  # Ended sessions change only when a run ends; they're re-read this often
+  # rather than on every orchestrator update.
+  @ended_refresh_ms 10_000
   @session_views ["live", "completed", "all"]
   @session_windows [{"day", "Last 24 hours", 86_400_000}, {"week", "Last 7 days", 7 * 86_400_000}, {"month", "Last 30 days", 30 * 86_400_000}]
   @max_ended_rows 200
@@ -45,12 +49,14 @@ defmodule SymphonyElixirWeb.DashboardLive do
       |> assign(:chat_queued, [])
       |> assign(:chat_error, nil)
       |> assign(:chat_expanded, false)
-      |> assign_payload()
+      |> assign(:ended, [])
+      # handle_params/3 loads the payload, once the URL's team and project are known.
       |> assign(:now, DateTime.utc_now())
 
     if connected?(socket) do
       :ok = ObservabilityPubSub.subscribe()
       schedule_runtime_tick()
+      Process.send_after(self(), :refresh_ended, @ended_refresh_ms)
     end
 
     {:ok, socket}
@@ -58,22 +64,24 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   # `?team=PAY` narrows the whole dashboard to one team's work and projects;
   # `?project=checkout` to one project's.
+  # A pick re-scopes the payload the page already has rather than waiting on
+  # a new orchestrator snapshot; live updates keep that payload fresh.
   @impl true
   def handle_params(params, _uri, socket) do
-    team = params |> Map.get("team") |> then(&(is_binary(&1) && String.upcase(String.trim(&1))))
-    project = params |> Map.get("project") |> then(&(is_binary(&1) && String.trim(&1)))
-
-    {:noreply,
-     socket
-     |> assign(:team_filter, team || nil)
-     |> assign(:project_filter, if(project in [false, "", "all"], do: nil, else: project))
-     |> assign_payload()}
+    socket = assign(socket, :scope_params, Map.take(params, ["team", "project"]))
+    socket = if socket.assigns[:visible], do: assign_scope(socket), else: assign_payload(socket)
+    {:noreply, assign_ended(socket)}
   end
 
   @impl true
   def handle_info(:runtime_tick, socket) do
     schedule_runtime_tick()
     {:noreply, assign(socket, :now, DateTime.utc_now())}
+  end
+
+  def handle_info(:refresh_ended, socket) do
+    Process.send_after(self(), :refresh_ended, @ended_refresh_ms)
+    {:noreply, assign_ended(socket)}
   end
 
   @impl true
@@ -246,24 +254,22 @@ defmodule SymphonyElixirWeb.DashboardLive do
   def handle_event("toggle_bell", _params, socket), do: {:noreply, assign(socket, :bell_open, !socket.assigns.bell_open)}
   def handle_event("close_bell", _params, socket), do: {:noreply, assign(socket, :bell_open, false)}
 
-  # A new team starts from all of its projects.
-  def handle_event("pick_team", %{"team" => team} = params, socket) do
-    team = if team in ["", "all"], do: nil, else: team
-    project = if params["project"] in [nil, "", "all"], do: nil, else: params["project"]
-    project = if team == socket.assigns.team_filter, do: project, else: nil
-    query = URI.encode_query(Enum.reject([{"team", team}, {"project", project}], &is_nil(elem(&1, 1))))
+  def handle_event("pick_team", %{"team" => _team} = params, socket) do
+    query = params |> ScopePicker.pick(socket.assigns.team_filter) |> URI.encode_query()
     {:noreply, push_patch(socket, to: if(query == "", do: "/", else: "/?" <> query))}
   end
 
+  # Session filters never wait on the orchestrator: switching the view only
+  # re-picks rows, and the window or a search re-reads ended sessions.
   def handle_event("sessions_view", %{"view" => view}, socket) when view in @session_views do
-    {:noreply, socket |> assign(:sessions_view, view) |> assign_payload()}
+    {:noreply, socket |> assign(:sessions_view, view) |> assign_sessions()}
   end
 
   # The window select is disabled while it doesn't apply, and then not sent.
   def handle_event("sessions_filter", params, socket) do
     window = if Enum.any?(@session_windows, &(elem(&1, 0) == params["window"])), do: params["window"], else: socket.assigns.sessions_window
     query = params |> Map.get("query", socket.assigns.sessions_query) |> to_string() |> String.trim() |> String.slice(0, 120)
-    {:noreply, socket |> assign(sessions_window: window, sessions_query: query) |> assign_payload()}
+    {:noreply, socket |> assign(sessions_window: window, sessions_query: query) |> assign_ended()}
   end
 
   def handle_event("approve_account", %{"id" => id}, socket) do
@@ -586,7 +592,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                 phx-value-view={value}
               >
                 <%= label %>
-                <span class="muted numeric"><%= session_count(@payload, value) %></span>
+                <span class="muted numeric"><%= @session_counts[value] %></span>
               </button>
             </div>
             <select
@@ -610,7 +616,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
             />
           </form>
 
-          <%= if session_rows(@payload, @sessions_view, @sessions_query) == [] do %>
+          <%= if @sessions == [] do %>
             <p class="empty-state"><%= empty_sessions_copy(@sessions_view, @sessions_query, @sessions_window) %></p>
           <% else %>
             <div class="table-wrap">
@@ -635,7 +641,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                 </thead>
                 <tbody>
                   <tr
-                    :for={entry <- session_rows(@payload, @sessions_view, @sessions_query)}
+                    :for={entry <- @sessions}
                     class={[
                       entry.status == :retrying && "row-retrying",
                       entry.status == :ended && "row-ended",
@@ -709,8 +715,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
                 </tbody>
               </table>
             </div>
-            <p :if={ended_overflow(@payload, @sessions_view, @sessions_query) > 0} class="sessions-note">
-              Showing the newest <%= max_ended_rows() %> ended sessions; <%= ended_overflow(@payload, @sessions_view, @sessions_query) %> more. Search to find one.
+            <p :if={@ended_overflow > 0} class="sessions-note">
+              Showing the newest <%= max_ended_rows() %> ended sessions; <%= @ended_overflow %> more. Search to find one.
             </p>
           <% end %>
         </section>
@@ -775,15 +781,18 @@ defmodule SymphonyElixirWeb.DashboardLive do
     teams = if user, do: Enum.map(user.teams, & &1.key), else: []
     raw = Presenter.state_payload(orchestrator(), snapshot_timeout_ms(), teams: teams)
 
-    visible =
-      raw
-      |> then(&if(&1[:error], do: &1, else: Map.put(&1, :completed, ended_sessions(socket.assigns))))
-      |> Visibility.filter_payload(user)
+    socket
+    # Kept unrendered for re-scoping; the counts are the Symphony-wide ones.
+    |> assign(:visible, Visibility.filter_payload(raw, user))
+    |> assign(:symphony_counts, raw[:counts] || %{running: 0, retrying: 0})
+    |> assign_scope()
+  end
 
-    choices = team_choices(visible, user)
-    team = if Enum.any?(choices, &(&1.key == socket.assigns.team_filter)), do: socket.assigns.team_filter
-    projects = project_choices(visible, team)
-    project = if Enum.any?(projects, &(&1.slug == socket.assigns.project_filter)), do: socket.assigns.project_filter
+  defp assign_scope(socket) do
+    %{visible: visible, current_user: user} = socket.assigns
+
+    %{team: team, project: project, teams: choices, projects: projects} =
+      ScopePicker.resolve(socket.assigns[:scope_params] || %{}, visible, user)
 
     payload =
       if project,
@@ -799,20 +808,45 @@ defmodule SymphonyElixirWeb.DashboardLive do
     |> assign(:team_filter, team)
     |> assign(:project_choices, projects)
     |> assign(:project_filter, project)
-    |> assign(:flow_scope, if(project, do: Store.project_scope(project), else: team))
-    |> assign(:symphony_counts, raw[:counts] || %{running: 0, retrying: 0})
+    |> assign(:flow_scope, ScopePicker.flow_scope(team, project))
     |> assign(:payload, payload)
+    |> assign_sessions()
   end
 
-  # Ended sessions in the chosen window (counted even on the live view); a
-  # search looks through all of them.
-  defp ended_sessions(%{sessions_query: query, sessions_window: window}) do
-    if query != "" do
-      SessionHistory.list()
-    else
-      {_value, _label, ms} = Enum.find(@session_windows, &(elem(&1, 0) == window))
-      SessionHistory.list(since_ms: System.system_time(:millisecond) - ms)
-    end
+  # Ended sessions in the chosen window (counted even on the live view), for
+  # the viewer and the picked team or project; a search looks through all.
+  defp assign_ended(socket) do
+    %{sessions_query: query, sessions_window: window, current_user: user} = socket.assigns
+
+    sessions =
+      if query != "" do
+        SessionHistory.list()
+      else
+        {_value, _label, ms} = Enum.find(@session_windows, &(elem(&1, 0) == window))
+        SessionHistory.list(since_ms: System.system_time(:millisecond) - ms)
+      end
+
+    ended =
+      sessions
+      |> Visibility.filter_sessions(user)
+      |> Visibility.scope_sessions(socket.assigns.team_filter, socket.assigns.project_filter)
+      |> Enum.map(&Map.put(&1, :status, :ended))
+
+    socket |> assign(:ended, ended) |> assign_sessions()
+  end
+
+  # Live sessions first, then ended ones newest first; a search matches the
+  # issue ID or title. Worked out once per change, not per template use.
+  defp assign_sessions(socket) do
+    %{payload: payload, ended: ended, sessions_view: view, sessions_query: query} = socket.assigns
+    live = issue_rows(payload)
+    matched = matching(ended, query)
+    shown_ended = if view in ["completed", "all"], do: Enum.take(matched, @max_ended_rows), else: []
+
+    socket
+    |> assign(:sessions, if(view in ["live", "all"], do: matching(live, query), else: []) ++ shown_ended)
+    |> assign(:ended_overflow, if(view in ["completed", "all"], do: max(length(matched) - @max_ended_rows, 0), else: 0))
+    |> assign(:session_counts, %{"live" => length(live), "completed" => length(ended), "all" => length(live) + length(ended)})
   end
 
   defp assign_chat(socket) do
@@ -845,24 +879,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp message_error(:message_too_long), do: "That message is too long (8,000 characters at most)."
   defp message_error(:unavailable), do: "Messaging isn't available right now."
   defp message_error(reason), do: "Couldn't send: #{inspect(reason)}"
-
-  defp team_choices(%{factory: %{teams: entries}}, user) do
-    names = if user, do: Map.new(user.teams, &{&1.key, &1.name}), else: %{}
-
-    entries
-    |> Enum.filter(&(&1[:kind] == "team"))
-    |> Enum.map(&%{key: &1.key, name: &1.name || names[&1.key]})
-  end
-
-  defp team_choices(_payload, _user), do: []
-
-  defp project_choices(%{factory: %{teams: entries}}, team) do
-    entries
-    |> Enum.filter(&(&1[:kind] == "project" and (is_nil(team) or team in (&1[:teams] || []))))
-    |> Enum.map(&%{slug: &1.slug, name: &1.name || &1.slug})
-  end
-
-  defp project_choices(_payload, _team), do: []
 
   defp orchestrator do
     Endpoint.config(:orchestrator) || SymphonyElixir.Orchestrator
@@ -1233,26 +1249,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp issue_rows(_payload), do: []
 
-  defp ended_rows(payload), do: payload |> Map.get(:completed, []) |> Enum.map(&Map.put(&1, :status, :ended))
-
   defp session_windows, do: @session_windows
   defp max_ended_rows, do: @max_ended_rows
-
-  # Live sessions first, then ended ones newest first; a search matches the
-  # issue ID or title.
-  defp session_rows(payload, view, query) do
-    live = if view in ["live", "all"], do: issue_rows(payload), else: []
-    ended = if view in ["completed", "all"], do: payload |> ended_rows() |> matching(query) |> Enum.take(@max_ended_rows), else: []
-    matching(live, query) ++ ended
-  end
-
-  defp ended_overflow(payload, view, query) do
-    if view in ["completed", "all"], do: max(length(matching(ended_rows(payload), query)) - @max_ended_rows, 0), else: 0
-  end
-
-  defp session_count(payload, "live"), do: length(issue_rows(payload))
-  defp session_count(payload, "completed"), do: length(Map.get(payload, :completed, []))
-  defp session_count(payload, "all"), do: session_count(payload, "live") + session_count(payload, "completed")
 
   defp matching(rows, ""), do: rows
 

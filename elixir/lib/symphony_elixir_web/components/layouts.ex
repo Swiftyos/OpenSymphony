@@ -70,8 +70,8 @@ defmodule SymphonyElixirWeb.Layouts do
 
   defp page_title do
     case Config.instance_name() do
-      name when is_binary(name) and name != "" -> "#{name} · Symphony Observability"
-      _ -> "Symphony Observability"
+      name when is_binary(name) and name != "" -> "#{name} · Agent Factory"
+      _ -> "Agent Factory"
     end
   end
 end

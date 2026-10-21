@@ -25,7 +25,16 @@ defmodule SymphonyElixir.Observability.ClickHouse do
           optional(:database) => String.t() | nil,
           optional(:timeout_ms) => pos_integer()
         }
-  @type filters :: %{optional(:issue) => String.t() | nil, optional(:instance) => String.t() | nil}
+  @typedoc """
+  `issue` keeps one issue; `team` issues whose identifier starts with that team
+  key (`PAY` keeps `PAY-1`); `issues` only those identifiers (a project's).
+  """
+  @type filters :: %{
+          optional(:issue) => String.t() | nil,
+          optional(:instance) => String.t() | nil,
+          optional(:team) => String.t() | nil,
+          optional(:issues) => [String.t()] | nil
+        }
   @type row :: %{String.t() => term()}
 
   # A bucket this wide puts every timestamp into bucket 0 (no time split).
@@ -451,19 +460,27 @@ defmodule SymphonyElixir.Observability.ClickHouse do
 
   defp filter_sql(filters) do
     issue = if present?(filters[:issue]), do: "\n  AND ResourceAttributes['linear.issue.identifier'] = {issue:String}", else: ""
+    team = if present?(filters[:team]), do: "\n  AND startsWith(ResourceAttributes['linear.issue.identifier'], {team_prefix:String})", else: ""
+
+    issues =
+      if is_list(filters[:issues]),
+        do: "\n  AND has({issues:Array(String)}, ResourceAttributes['linear.issue.identifier'])",
+        else: ""
 
     instance =
       if present?(filters[:instance]),
         do: "\n  AND ResourceAttributes['symphony.instance'] IN ({instance:String}, {instance_encoded:String})",
         else: ""
 
-    issue <> instance
+    issue <> team <> issues <> instance
   end
 
   # Codex does not percent-decode OTEL_RESOURCE_ATTRIBUTES, so match both spellings.
   defp filter_params(filters) do
     %{}
     |> maybe_param(:issue, if(present?(filters[:issue]), do: filters[:issue]))
+    |> maybe_param(:team_prefix, if(present?(filters[:team]), do: filters[:team] <> "-"))
+    |> maybe_param(:issues, if(is_list(filters[:issues]), do: filters[:issues]))
     |> then(fn params ->
       if present?(filters[:instance]) do
         Map.merge(params, %{instance: filters[:instance], instance_encoded: URI.encode(filters[:instance], &resource_char?/1)})

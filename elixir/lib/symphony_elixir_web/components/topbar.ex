@@ -1,6 +1,7 @@
 defmodule SymphonyElixirWeb.Topbar do
   @moduledoc """
-  The shared top bar: brand, page-specific status items, and the user menu.
+  The shared top bar: brand, page links, the team and project pickers,
+  page-specific status items, and the user menu (which holds the admin pages).
   """
 
   use Phoenix.Component
@@ -30,8 +31,8 @@ defmodule SymphonyElixirWeb.Topbar do
           <circle cx="26" cy="8" r="2.6" />
         </svg>
         <h1 class="ops-title">
-          <span class="sr-only">{@instance_name && "#{@instance_name} "}Operations Dashboard</span>
-          <span class="brand-name" aria-hidden="true">{@instance_name || "Symphony"}</span>
+          <span class="sr-only">Agent Factory</span>
+          <span class="brand-name" aria-hidden="true">Agent Factory</span>
         </h1>
       </a>
 
@@ -100,15 +101,12 @@ defmodule SymphonyElixirWeb.Topbar do
     """
   end
 
-  # The page links; the factory's sections are anchors on the dashboard.
-  defp nav_items(user) do
+  # The page links. Users is an admin page, so it lives in the user menu.
+  defp nav_items(_user) do
     [
       %{key: "factory", label: "Factory", href: "/"},
-      %{key: "sessions", label: "Sessions", href: "/#sessions"},
-      %{key: "insights", label: "Traces & metrics", href: "/insights"},
-      Auth.can_manage_access?(user) && %{key: "users", label: "Users", href: "/admin/users"}
+      %{key: "insights", label: "Traces & metrics", href: "/insights"}
     ]
-    |> Enum.filter(& &1)
   end
 
   defp logo?, do: is_binary(SymphonyElixir.Config.instance_logo())

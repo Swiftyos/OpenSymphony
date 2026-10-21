@@ -5,17 +5,21 @@ defmodule SymphonyElixirWeb.InsightsLive do
   through `SymphonyElixir.Observability`.
 
   The page shows factory-wide totals and charts for a time range, the issues
-  and tools that used the most, and for one picked issue its metrics, recent
-  traces, and a waterfall of the trace you open. Issues the viewer can't see
-  are left out.
+  and tools that used the most, cost by model, and for one picked issue its
+  metrics, recent traces, and a waterfall of the trace you open. Issues the
+  viewer can't see are left out.
+
+  Cost by stage comes from Symphony's usage ledger instead: telemetry doesn't
+  carry the stage, and the ledger keeps totals since it started (no time
+  range). The top bar's team and project pickers narrow both.
   """
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
   import SymphonyElixirWeb.Charts
   import SymphonyElixirWeb.Topbar
 
-  alias SymphonyElixir.{Config, Observability}
-  alias SymphonyElixirWeb.Visibility
+  alias SymphonyElixir.{Config, Observability, UsageLedger}
+  alias SymphonyElixirWeb.{FactoryPresenter, ScopePicker, Visibility}
 
   @ranges [{"hour", "1h"}, {"day", "24h"}, {"week", "7d"}]
   @refresh_ms 30_000
@@ -38,6 +42,7 @@ defmodule SymphonyElixirWeb.InsightsLive do
     {:noreply,
      socket
      |> assign(range: range, issue: issue, trace_id: issue && params["trace"])
+     |> assign_scope(params)
      |> load()}
   end
 
@@ -52,11 +57,24 @@ defmodule SymphonyElixirWeb.InsightsLive do
   def handle_event("open_trace", %{"id" => id}, socket), do: {:noreply, push_patch(socket, to: path(socket.assigns, trace: id))}
   def handle_event("close_issue", _params, socket), do: {:noreply, push_patch(socket, to: path(socket.assigns, issue: nil, trace: nil))}
 
+  def handle_event("pick_team", %{"team" => _team} = params, socket) do
+    picked = Map.new(ScopePicker.pick(params, socket.assigns.team), fn {k, v} -> {String.to_existing_atom(k), v} end)
+    {:noreply, push_patch(socket, to: path(socket.assigns, team: picked[:team], project: picked[:project]))}
+  end
+
   @impl true
   def render(assigns) do
     ~H"""
     <section class="dashboard-shell">
-      <.topbar instance_name={@instance_name} current_user={@current_user} current="insights">
+      <.topbar
+        instance_name={@instance_name}
+        current_user={@current_user}
+        current="insights"
+        teams={@team_choices}
+        team={@team}
+        projects={@project_choices}
+        project={@project}
+      >
         <span class={["source-chip", source_class(@sources.clickhouse)]} title={source_title(@sources.clickhouse)}>ClickHouse</span>
         <span class={["source-chip", source_class(@sources.langfuse)]} title={source_title(@sources.langfuse)}>Langfuse</span>
       </.topbar>
@@ -123,7 +141,7 @@ defmodule SymphonyElixirWeb.InsightsLive do
               <h3 class="panel-title">Issues by tokens</h3>
               <p class="panel-hint">Pick one for its traces.</p>
             </div>
-            <.bar_list rows={issue_rows(@overview, @range)} empty="No issue has reported telemetry in this range." />
+            <.bar_list rows={issue_rows(@overview, @range, @team, @project)} empty="No issue has reported telemetry in this range." />
           </section>
 
           <section class="panel">
@@ -131,6 +149,24 @@ defmodule SymphonyElixirWeb.InsightsLive do
               <h3 class="panel-title">Busiest tools</h3>
             </div>
             <.bar_list rows={tool_rows(@overview)} empty="No tool calls in this range." />
+          </section>
+
+          <section id="cost-by-model" class="panel">
+            <div class="panel-head">
+              <h3 class="panel-title">Cost by model</h3>
+              <p class="panel-hint">This range</p>
+            </div>
+            <.bar_list rows={model_cost_rows(@overview)} format={&money/1} empty="No model reported cost in this range." />
+          </section>
+        </div>
+
+        <div class="insights-grid">
+          <section id="cost-by-stage" class="panel">
+            <div class="panel-head">
+              <h3 class="panel-title">Cost by stage</h3>
+              <p class="panel-hint">All time, from Symphony's usage ledger</p>
+            </div>
+            <.bar_list rows={@stage_costs} format={&money/1} empty="No usage recorded for these stages yet." />
           </section>
         </div>
 
@@ -215,9 +251,62 @@ defmodule SymphonyElixirWeb.InsightsLive do
 
   # Reads run in a task (a cold read takes a few seconds); the page shows what
   # it last had until the new data arrives.
+  # The pickers' choices and the picked team or project, from the factory as
+  # the viewer may see it; with it the ledger's cost by stage and, for a
+  # project, the issues that narrow the telemetry reads.
+  defp assign_scope(socket, params) do
+    user = socket.assigns.current_user
+    teams = if user, do: Enum.map(user.teams, & &1.key), else: []
+    factory = FactoryPresenter.payload([], Config.settings!(), teams: teams)
+    visible = Visibility.filter_payload(%{running: [], retrying: [], factory: factory}, user)
+    %{team: team, project: project, teams: choices, projects: projects} = ScopePicker.resolve(params, visible, user)
+
+    scoped =
+      if project,
+        do: Visibility.scope_to_project(visible, project),
+        else: Visibility.scope_to_team(visible, team)
+
+    assign(socket,
+      team: team,
+      project: project,
+      team_choices: choices,
+      project_choices: projects,
+      project_issues: project && project_issues(project),
+      stage_costs: stage_cost_rows(scoped.factory)
+    )
+  end
+
+  # Every issue the ledger has seen in the project.
+  defp project_issues(slug) do
+    ledger = UsageLedger.snapshot()
+
+    (for(%{project: ^slug, issue: issue} <- ledger.flow.issues, do: issue) ++ for(%{project: ^slug, issue: issue} <- ledger.usage, do: issue))
+    |> Enum.uniq()
+  end
+
+  # Priced usage summed per stage, named from the flows on the page.
+  defp stage_cost_rows(%{usage: usage, definitions: definitions}) do
+    names = for {_scope, d} <- definitions, stage <- d["stages"], into: %{}, do: {stage["id"], stage["name"]}
+
+    usage
+    |> Enum.group_by(& &1[:stage])
+    |> Enum.map(fn {stage, rows} ->
+      %{
+        label: if(stage, do: names[stage] || stage, else: "Before stages were tracked"),
+        detail: "#{compact(Enum.sum(Enum.map(rows, &(&1.input_tokens + &1.output_tokens))))} tokens",
+        value: rows |> Enum.map(&(&1[:cost_usd] || 0)) |> Enum.sum()
+      }
+    end)
+    |> Enum.reject(&(&1.value == 0))
+    |> Enum.sort_by(&(-&1.value))
+  end
+
+  defp stage_cost_rows(_factory), do: []
+
   defp load(socket) do
     %{range: range, issue: issue, trace_id: trace_id, current_user: user} = socket.assigns
     range_atom = String.to_existing_atom(range)
+    scope = [team: if(is_nil(socket.assigns.project), do: socket.assigns.team), issues: socket.assigns.project_issues]
 
     socket
     |> assign_new(:overview, fn -> nil end)
@@ -228,7 +317,7 @@ defmodule SymphonyElixirWeb.InsightsLive do
     |> assign_new(:trace, fn -> nil end)
     |> assign_new(:sources, fn -> %{clickhouse: %{state: :loading}, langfuse: %{state: :loading}} end)
     |> assign(:loading, true)
-    |> start_async(:load, fn -> fetch(range_atom, issue, trace_id, user) end)
+    |> start_async(:load, fn -> fetch(range_atom, issue, trace_id, user, scope) end)
   end
 
   @impl true
@@ -238,8 +327,8 @@ defmodule SymphonyElixirWeb.InsightsLive do
     {:noreply, assign(socket, loading: false, overview_error: "Couldn't read telemetry: #{inspect(reason)}")}
   end
 
-  defp fetch(range, issue, trace_id, user) do
-    {overview, overview_error} = result(Observability.factory_overview(range))
+  defp fetch(range, issue, trace_id, user, scope) do
+    {overview, overview_error} = result(Observability.factory_overview(range, Enum.reject(scope, &is_nil(elem(&1, 1)))))
 
     {issue_metrics, issue_error, traces} =
       if issue do
@@ -275,11 +364,20 @@ defmodule SymphonyElixirWeb.InsightsLive do
 
   defp visible_rows(rows, user), do: Enum.reject(rows, &(Visibility.filter_issue(%{}, user, &1.identifier) == :hidden))
 
-  defp issue_rows(overview, range) do
+  defp issue_rows(overview, range, team, project) do
+    scope = %{range: range, issue: nil, trace_id: nil, team: team, project: project}
+
     overview
     |> Map.get(:top_issues, [])
     |> Enum.sort_by(&(-(&1[:tokens] || 0)))
-    |> Enum.map(&%{label: &1.identifier, detail: &1[:title], value: &1[:tokens] || 0, href: "/insights?range=#{range}&issue=#{&1.identifier}"})
+    |> Enum.map(&%{label: &1.identifier, detail: &1[:title], value: &1[:tokens] || 0, href: path(scope, issue: &1.identifier)})
+  end
+
+  defp model_cost_rows(overview) do
+    overview
+    |> Map.get(:by_model, [])
+    |> Enum.filter(&((&1[:cost_usd] || 0) > 0))
+    |> Enum.map(&%{label: &1.model, detail: "#{harness_label(&1.backend)} · #{compact(&1[:tokens])} tokens", value: &1.cost_usd})
   end
 
   defp tool_rows(overview), do: overview |> Map.get(:top_tools, []) |> Enum.map(&%{label: &1.name, value: &1.calls})
@@ -289,7 +387,7 @@ defmodule SymphonyElixirWeb.InsightsLive do
 
   defp path(assigns, changes) do
     params =
-      %{"range" => assigns.range, "issue" => assigns.issue, "trace" => assigns.trace_id}
+      %{"range" => assigns.range, "issue" => assigns.issue, "trace" => assigns.trace_id, "team" => assigns.team, "project" => assigns.project}
       |> Map.merge(Map.new(changes, fn {k, v} -> {to_string(k), v} end))
       |> Enum.reject(fn {_k, v} -> is_nil(v) end)
 
