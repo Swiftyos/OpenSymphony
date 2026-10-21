@@ -1,7 +1,7 @@
 #!/bin/sh
-# Copy the agent CLIs into the directory named by the first argument, usually a
-# volume mounted at /opt/symphony in both the init container and the app
-# container. Idempotent, so it can run on every pod start.
+# Copy the agent CLIs (kept in /agent-tools) into the directory named by the
+# first argument, usually a volume mounted at /opt/symphony in both the init
+# container and the app container. Idempotent, so it can run on every pod start.
 set -eu
 
 target="${1:-}"
@@ -12,4 +12,4 @@ if [ -z "$target" ]; then
 fi
 
 mkdir -p "$target"
-cp -a /opt/symphony/. "$target"/
+cp -a /agent-tools/. "$target"/

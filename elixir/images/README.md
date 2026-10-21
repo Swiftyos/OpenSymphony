@@ -90,10 +90,12 @@ packages and keeps only their native binaries:
 - `@anthropic-ai/claude-code@2.1.306` — the native `claude` binary from
   `@anthropic-ai/claude-code-linux-<arch>/claude`.
 
-Both land in `/opt/symphony/bin`; no Node.js runtime is needed at run time. The
-final stage is `busybox`. Its entrypoint copies `/opt/symphony` into the
-directory given as the first argument, so it works as an init container writing
-to a shared volume:
+Both are kept in `/agent-tools/bin` inside the image; no Node.js runtime is
+needed at run time. The final stage is `busybox`. Its entrypoint copies
+`/agent-tools` into the directory given as the first argument, so it works as an
+init container writing to a shared volume mounted at `/opt/symphony`. That's why
+the image doesn't keep the tools at `/opt/symphony` itself: the mount would hide
+them:
 
 ```bash
 # Copy into a host directory (smoke test)

@@ -9,8 +9,10 @@
 #         - name: agent-tools
 #           mountPath: /opt/symphony
 #
-# The image itself is tiny; /opt/symphony holds the native Codex and Claude Code
-# binaries (no Node runtime is needed at run time).
+# The image itself is tiny; /agent-tools holds the native Codex and Claude Code
+# binaries (no Node runtime is needed at run time). They live outside
+# /opt/symphony on purpose: the shared volume is mounted there, which would hide
+# them in the init container.
 #
 # Build from the repository root:
 #
@@ -41,7 +43,7 @@ RUN set -eux; \
     /opt/symphony/bin/claude --version
 
 
-FROM busybox:latest
+FROM busybox:1.37.0
 
 ARG REVISION=unknown
 
@@ -51,7 +53,7 @@ LABEL org.opencontainers.image.title="symphony-agent-tools" \
       org.opencontainers.image.revision="${REVISION}" \
       org.opencontainers.image.licenses="Apache-2.0"
 
-COPY --from=build /opt/symphony /opt/symphony
+COPY --from=build /opt/symphony /agent-tools
 COPY elixir/images/agent-tools/copy-agent-tools.sh /usr/local/bin/copy-agent-tools
 RUN chmod 0755 /usr/local/bin/copy-agent-tools
 
