@@ -153,8 +153,8 @@ description), then `move_issue` to the stage its Blocked transitions allow.
   push to the default branch.
 - Agents can only make the moves their stage allows; people approve where the flow says so.
 - Your MCP token can do what you can do in Symphony, never more, and stops working if your
-  account is disabled or loses the access it was limited to. Create and revoke tokens on your
-  account's MCP tokens page.
+  account is disabled or loses the access it was limited to. Create and revoke tokens on the
+  dashboard's **MCP tokens** page (top-right menu, `/account/mcp`).
 - Flow saves are version-checked, so two editors can't silently overwrite each other.
 - Projects defined in Symphony's config file can't be changed through MCP; projects added
   through MCP can only point at GitHub repositories.
