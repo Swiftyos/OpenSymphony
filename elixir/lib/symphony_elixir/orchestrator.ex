@@ -55,9 +55,10 @@ defmodule SymphonyElixir.Orchestrator do
       :config_fingerprint,
       :next_poll_due_at_ms,
       :poll_check_in_progress,
+      :refresh_pending,
       :tick_timer_ref,
       :tick_token,
-      # The one poll in flight: %{ref, fingerprint, running_ids}.
+      # The one poll in flight: %{ref, pid, fingerprint, running_ids, timer_ref}.
       :poll_task,
       # %{requested_at: DateTime, requested_by: String} while a delayed restart is pending.
       :delayed_restart,
@@ -69,7 +70,9 @@ defmodule SymphonyElixir.Orchestrator do
       revalidation_tasks: %{},
       revalidation_results: %{},
       dispatch_order: [],
-      pending_dispatches: MapSet.new(),
+      # Issues with a dispatch revalidation in flight, by issue id. Their state
+      # and stage still count against the concurrency limits.
+      pending_dispatches: %{},
       # Retry lookups in flight, by task ref.
       retry_tasks: %{},
       retry_attempts: %{},
@@ -99,6 +102,7 @@ defmodule SymphonyElixir.Orchestrator do
         config_fingerprint: config_fingerprint(config),
         next_poll_due_at_ms: now_ms,
         poll_check_in_progress: false,
+        refresh_pending: false,
         tick_timer_ref: nil,
         tick_token: nil
       }
@@ -137,13 +141,15 @@ defmodule SymphonyElixir.Orchestrator do
     {:noreply, start_poll_task(state)}
   end
 
-  def handle_info({:DOWN, ref, :process, _pid, reason}, %{poll_task: %{ref: ref}} = state) do
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{poll_task: %{ref: ref} = poll_task} = state) do
+    cancel_task_timeout(poll_task)
     handle_poll_task_down(state, reason)
   end
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{revalidation_tasks: tasks} = state)
       when is_map_key(tasks, ref) do
     {context, tasks} = Map.pop(tasks, ref)
+    cancel_task_timeout(context)
     Logger.warning("Dispatch revalidation failed for issue_id=#{context.issue.id}: #{inspect(reason)}")
 
     state = %{state | revalidation_tasks: tasks}
@@ -153,6 +159,7 @@ defmodule SymphonyElixir.Orchestrator do
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{retry_tasks: tasks} = state)
       when is_map_key(tasks, ref) do
     {context, tasks} = Map.pop(tasks, ref)
+    cancel_task_timeout(context)
     state = %{state | retry_tasks: tasks}
 
     Logger.warning("Retry poll failed for issue_id=#{context.issue_id} issue_identifier=#{context.metadata[:identifier] || context.issue_id}: #{inspect(reason)}")
@@ -165,6 +172,37 @@ defmodule SymphonyElixir.Orchestrator do
         Map.merge(context.metadata, %{error: "retry poll failed: #{inspect(reason)}"})
       )
 
+    notify_dashboard()
+    {:noreply, state}
+  end
+
+  def handle_info({:tracker_task_timeout, ref}, %{poll_task: %{ref: ref} = poll_task} = state) do
+    kill_tracker_task(poll_task.pid)
+    Process.demonitor(ref, [:flush])
+    handle_poll_task_down(state, :timeout)
+  end
+
+  def handle_info({:tracker_task_timeout, ref}, %{revalidation_tasks: tasks} = state)
+      when is_map_key(tasks, ref) do
+    {context, tasks} = Map.pop(tasks, ref)
+    kill_tracker_task(context.pid)
+    Process.demonitor(ref, [:flush])
+    Logger.warning("Dispatch revalidation timed out for issue_id=#{context.issue.id}")
+
+    state = %{state | revalidation_tasks: tasks}
+    {:noreply, queue_revalidation_result(state, context, {:error, :timeout})}
+  end
+
+  def handle_info({:tracker_task_timeout, ref}, %{retry_tasks: tasks} = state)
+      when is_map_key(tasks, ref) do
+    {context, tasks} = Map.pop(tasks, ref)
+    kill_tracker_task(context.pid)
+    Process.demonitor(ref, [:flush])
+    state = %{state | retry_tasks: tasks}
+
+    Logger.warning("Retry poll timed out for issue_id=#{context.issue_id} issue_identifier=#{context.metadata[:identifier] || context.issue_id}")
+
+    {:noreply, state} = handle_retry_task_error(state, context, :timeout)
     notify_dashboard()
     {:noreply, state}
   end
@@ -240,6 +278,8 @@ defmodule SymphonyElixir.Orchestrator do
           running_entry
           |> maybe_put_runtime_value(:worker_host, runtime_info[:worker_host])
           |> maybe_put_runtime_value(:workspace_path, runtime_info[:workspace_path])
+          |> maybe_put_runtime_value(:backend, runtime_info[:backend])
+          |> maybe_put_runtime_value(:effort, runtime_info[:effort])
 
         notify_dashboard()
         {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
@@ -314,18 +354,21 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info({ref, result}, %{poll_task: %{ref: ref} = poll_task} = state) when is_reference(ref) do
     Process.demonitor(ref, [:flush])
+    cancel_task_timeout(poll_task)
     handle_poll_result(state, poll_task, result)
   end
 
   def handle_info({ref, result}, %{revalidation_tasks: tasks} = state) when is_map_key(tasks, ref) do
     Process.demonitor(ref, [:flush])
     {context, tasks} = Map.pop(tasks, ref)
+    cancel_task_timeout(context)
     handle_revalidation_result(%{state | revalidation_tasks: tasks}, context, result)
   end
 
   def handle_info({ref, result}, %{retry_tasks: tasks} = state) when is_map_key(tasks, ref) do
     Process.demonitor(ref, [:flush])
     {context, tasks} = Map.pop(tasks, ref)
+    cancel_task_timeout(context)
     result = handle_retry_task_result(%{state | retry_tasks: tasks}, context, result)
     notify_dashboard()
     result
@@ -393,7 +436,16 @@ defmodule SymphonyElixir.Orchestrator do
         }
       end)
 
-    %{state | poll_task: %{ref: task.ref, fingerprint: fingerprint, running_ids: running_ids}}
+    %{
+      state
+      | poll_task: %{
+          ref: task.ref,
+          pid: task.pid,
+          fingerprint: fingerprint,
+          running_ids: running_ids,
+          timer_ref: start_task_timeout(task.ref)
+        }
+    }
   end
 
   defp fetch_running_states([]), do: {:ok, []}
@@ -402,10 +454,11 @@ defmodule SymphonyElixir.Orchestrator do
   defp handle_poll_result(state, poll_task, result) do
     state = refresh_runtime_config(state)
     state = %{state | poll_task: nil, poll_check_in_progress: false}
+    state = reconcile_stalled_running_issues(state)
 
     if poll_task.fingerprint != state.config_fingerprint do
       Logger.info("Discarding poll result fetched before a configuration change; polling again")
-      state = schedule_tick(state, 0)
+      state = schedule_after_poll(state, 0)
       notify_dashboard()
       {:noreply, state}
     else
@@ -414,7 +467,7 @@ defmodule SymphonyElixir.Orchestrator do
         |> apply_running_states(poll_task.running_ids, result.running_result)
         |> apply_candidate_issues(result.candidates_result)
 
-      state = schedule_tick(state, state.poll_interval_ms)
+      state = schedule_after_poll(state, state.poll_interval_ms)
       notify_dashboard()
       {:noreply, state}
     end
@@ -423,13 +476,21 @@ defmodule SymphonyElixir.Orchestrator do
   defp handle_poll_task_down(state, reason) do
     Logger.error("Poll cycle failed: #{inspect(reason)}; keeping active workers and polling again")
     state = %{state | poll_task: nil, poll_check_in_progress: false}
-    state = schedule_tick(state, state.poll_interval_ms)
+    state = reconcile_stalled_running_issues(state)
+    state = schedule_after_poll(state, state.poll_interval_ms)
     notify_dashboard()
     {:noreply, state}
   end
 
+  # A refresh requested while a poll was in flight gets one immediate poll
+  # after it, however many requests arrived.
+  defp schedule_after_poll(%State{refresh_pending: true} = state, _delay_ms) do
+    schedule_tick(%{state | refresh_pending: false}, 0)
+  end
+
+  defp schedule_after_poll(%State{} = state, delay_ms), do: schedule_tick(state, delay_ms)
+
   defp apply_running_states(state, running_ids, {:ok, issues}) when is_list(issues) do
-    state = reconcile_stalled_running_issues(state)
     # Only issues still running now are reconciled: a run that finished while
     # the fetch was in flight must not have its retry claim reconciled away.
     running_ids = Enum.filter(running_ids, &Map.has_key?(state.running, &1))
@@ -447,7 +508,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp apply_running_states(state, _running_ids, {:error, reason}) do
     Logger.debug("Failed to refresh running issue states: #{inspect(reason)}; keeping active workers")
-    reconcile_stalled_running_issues(state)
+    state
   end
 
   defp apply_running_states(state, _running_ids, _result), do: state
@@ -714,6 +775,21 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp stop_running_task(_running_entry), do: :ok
 
+  defp start_task_timeout(ref) when is_reference(ref) do
+    Process.send_after(
+      self(),
+      {:tracker_task_timeout, ref},
+      Config.settings!().agent.tracker_task_timeout_ms
+    )
+  end
+
+  defp cancel_task_timeout(%{timer_ref: timer_ref}) when is_reference(timer_ref) do
+    Process.cancel_timer(timer_ref)
+    :ok
+  end
+
+  defp cancel_task_timeout(_context), do: :ok
+
   defp terminate_task(pid) when is_pid(pid) do
     case Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, pid) do
       :ok ->
@@ -725,6 +801,15 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp terminate_task(_pid), do: :ok
+
+  defp kill_tracker_task(pid) when is_pid(pid) do
+    case Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, pid) do
+      :ok -> :ok
+      {:error, :not_found} -> Process.exit(pid, :kill)
+    end
+  end
+
+  defp kill_tracker_task(_pid), do: :ok
 
   # Issues further along the flow go first, and an issue leaves a queue stage
   # (Todo) only while fewer issues than there are agent slots are in agent
@@ -758,11 +843,11 @@ defmodule SymphonyElixir.Orchestrator do
   defp admitted_from_queue?("queue", before, after_dispatch, issue_id) do
     starting? =
       Map.has_key?(after_dispatch.running, issue_id) or
-        MapSet.member?(after_dispatch.pending_dispatches, issue_id)
+        Map.has_key?(after_dispatch.pending_dispatches, issue_id)
 
     starting? and
       not Map.has_key?(before.running, issue_id) and
-      not MapSet.member?(before.pending_dispatches, issue_id)
+      not Map.has_key?(before.pending_dispatches, issue_id)
   end
 
   defp admitted_from_queue?(_kind, _before, _after_dispatch, _issue_id), do: false
@@ -857,19 +942,23 @@ defmodule SymphonyElixir.Orchestrator do
       !MapSet.member?(claimed, issue.id) and
       !Map.has_key?(running, issue.id) and
       available_slots(state) > 0 and
-      state_slots_available?(issue, running)
+      state_slots_available?(issue, state)
   end
 
-  defp state_slots_available?(%Issue{state: issue_state} = issue, running) when is_map(running) do
+  defp state_slots_available?(%Issue{state: issue_state} = issue, %State{} = state) do
     limit = Config.max_concurrent_agents_for_state(issue_state)
-    used = running_issue_count_for_state(running, issue_state)
-    limit > used and stage_slots_available?(issue, running)
+
+    used =
+      running_issue_count_for_state(state.running, issue_state) +
+        pending_issue_count_for_state(state.pending_dispatches, issue_state)
+
+    limit > used and stage_slots_available?(issue, state)
   end
 
-  defp state_slots_available?(_issue, _running), do: false
+  defp state_slots_available?(_issue, _state), do: false
 
   # Per-stage cap set from the dashboard (FactoryControls).
-  defp stage_slots_available?(issue, running) do
+  defp stage_slots_available?(issue, %State{running: running, pending_dispatches: pending_dispatches}) do
     stage = IssueStage.control_stage(issue)
 
     case FactoryControls.get(stage).max_agents do
@@ -878,7 +967,11 @@ defmodule SymphonyElixir.Orchestrator do
           Enum.count(running, fn
             {_id, %{issue: %Issue{} = running_issue}} -> IssueStage.control_stage(running_issue) == stage
             _ -> false
-          end)
+          end) +
+            Enum.count(pending_dispatches, fn
+              {_id, %Issue{} = pending_issue} -> IssueStage.control_stage(pending_issue) == stage
+              _ -> false
+            end)
 
         used < limit
 
@@ -896,6 +989,15 @@ defmodule SymphonyElixir.Orchestrator do
 
       _ ->
         false
+    end)
+  end
+
+  defp pending_issue_count_for_state(pending_dispatches, issue_state) when is_map(pending_dispatches) do
+    normalized_state = normalize_issue_state(issue_state)
+
+    Enum.count(pending_dispatches, fn
+      {_id, %Issue{state: state_name}} -> normalize_issue_state(state_name) == normalized_state
+      _ -> false
     end)
   end
 
@@ -996,16 +1098,20 @@ defmodule SymphonyElixir.Orchestrator do
 
     context = %{issue: issue, attempt: attempt, preferred_worker_host: preferred_worker_host}
 
+    timer_ref = start_task_timeout(task.ref)
+    context = Map.merge(context, %{pid: task.pid, timer_ref: timer_ref})
+
     %{
       state
       | revalidation_tasks: Map.put(state.revalidation_tasks, task.ref, context),
         dispatch_order: state.dispatch_order ++ [issue_id],
-        pending_dispatches: MapSet.put(state.pending_dispatches, issue_id)
+        pending_dispatches: Map.put(state.pending_dispatches, issue_id, issue)
     }
   end
 
   defp dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host) do
-    do_dispatch_issue(state, issue, attempt, preferred_worker_host)
+    {_outcome, state} = do_dispatch_issue(state, issue, attempt, preferred_worker_host)
+    state
   end
 
   defp handle_revalidation_result(state, context, result) do
@@ -1031,7 +1137,7 @@ defmodule SymphonyElixir.Orchestrator do
           state
           | dispatch_order: rest,
             revalidation_results: results,
-            pending_dispatches: MapSet.delete(state.pending_dispatches, issue_id)
+            pending_dispatches: Map.delete(state.pending_dispatches, issue_id)
         }
 
         state
@@ -1071,13 +1177,36 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp dispatch_revalidated_issue(state, context, refreshed_issue) do
-    state = do_dispatch_issue(state, refreshed_issue, context.attempt, context.preferred_worker_host)
-
-    if Map.has_key?(state.running, refreshed_issue.id) or Map.has_key?(state.retry_attempts, refreshed_issue.id) do
-      state
+    if dispatch_slots_available?(refreshed_issue, state) do
+      case do_dispatch_issue(state, refreshed_issue, context.attempt, context.preferred_worker_host) do
+        {:ok, state} -> state
+        {:unavailable, state} -> hold_or_reschedule_revalidated_dispatch(state, context, refreshed_issue)
+        {:error, state} -> release_issue_claim(state, refreshed_issue.id)
+      end
     else
-      release_issue_claim(state, refreshed_issue.id)
+      hold_or_reschedule_revalidated_dispatch(state, context, refreshed_issue)
     end
+  end
+
+  defp hold_or_reschedule_revalidated_dispatch(state, %{attempt: attempt} = context, refreshed_issue)
+       when is_integer(attempt) do
+    Logger.debug("No available slots for retrying #{issue_context(refreshed_issue)}; retrying again")
+
+    schedule_issue_retry(
+      state,
+      refreshed_issue.id,
+      attempt + 1,
+      %{
+        identifier: refreshed_issue.identifier,
+        error: "no available orchestrator slots",
+        worker_host: context.preferred_worker_host
+      }
+      |> Map.merge(retry_issue_metadata(refreshed_issue))
+    )
+  end
+
+  defp hold_or_reschedule_revalidated_dispatch(state, _context, refreshed_issue) do
+    release_issue_claim(state, refreshed_issue.id)
   end
 
   defp do_dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host) do
@@ -1093,15 +1222,15 @@ defmodule SymphonyElixir.Orchestrator do
           :no_worker_capacity ->
             Logger.debug("No worker slots available for #{issue_context(issue)} backend=#{route.backend} preferred_worker_host=#{inspect(preferred_worker_host)}")
 
-            state
+            {:unavailable, state}
 
           worker_host ->
-            dispatch_issue_with_account(state, issue, attempt, recipient, worker_host, route, issue_config)
+            {:ok, dispatch_issue_with_account(state, issue, attempt, recipient, worker_host, route, issue_config)}
         end
 
       {:error, reason} ->
         Logger.error("Skipping dispatch; issue config resolution failed for #{issue_context(issue)}: #{inspect(reason)}")
-        state
+        {:error, state}
     end
   end
 
@@ -1419,7 +1548,14 @@ defmodule SymphonyElixir.Orchestrator do
         Tracker.fetch_issue_states_by_ids([issue_id])
       end)
 
-    context = %{issue_id: issue_id, attempt: attempt, metadata: metadata}
+    context = %{
+      issue_id: issue_id,
+      attempt: attempt,
+      metadata: metadata,
+      pid: task.pid,
+      timer_ref: start_task_timeout(task.ref)
+    }
+
     %{state | retry_tasks: Map.put(state.retry_tasks, task.ref, context)}
   end
 
@@ -1787,7 +1923,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp available_slots(%State{} = state) do
     max(
       (state.max_concurrent_agents || Config.settings!().agent.max_concurrent_agents) -
-        map_size(state.running),
+        map_size(state.running) - map_size(state.pending_dispatches),
       0
     )
   end
@@ -1942,8 +2078,17 @@ defmodule SymphonyElixir.Orchestrator do
   defp queue_refresh(state) do
     now_ms = System.monotonic_time(:millisecond)
     already_due? = is_integer(state.next_poll_due_at_ms) and state.next_poll_due_at_ms <= now_ms
-    coalesced = state.poll_check_in_progress == true or already_due?
-    {coalesced, if(coalesced, do: state, else: schedule_tick(state, 0))}
+
+    cond do
+      state.poll_check_in_progress == true ->
+        {true, %{state | refresh_pending: true}}
+
+      already_due? ->
+        {true, state}
+
+      true ->
+        {false, schedule_tick(state, 0)}
+    end
   end
 
   defp delayed_restart_payload(%State{delayed_restart: %{requested_at: at, requested_by: by}, running: running}),
@@ -2379,7 +2524,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp dispatch_slots_available?(%Issue{} = issue, %State{} = state) do
-    available_slots(state) > 0 and state_slots_available?(issue, state.running)
+    available_slots(state) > 0 and state_slots_available?(issue, state)
   end
 
   defp running_entry_backend(running_entry) when is_map(running_entry) do

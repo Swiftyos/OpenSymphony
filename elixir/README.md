@@ -132,6 +132,7 @@ agent:
   default_effort: medium
   max_concurrent_agents: 10
   max_turns: 20
+  tracker_task_timeout_ms: 60000
 codex:
   command: codex app-server
 claude:
@@ -239,6 +240,8 @@ Notes:
 - Codex uses the public `max` effort setting and maps it to Codex's `xhigh` launcher setting.
 - `agent.max_turns` caps how many back-to-back unattended turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
+- `agent.tracker_task_timeout_ms` caps how long an orchestrator tracker call (poll, dispatch
+  revalidation or retry lookup) may take before Symphony kills it and treats it as failed. Default: `60000`.
 - OpenCode v1 is local-only in Symphony. `worker.ssh_hosts` and
   `worker.max_concurrent_agents_per_host` are rejected during config validation.
 - OpenCode stays local-only even when other backends use SSH workers. A ticket labeled `opencode`

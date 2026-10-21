@@ -42,6 +42,23 @@ defmodule SymphonyElixir.RunHost.Local do
   def runtime_info(_host, _issue, _worker_host, _workspace), do: :ok
 
   @impl true
+  def route_info(%__MODULE__{recipient: recipient}, %Issue{id: issue_id}, route)
+      when is_binary(issue_id) and is_pid(recipient) and is_map(route) do
+    send(
+      recipient,
+      {:worker_runtime_info, issue_id,
+       %{
+         backend: Map.get(route, :backend),
+         effort: Map.get(route, :effort)
+       }}
+    )
+
+    :ok
+  end
+
+  def route_info(_host, _issue, _route), do: :ok
+
+  @impl true
   def agent_update(%__MODULE__{recipient: recipient}, issue, backend, message) do
     Transcript.record(issue_identifier(issue), message, backend: backend)
     send_agent_update(recipient, issue, backend, message)

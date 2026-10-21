@@ -410,6 +410,10 @@ Fields:
 - `max_retry_backoff_ms` (integer or string integer)
   - Default: `300000` (5 minutes)
   - Changes should be re-applied at runtime and affect future retry scheduling.
+- `tracker_task_timeout_ms` (integer or string integer)
+  - Default: `60000` (1 minute)
+  - Deadline for one tracker call made by an orchestrator task (poll, dispatch revalidation or
+    retry lookup). An expired task is killed and handled like a crashed task.
 - `max_concurrent_agents_by_state` (map `state_name -> positive integer`)
   - Default: empty map.
   - State keys are normalized (`lowercase`) for lookup.
@@ -707,6 +711,7 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `agent.max_concurrent_agents`: integer, default `10`
 - `agent.max_turns`: integer, default `20`
 - `agent.max_retry_backoff_ms`: integer, default `300000` (5m)
+- `agent.tracker_task_timeout_ms`: integer, default `60000` (1m)
 - `agent.max_concurrent_agents_by_state`: map of positive integers, default `{}`
 - `codex.command`: shell command string, default `codex app-server`
 - `codex.approval_policy`: Codex `AskForApproval` value, default implementation-defined
@@ -868,14 +873,17 @@ Sorting order (stable intent):
 
 Global limit:
 
-- `available_slots = max(max_concurrent_agents - running_count, 0)`
+- `available_slots = max(max_concurrent_agents - running_count - pending_dispatch_count, 0)`
+- Pending dispatches (issues waiting on dispatch revalidation) keep counting against the global,
+  per-state and per-stage limits until their revalidation is applied.
 
 Per-state limit:
 
 - `max_concurrent_agents_by_state[state]` if present (state key normalized)
 - otherwise fallback to global limit
 
-The runtime counts issues by their current tracked state in the `running` map.
+The runtime counts issues by their current tracked state in the `running` map and the pending
+revalidation set.
 
 Optional SSH host limit:
 
@@ -915,7 +923,8 @@ Note:
 
 ### 8.5 Active Run Reconciliation
 
-Reconciliation runs every tick and has two parts.
+Reconciliation runs every tick and has two parts. Stall detection still runs when the tracker
+fetch fails or times out.
 
 Part A: Stall detection
 

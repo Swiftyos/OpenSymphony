@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.OrchestratorAsyncTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.FactoryControls
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.RunLauncher.Local
 
@@ -58,6 +59,13 @@ defmodule SymphonyElixir.OrchestratorAsyncTest do
 
         :crash ->
           raise "the tracker is down"
+
+        :block_states when name == :fetch_issue_states_by_ids ->
+          receive do
+            {:release, pid} when pid == self() -> :ok
+          after
+            5_000 -> :ok
+          end
 
         _ ->
           :ok
@@ -215,7 +223,7 @@ defmodule SymphonyElixir.OrchestratorAsyncTest do
     assert log =~ "Poll cycle failed"
   end
 
-  test "two refresh requests during one poll add at most one more poll" do
+  test "two refresh requests during one poll add exactly one more poll" do
     Application.put_env(:symphony_elixir, :async_tracker_gate, :block)
     {pid, name} = start_orchestrator()
 
@@ -224,9 +232,254 @@ defmodule SymphonyElixir.OrchestratorAsyncTest do
     assert %{queued: true, coalesced: true} = Orchestrator.request_refresh(name)
 
     send(task_pid, {:release, task_pid})
+    assert_receive {:tracker_gate, :fetch_candidate_issues, [], second_task_pid}, 2_000
+    send(second_task_pid, {:release, second_task_pid})
+
+    wait_until(fn -> :sys.get_state(pid).poll_task == nil end)
+    refute_receive {:tracker_gate, :fetch_candidate_issues, [], _pid}, 200
+  end
+
+  test "pending revalidations count against the global slot limit" do
+    Application.put_env(:symphony_elixir, :run_launcher, RecordingLauncher)
+    write_workflow_file!(Workflow.workflow_file_path(), max_concurrent_agents: 1)
+
+    Application.put_env(
+      :symphony_elixir,
+      :async_tracker_issues,
+      [agent_issue("issue-a", "MT-CAP-1", 1), agent_issue("issue-b", "MT-CAP-2", 2), agent_issue("issue-c", "MT-CAP-3", 3)]
+    )
+
+    {pid, _name} = start_orchestrator()
+
+    assert_receive {:launched, _identifier}, 2_000
+    refute_receive {:launched, _identifier}, 300
+    wait_until(fn -> map_size(:sys.get_state(pid).running) == 1 end)
+  end
+
+  test "pending revalidations count against the per-state slot limit" do
+    Application.put_env(:symphony_elixir, :run_launcher, RecordingLauncher)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      max_concurrent_agents: 5,
+      max_concurrent_agents_by_state: %{"In Progress" => 1}
+    )
+
+    Application.put_env(
+      :symphony_elixir,
+      :async_tracker_issues,
+      [agent_issue("issue-a", "MT-STATE-1", 1), agent_issue("issue-b", "MT-STATE-2", 2)]
+    )
+
+    {pid, _name} = start_orchestrator()
+
+    assert_receive {:launched, _identifier}, 2_000
+    refute_receive {:launched, _identifier}, 300
+    wait_until(fn -> map_size(:sys.get_state(pid).running) == 1 end)
+  end
+
+  test "pending revalidations count against the per-stage FactoryControls limit" do
+    Application.put_env(:symphony_elixir, :run_launcher, RecordingLauncher)
+    FactoryControls.reset()
+    on_exit(&FactoryControls.reset/0)
+    {:ok, _} = FactoryControls.put("implement", "max_agents", 1)
+
+    Application.put_env(
+      :symphony_elixir,
+      :async_tracker_issues,
+      [agent_issue("issue-a", "MT-STAGE-1", 1), agent_issue("issue-b", "MT-STAGE-2", 2)]
+    )
+
+    {pid, _name} = start_orchestrator()
+
+    assert_receive {:launched, _identifier}, 2_000
+    refute_receive {:launched, _identifier}, 300
+    wait_until(fn -> map_size(:sys.get_state(pid).running) == 1 end)
+  end
+
+  test "a retry arriving while a revalidation is pending does not exceed the slot limit" do
+    Application.put_env(:symphony_elixir, :run_launcher, RecordingLauncher)
+    Application.put_env(:symphony_elixir, :async_tracker_gate, :block_states)
+    write_workflow_file!(Workflow.workflow_file_path(), max_concurrent_agents: 1)
+
+    issues = [agent_issue("issue-a", "MT-RETRY-1", 1), agent_issue("issue-b", "MT-RETRY-2", 2)]
+    Application.put_env(:symphony_elixir, :async_tracker_issues, issues)
+
+    {pid, _name} = start_orchestrator()
+
+    token_a = make_ref()
+    token_b = make_ref()
+    put_retry(pid, "issue-a", 1, token_a)
+    put_retry(pid, "issue-b", 1, token_b)
+    send(pid, {:retry_issue, "issue-a", token_a})
+    send(pid, {:retry_issue, "issue-b", token_b})
+
+    assert_receive {:tracker_gate, :fetch_issue_states_by_ids, _issue_id, lookup_pid}, 2_000
+    assert_receive {:tracker_gate, :fetch_issue_states_by_ids, _other_issue_id, other_lookup_pid}, 2_000
+    send(lookup_pid, {:release, lookup_pid})
+    send(other_lookup_pid, {:release, other_lookup_pid})
+
+    assert_receive {:tracker_gate, :fetch_issue_states_by_ids, _issue_id, revalidation_pid}, 2_000
+    refute_receive {:tracker_gate, :fetch_issue_states_by_ids, _issue_id, _pid}, 200
+    send(revalidation_pid, {:release, revalidation_pid})
+
+    assert_receive {:launched, _identifier}, 2_000
+    refute_receive {:launched, _identifier}, 300
+    wait_until(fn -> map_size(:sys.get_state(pid).running) == 1 end)
+
+    retries = Map.values(:sys.get_state(pid).retry_attempts)
+    assert [%{attempt: 2}] = retries
+  end
+
+  test "a retry revalidation that finds the last slot taken is rescheduled, not dropped" do
+    Application.put_env(:symphony_elixir, :run_launcher, RecordingLauncher)
+    Application.put_env(:symphony_elixir, :async_tracker_gate, :block_states)
+    write_workflow_file!(Workflow.workflow_file_path(), max_concurrent_agents: 1)
+
+    issue = agent_issue("issue-a", "MT-RETRY-LOST", 1)
+    issue_id = issue.id
+    Application.put_env(:symphony_elixir, :async_tracker_issues, [issue])
+
+    {pid, _name} = start_orchestrator()
+
+    token = make_ref()
+    put_retry(pid, issue_id, 1, token)
+    send(pid, {:retry_issue, issue_id, token})
+
+    assert_receive {:tracker_gate, :fetch_issue_states_by_ids, ^issue_id, lookup_pid}, 2_000
+    send(lookup_pid, {:release, lookup_pid})
+
+    assert_receive {:tracker_gate, :fetch_issue_states_by_ids, ^issue_id, revalidation_pid}, 2_000
+
+    :sys.replace_state(pid, fn state ->
+      running_entry = %{pid: self(), ref: nil, identifier: "MT-OTHER", issue: agent_issue("issue-other", "MT-OTHER", 1)}
+      %{state | running: Map.put(state.running, "issue-other", running_entry)}
+    end)
+
+    send(revalidation_pid, {:release, revalidation_pid})
+
+    wait_until(fn ->
+      case :sys.get_state(pid).retry_attempts[issue_id] do
+        %{attempt: 2} -> true
+        _ -> false
+      end
+    end)
+
+    state = :sys.get_state(pid)
+    assert MapSet.member?(state.claimed, issue_id)
+    refute_received {:launched, _identifier}
+  end
+
+  test "a failed poll still runs stall detection" do
+    Application.put_env(:symphony_elixir, :async_tracker_gate, :block)
+    Application.put_env(:symphony_elixir, :async_tracker_crash_on_fetch, [1])
+
+    {pid, _name} = start_orchestrator()
+
+    assert_receive {:tracker_gate, :fetch_candidate_issues, [], task_pid}, 2_000
+
+    issue = agent_issue("issue-stalled", "MT-STALL-1", 1)
+
+    :sys.replace_state(pid, fn state ->
+      running_entry = %{
+        pid: nil,
+        ref: nil,
+        identifier: issue.identifier,
+        issue: issue,
+        backend: "opencode",
+        effort: nil,
+        stall_timeout_ms: 1,
+        retry_attempt: 0,
+        started_at: DateTime.add(DateTime.utc_now(), -1_000, :millisecond)
+      }
+
+      %{state | running: Map.put(state.running, issue.id, running_entry)}
+    end)
+
+    send(task_pid, {:release, task_pid})
+
+    wait_until(fn -> Map.has_key?(:sys.get_state(pid).retry_attempts, issue.id) end)
+    assert %{attempt: 1} = :sys.get_state(pid).retry_attempts[issue.id]
+  end
+
+  test "route info updates the running entry's backend and effort" do
+    {pid, _name} = start_orchestrator()
     wait_until(fn -> :sys.get_state(pid).poll_task == nil end)
 
-    refute_receive {:tracker_gate, :fetch_candidate_issues, [], _pid}, 200
+    issue = agent_issue("issue-route", "MT-ROUTE-1", 1)
+
+    :sys.replace_state(pid, fn state ->
+      %{state | running: Map.put(state.running, issue.id, %{pid: nil, ref: nil, identifier: issue.identifier, issue: issue, backend: "claude", effort: "low"})}
+    end)
+
+    send(pid, {:worker_runtime_info, issue.id, %{backend: "claude", effort: "high"}})
+
+    wait_until(fn -> :sys.get_state(pid).running[issue.id].effort == "high" end)
+    assert :sys.get_state(pid).running[issue.id].backend == "claude"
+  end
+
+  test "a hung poll task times out, is killed and polls again on the next tick" do
+    Application.put_env(:symphony_elixir, :async_tracker_gate, :block)
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_task_timeout_ms: 50)
+
+    log =
+      capture_log(fn ->
+        {pid, _name} = start_orchestrator()
+
+        assert_receive {:tracker_gate, :fetch_candidate_issues, [], _task_pid}, 2_000
+        wait_until(fn -> :sys.get_state(pid).poll_task == nil end, 100)
+
+        send(pid, :tick)
+        assert_receive {:tracker_gate, :fetch_candidate_issues, [], _next_task_pid}, 2_000
+      end)
+
+    assert log =~ "Poll cycle failed"
+  end
+
+  test "a hung revalidation times out, releases the claim and allows a later poll" do
+    Application.put_env(:symphony_elixir, :run_launcher, RecordingLauncher)
+    Application.put_env(:symphony_elixir, :async_tracker_state_delays, %{"issue-a" => 2_000})
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_task_timeout_ms: 50)
+
+    issue = agent_issue("issue-a", "MT-TIMEOUT-REVAL", 1)
+    Application.put_env(:symphony_elixir, :async_tracker_issues, [issue])
+
+    log =
+      capture_log(fn ->
+        {pid, _name} = start_orchestrator()
+
+        assert_receive {:states_fetched, _task_pid, ["issue-a"]}, 2_000
+        wait_until(fn -> :sys.get_state(pid).revalidation_tasks == %{} end, 100)
+
+        state = :sys.get_state(pid)
+        assert state.pending_dispatches == %{}
+        refute MapSet.member?(state.claimed, issue.id)
+      end)
+
+    assert log =~ "Dispatch revalidation timed out"
+    refute_received {:launched, _identifier}
+  end
+
+  test "a hung retry lookup times out and reschedules the retry" do
+    Application.put_env(:symphony_elixir, :async_tracker_state_delays, %{"issue-a" => 2_000})
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_task_timeout_ms: 50)
+
+    issue = agent_issue("issue-a", "MT-TIMEOUT-RETRY", 1)
+    Application.put_env(:symphony_elixir, :async_tracker_issues, [issue])
+
+    {pid, _name} = start_orchestrator()
+
+    token = make_ref()
+    put_retry(pid, issue.id, 1, token)
+    send(pid, {:retry_issue, issue.id, token})
+
+    wait_until(fn ->
+      case :sys.get_state(pid).retry_attempts[issue.id] do
+        %{attempt: 2} -> true
+        _ -> false
+      end
+    end)
+
+    assert :sys.get_state(pid).retry_tasks == %{}
   end
 
   defp queued_issue(id, identifier, priority) do
@@ -238,6 +491,25 @@ defmodule SymphonyElixir.OrchestratorAsyncTest do
       priority: priority,
       labels: []
     }
+  end
+
+  defp agent_issue(id, identifier, priority) do
+    %{queued_issue(id, identifier, priority) | state: "In Progress"}
+  end
+
+  defp put_retry(pid, issue_id, attempt, token) do
+    :sys.replace_state(pid, fn state ->
+      entry = %{
+        attempt: attempt,
+        timer_ref: nil,
+        retry_token: token,
+        due_at_ms: System.monotonic_time(:millisecond) + 30_000,
+        identifier: issue_id,
+        error: "test retry"
+      }
+
+      %{state | retry_attempts: Map.put(state.retry_attempts, issue_id, entry), claimed: MapSet.put(state.claimed, issue_id)}
+    end)
   end
 
   defp start_orchestrator do

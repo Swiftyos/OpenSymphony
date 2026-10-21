@@ -20,6 +20,9 @@ defmodule SymphonyElixir.RunHostTest do
       do: record(host, :runtime_info, %{issue: issue, worker_host: worker_host, workspace: workspace})
 
     @impl true
+    def route_info(host, issue, route), do: record(host, :route_info, %{issue: issue, route: route})
+
+    @impl true
     def agent_update(host, issue, backend, message),
       do: record(host, :agent_update, %{issue: issue, backend: backend, message: message})
 
@@ -218,6 +221,18 @@ defmodule SymphonyElixir.RunHostTest do
 
       assert :ok = RunHost.runtime_info(Local.new(), issue, nil, "/workspaces/MT-LOCAL-1")
       assert :ok = RunHost.runtime_info(Local.new(self()), issue, nil, nil)
+      refute_received {:worker_runtime_info, _, _}
+    end
+
+    test "a re-resolved route goes to the recipient, and nowhere without one" do
+      issue = issue_fixture("issue-local-route", "MT-LOCAL-ROUTE")
+      route = %{backend: "claude", effort: "high"}
+
+      assert :ok = RunHost.route_info(Local.new(self()), issue, route)
+      assert_receive {:worker_runtime_info, "issue-local-route", %{backend: "claude", effort: "high"}}
+
+      assert :ok = RunHost.route_info(Local.new(), issue, route)
+      assert :ok = RunHost.route_info(Local.new(self()), issue, :not_a_map)
       refute_received {:worker_runtime_info, _, _}
     end
 

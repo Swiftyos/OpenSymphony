@@ -76,7 +76,7 @@ defmodule SymphonyElixir.AgentRunner do
 
     try do
       with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host, settings: issue_config.settings),
-           {:ok, issue, route} <- pick_up_and_reroute(issue, route, issue_config),
+           {:ok, issue, route} <- pick_up_and_reroute(issue, route, issue_config, host),
            :ok <- prepare_workspace_for_backend(workspace, worker_host, route.backend, issue_config) do
         run_backend_turns(workspace, issue, host, opts, worker_host, route)
       else
@@ -435,7 +435,7 @@ defmodule SymphonyElixir.AgentRunner do
   # issue is in its next stage, so re-resolve there. A different backend means
   # this run (account and session belong to the old one) ends and the
   # orchestrator's continuation retry starts the new stage's backend.
-  defp pick_up_and_reroute(%Issue{} = issue, %AgentRoute{} = route, issue_config) do
+  defp pick_up_and_reroute(%Issue{} = issue, %AgentRoute{} = route, issue_config, host) do
     moved_issue = pick_up(issue)
 
     if moved_issue == issue do
@@ -448,6 +448,7 @@ defmodule SymphonyElixir.AgentRunner do
 
         :handover
       else
+        RunHost.route_info(host, moved_issue, next_route)
         {:ok, moved_issue, next_route}
       end
     end

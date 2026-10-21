@@ -16,8 +16,11 @@ defmodule SymphonyElixir.ClaudeAgentRunnerTest do
     {:ok, _} = FactoryControls.put("implement", "effort", "high")
 
     issue = %{issue | state: "Todo", labels: []}
+    issue_id = issue.id
 
-    assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: fn _ -> {:ok, [%{issue | state: "Done"}]} end)
+    assert :ok = AgentRunner.run(issue, self(), issue_state_fetcher: fn _ -> {:ok, [%{issue | state: "Done"}]} end)
+
+    assert_receive {:worker_runtime_info, ^issue_id, %{backend: "claude", effort: "high"}}, 1_000
 
     argv = trace_file |> File.read!() |> String.split("\n", trim: true) |> Enum.find(&String.starts_with?(&1, "ARGV:"))
     assert argv =~ "--effort high"

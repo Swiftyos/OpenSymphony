@@ -28,6 +28,9 @@ defmodule SymphonyElixir.RunHost do
   @doc "Tells the controller where the run's workspace is (host and path)."
   @callback runtime_info(t(), Issue.t(), String.t() | nil, String.t()) :: :ok
 
+  @doc "Reports the route a run was re-resolved to after a pick-up (backend and effort)."
+  @callback route_info(t(), Issue.t(), map()) :: :ok
+
   @doc """
   Reports an agent event for the issue, after recording it in the issue's
   transcript. The controller message is `{:codex_worker_update, ...}` for the
@@ -83,6 +86,9 @@ defmodule SymphonyElixir.RunHost do
   @spec runtime_info(t(), Issue.t(), String.t() | nil, String.t()) :: :ok
   def runtime_info(host, issue, worker_host, workspace),
     do: host.__struct__.runtime_info(host, issue, worker_host, workspace)
+
+  @spec route_info(t(), Issue.t(), map()) :: :ok
+  def route_info(host, issue, route), do: host.__struct__.route_info(host, issue, route)
 
   @spec agent_update(t(), Issue.t(), String.t() | nil, map()) :: :ok
   def agent_update(host, issue, backend, message),
