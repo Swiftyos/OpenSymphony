@@ -878,10 +878,12 @@ claude mcp add --transport http symphony https://symphony.example.com/mcp \
 ```
 
 **Tools.** Read: `symphony_status`, `list_flows`, `get_flow`, `list_issues`, `get_issue`,
-`get_transcript`. Write (needs a read-and-write token): `save_flow` (version-checked like the
+`get_transcript`, `list_projects`. Write (needs a read-and-write token): `save_flow` (version-checked like the
 editor: a stale `base_version` returns the current one), `set_stage_control` (paused,
 max_agents, backend, effort, approval), `set_autopilot`, `reset_flow`, `move_issue`,
-`review_issue`, `send_agent_message`, `refresh`. Results are trimmed by the same rules as the
+`review_issue`, `send_agent_message`, `refresh`. Admins can also change which Linear projects Symphony listens to:
+`add_project` (a Linear project URL or slug id, and a GitHub `owner/name` repo) and
+`remove_project`. Results are trimmed by the same rules as the
 dashboard. Flow and stage changes and moves follow `server.controls`, and the Linear comments and
 flow history name the person and the token ("mia via MCP (ops bot)"). Every tool call is logged
 with the user and token.
@@ -891,6 +893,22 @@ That's true in every auth mode, so it's safe to expose. Requests that carry an `
 (browsers) must come from `server.public_url` or `server.mcp.allowed_origins`, which stops web
 pages and DNS rebinding from driving it. Each client IP gets 600 requests a minute. Tokens are
 256-bit random values, so the limit is about load, not guessing.
+
+#### Adding projects through MCP
+
+Symphony listens to the projects in `symphony.yml`'s `projects:` block plus the ones admins add
+with `add_project`, from the next poll with no restart. Stored routes are kept in
+`~/.symphony/project_routes.json` (through the state store) and are narrower than file routes:
+
+- the repo must be a GitHub `owner/name` (never a local path or another URL)
+- the workflow must be a repo-relative `.md` path (default `WORKFLOW.md`)
+- the workspace is always `workspace.root/<project slug>`
+
+A project in `symphony.yml` always wins over a stored one with the same slug, and can't be
+changed through MCP. Stored routes apply only in multi-project mode (a `symphony.yml` with
+`projects:`), not when Symphony runs from a single `WORKFLOW.md`. Before filing issues, the repo
+needs its workflow file on the default branch, and Symphony's GitHub access needs push and
+pull-request rights on it.
 
 #### Exposing /mcp without a sign-in proxy (e.g. Google IAP)
 

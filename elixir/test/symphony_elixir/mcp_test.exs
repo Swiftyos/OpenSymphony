@@ -139,7 +139,7 @@ defmodule SymphonyElixir.McpTest do
       notification = post_json(secret, %{jsonrpc: "2.0", method: "notifications/initialized"})
       assert notification.status == 202
 
-      assert %{"error" => %{"code" => -32_601}} = json_response(rpc(secret, "resources/list"), 200)
+      assert %{"error" => %{"code" => -32_601}} = json_response(rpc(secret, "prompts/list"), 200)
       assert %{"error" => %{"code" => -32_600}} = json_response(post_json(secret, [%{jsonrpc: "2.0", id: 1, method: "ping"}]), 400)
       assert %{"error" => %{"code" => -32_600}} = json_response(rpc(secret, "ping", %{}, [{"mcp-protocol-version", "1999-01-01"}]), 400)
       assert %{"error" => %{"code" => -32_602}} = json_response(rpc(secret, "tools/call", %{"name" => "rm_rf"}), 200)

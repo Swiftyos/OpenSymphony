@@ -15,9 +15,21 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
 
   require Logger
 
-  alias SymphonyElixir.{AgentInbox, Auth, Config, FactoryControls, IssueMoves, Orchestrator, Transcript, UsageLedger}
+  alias SymphonyElixir.{
+    AgentInbox,
+    Auth,
+    Config,
+    FactoryControls,
+    IssueMoves,
+    Orchestrator,
+    ProjectRoutes,
+    Transcript,
+    UsageLedger
+  }
+
   alias SymphonyElixir.Factory.Store
   alias SymphonyElixirWeb.{Endpoint, FactoryPresenter, ObservabilityPubSub, Presenter, Visibility}
+  alias SymphonyElixirWeb.Mcp.Manual
 
   @type context :: %{user: Auth.User.t(), scopes: [String.t()], actor: String.t(), via: String.t()}
 
@@ -25,6 +37,20 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
   @control_fields ["paused", "max_agents", "backend", "effort", "approval"]
 
   @tools [
+    %{
+      name: "get_manual",
+      scope: "read",
+      description:
+        "Symphony's manual: what Symphony is, its concepts (projects, flows, stages, transitions), an issue's life, where people step in, every tool here, and recipes. Call it first when asked what this is or how it works.",
+      properties: %{
+        section: %{
+          type: "string",
+          enum: Manual.sections(),
+          description: "One section only; leave out for the whole manual."
+        }
+      },
+      required: []
+    },
     %{
       name: "symphony_status",
       scope: "read",
@@ -156,6 +182,36 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
       description: "Poll Linear and reconcile now instead of waiting for the next tick.",
       properties: %{},
       required: []
+    },
+    %{
+      name: "list_projects",
+      scope: "read",
+      description:
+        "The Linear projects Symphony listens to for issues, and the GitHub repo each one's issues are worked in. `source` is `config` (symphony.yml, change it there) or `mcp` (added with add_project).",
+      properties: %{},
+      required: []
+    },
+    %{
+      name: "add_project",
+      scope: "write",
+      description:
+        "Admins: make Symphony listen to a Linear project and work its issues in a GitHub repo, from the next poll. Issues follow the project's flow, else its team's. The repo must have the workflow file (default WORKFLOW.md) on its default branch, and Symphony's GitHub access must be able to push to it. Adding an existing slug updates it.",
+      properties: %{
+        project: %{type: "string", description: "The Linear project's URL or slug id (e.g. 185b1980c0bc)."},
+        repo: %{type: "string", description: "GitHub repository as owner/name, e.g. n8n-io/lang-tracer."},
+        workflow: %{type: "string", description: "Path of the workflow file in the repo (default WORKFLOW.md)."},
+        default_branch: %{type: "string", description: "Branch PRs target (default main)."},
+        backend: %{type: "string", enum: ["codex", "claude", "opencode"], description: "Default harness (stage settings and labels still win)."}
+      },
+      required: ["project", "repo"]
+    },
+    %{
+      name: "remove_project",
+      scope: "write",
+      destructive: true,
+      description: "Admins: stop listening to a Linear project added with add_project. Issues already running finish; no new ones start. Projects from symphony.yml can't be removed here.",
+      properties: %{project: %{type: "string", description: "The Linear project's URL or slug id."}},
+      required: ["project"]
     }
   ]
 
@@ -205,6 +261,19 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
   end
 
   # Read tools.
+
+  defp run("get_manual", args, _ctx) do
+    case args["section"] do
+      nil ->
+        {:ok, %{manual: Manual.text(), sections: Manual.sections()}}
+
+      section ->
+        case Manual.section(to_string(section)) do
+          {:ok, text} -> {:ok, %{section: section, manual: text}}
+          :error -> {:error, "No such section. Sections: #{Enum.join(Manual.sections(), ", ")}."}
+        end
+    end
+  end
 
   defp run("symphony_status", _args, ctx) do
     with {:ok, payload} <- state(ctx) do
@@ -426,6 +495,62 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
     end
   end
 
+  defp run("list_projects", _args, _ctx) do
+    file_slugs = Config.settings!().tracker.projects |> List.wrap() |> MapSet.new(& &1.slug)
+    stored = ProjectRoutes.list()
+    stored_slugs = MapSet.new(stored, & &1.slug)
+    # Stored routes are live in multi-project mode unless symphony.yml has the same project.
+    live? = Config.startup_mode() == :global
+
+    from_config =
+      Config.linear_project_routes()
+      |> Enum.reject(&(MapSet.member?(stored_slugs, &1.slug) and not MapSet.member?(file_slugs, &1.slug)))
+      # Legacy single-project routes are plain maps without every key.
+      |> Enum.map(&(&1 |> Map.take([:repo, :workflow, :default_branch, :backend]) |> Map.merge(%{project: &1.slug, source: "config", active: true})))
+
+    from_mcp =
+      Enum.map(stored, fn route ->
+        route
+        |> Map.take([:repo, :workflow, :default_branch, :backend, :added_by, :added_at])
+        |> Map.merge(%{project: route.slug, source: "mcp", active: live? and not MapSet.member?(file_slugs, route.slug)})
+      end)
+
+    {:ok, %{projects: from_config ++ from_mcp}}
+  end
+
+  defp run("add_project", args, ctx) do
+    with :ok <- admin_controls(ctx.user),
+         {:ok, slug} <- project_arg(args),
+         :ok <- not_in_config(slug),
+         {:ok, route} <- ProjectRoutes.put(Map.put(args, "slug", slug), ctx.actor) do
+      Orchestrator.request_refresh()
+      ObservabilityPubSub.broadcast_update()
+
+      {:ok,
+       %{
+         added: Map.take(route, [:slug, :repo, :workflow, :default_branch, :backend]),
+         note:
+           "Symphony polls this project from now on. Before filing issues: #{route.repo} needs #{route.workflow} on #{route.default_branch}, " <>
+             "and Symphony's GitHub access needs push and pull-request rights on it."
+       }}
+    end
+  end
+
+  defp run("remove_project", args, ctx) do
+    with :ok <- admin_controls(ctx.user),
+         {:ok, slug} <- project_arg(args),
+         :ok <- not_in_config(slug) do
+      case ProjectRoutes.delete(slug) do
+        :ok ->
+          ObservabilityPubSub.broadcast_update()
+          {:ok, %{removed: slug}}
+
+        {:error, :not_found} ->
+          {:error, "Symphony isn't listening to a project #{slug} added through MCP."}
+      end
+    end
+  end
+
   defp run("refresh", _args, _ctx) do
     case Presenter.refresh_payload(orchestrator()) do
       {:ok, payload} -> {:ok, payload}
@@ -434,6 +559,26 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
   end
 
   # Helpers.
+
+  # Adding a project lets agents work in a new repo, so it's for admins only.
+  defp admin_controls(user) do
+    with :ok <- controls_on() do
+      if Auth.can_control?(user), do: :ok, else: {:error, "Only admins can change which projects Symphony listens to."}
+    end
+  end
+
+  # A Linear project URL ends in its slug id: .../project/<name>-<slug id>.
+  defp project_arg(args) do
+    with {:ok, value} <- string_arg(args, "project") do
+      slug = value |> String.trim_trailing("/") |> String.split("/") |> List.last() |> String.split("-") |> List.last()
+      if Regex.match?(~r/^[a-z0-9]{6,32}$/i, slug), do: {:ok, String.downcase(slug)}, else: {:error, "project must be a Linear project URL or its slug id."}
+    end
+  end
+
+  defp not_in_config(slug) do
+    from_file = Config.settings!().tracker.projects |> List.wrap() |> Enum.any?(&(&1.slug == slug))
+    if from_file, do: {:error, "Project #{slug} is set in symphony.yml; change it there."}, else: :ok
+  end
 
   defp state(ctx) do
     case Presenter.state_payload(orchestrator(), snapshot_timeout_ms(), teams: Enum.map(ctx.user.teams, & &1.key)) do

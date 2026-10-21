@@ -274,6 +274,73 @@ defmodule SymphonyElixir.McpToolsTest do
     end
   end
 
+  describe "projects Symphony listens to" do
+    setup do
+      SymphonyElixir.ProjectRoutes.reset()
+      on_exit(&SymphonyElixir.ProjectRoutes.reset/0)
+    end
+
+    test "admins add and remove projects; members can only look", %{admin_token: admin, mia_token: mia} do
+      url = "https://linear.app/n8n/project/agent-factory-lang-tracer-185b1980c0bc/"
+
+      assert %{"added" => %{"slug" => "185b1980c0bc", "repo" => "n8n-io/lang-tracer", "workflow" => "WORKFLOW.md"}, "note" => note} =
+               ok!(admin, "add_project", %{"project" => url, "repo" => "n8n-io/lang-tracer"})
+
+      assert note =~ "WORKFLOW.md on main"
+      assert [%{added_by: "ada via MCP (agent)"}] = SymphonyElixir.ProjectRoutes.list()
+
+      # This test runs Symphony with a single WORKFLOW.md, where stored projects aren't live.
+      assert %{"projects" => projects} = ok!(mia, "list_projects")
+
+      assert Enum.any?(projects, &match?(%{"project" => "185b1980c0bc", "source" => "mcp", "active" => false, "added_by" => "ada via MCP (agent)"}, &1))
+
+      assert error!(mia, "add_project", %{"project" => "abc123def456", "repo" => "n8n-io/n8n"}) =~ "Only admins"
+      assert error!(mia, "remove_project", %{"project" => "185b1980c0bc"}) =~ "Only admins"
+
+      assert error!(admin, "add_project", %{"project" => "abc123def456", "repo" => "../srv"}) =~ "owner/name"
+      assert error!(admin, "add_project", %{"project" => "not a project!", "repo" => "a/b"}) =~ "Linear project URL"
+
+      assert %{"removed" => "185b1980c0bc"} = ok!(admin, "remove_project", %{"project" => "185b1980c0bc"})
+      assert error!(admin, "remove_project", %{"project" => "185b1980c0bc"}) =~ "isn't listening"
+    end
+
+    test "projects set in the config file can't be changed here; controls off blocks changes", %{admin_token: admin} do
+      write_config!("    enabled: true", tracker_projects: [%{slug: "fromfile1"}])
+      assert %{"projects" => [%{"project" => "fromfile1", "source" => "config", "active" => true}]} = ok!(admin, "list_projects")
+      assert error!(admin, "add_project", %{"project" => "fromfile1", "repo" => "a/b"}) =~ "symphony.yml"
+      assert error!(admin, "remove_project", %{"project" => "fromfile1"}) =~ "symphony.yml"
+
+      write_config!("    enabled: true\n  controls: false")
+      assert error!(admin, "add_project", %{"project" => "abc123def456", "repo" => "a/b"}) =~ "read-only"
+    end
+  end
+
+  describe "the manual" do
+    test "is a tool, and resources, and the server tells clients to use it", %{mia_token: token} do
+      assert %{"manual" => manual, "sections" => sections} = ok!(token, "get_manual")
+      assert manual =~ "# Symphony manual"
+      assert "using-this-mcp" in sections and "recipes" in sections
+      assert %{"manual" => "## Recipes" <> _} = ok!(token, "get_manual", %{"section" => "recipes"})
+      assert error!(token, "get_manual", %{"section" => "nope"}) =~ "Sections:"
+
+      rpc = fn method, params ->
+        json_response(post_json(token, %{jsonrpc: "2.0", id: 1, method: method, params: params}), 200)
+      end
+
+      assert %{"result" => %{"capabilities" => %{"resources" => _}, "instructions" => instructions}} = rpc.("initialize", %{})
+      assert instructions =~ "get_manual"
+
+      assert %{"result" => %{"resources" => [%{"uri" => "symphony://manual"} | section_resources]}} = rpc.("resources/list", %{})
+      assert length(section_resources) == length(sections)
+      assert %{"result" => %{"resourceTemplates" => []}} = rpc.("resources/templates/list", %{})
+
+      assert %{"result" => %{"contents" => [%{"mimeType" => "text/markdown", "text" => ^manual}]}} = rpc.("resources/read", %{uri: "symphony://manual"})
+      assert %{"result" => %{"contents" => [%{"text" => "## Overview" <> _}]}} = rpc.("resources/read", %{uri: "symphony://manual/overview"})
+      assert %{"error" => %{"code" => -32_002}} = rpc.("resources/read", %{uri: "symphony://manual/nope"})
+      assert %{"error" => %{"code" => -32_002}} = rpc.("resources/read", %{uri: "file:///etc/passwd"})
+    end
+  end
+
   describe "protocol edges" do
     test "client responses are accepted, malformed messages refused", %{mia_token: token} do
       assert post_json(token, %{jsonrpc: "2.0", id: 1, result: %{}}).status == 202

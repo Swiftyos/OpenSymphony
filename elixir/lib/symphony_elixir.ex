@@ -46,6 +46,7 @@ defmodule SymphonyElixir.Application do
       SymphonyElixir.Users,
       SymphonyElixir.Auth,
       SymphonyElixir.McpTokens,
+      SymphonyElixir.ProjectRoutes,
       # Creates any missing Linear labels the flows need, once, in the background.
       SymphonyElixir.LabelSync,
       SymphonyElixir.Orchestrator,

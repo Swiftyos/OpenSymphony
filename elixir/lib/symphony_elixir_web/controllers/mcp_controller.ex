@@ -7,13 +7,14 @@ defmodule SymphonyElixirWeb.McpController do
   stream, so `GET` and `DELETE` are `405`. `SymphonyElixirWeb.McpAuth` has already
   checked the bearer token and assigned `:current_user` and `:mcp_token`.
 
-  Methods: `initialize`, `ping`, `tools/list`, `tools/call`.
+  Methods: `initialize`, `ping`, `tools/list`, `tools/call`, `resources/list`,
+  `resources/read` (the manual, `SymphonyElixirWeb.Mcp.Manual`).
   """
 
   use Phoenix.Controller, formats: [:json]
 
   alias Plug.Conn
-  alias SymphonyElixirWeb.Mcp.Tools
+  alias SymphonyElixirWeb.Mcp.{Manual, Tools}
 
   @protocol_versions ["2025-11-25", "2025-06-18", "2025-03-26"]
   @latest_version hd(@protocol_versions)
@@ -82,7 +83,7 @@ defmodule SymphonyElixirWeb.McpController do
 
     result(id, %{
       protocolVersion: if(requested in @protocol_versions, do: requested, else: @latest_version),
-      capabilities: %{tools: %{listChanged: false}},
+      capabilities: %{tools: %{listChanged: false}, resources: %{listChanged: false, subscribe: false}},
       serverInfo: %{name: "symphony", title: "Symphony", version: version()},
       instructions: instructions(ctx)
     })
@@ -91,6 +92,17 @@ defmodule SymphonyElixirWeb.McpController do
   defp request(%{"id" => id, "method" => "ping"}, _ctx), do: result(id, %{})
 
   defp request(%{"id" => id, "method" => "tools/list"}, ctx), do: result(id, %{tools: Tools.list(ctx.scopes)})
+
+  defp request(%{"id" => id, "method" => "resources/list"}, _ctx), do: result(id, %{resources: Manual.resources()})
+
+  defp request(%{"id" => id, "method" => "resources/templates/list"}, _ctx), do: result(id, %{resourceTemplates: []})
+
+  defp request(%{"id" => id, "method" => "resources/read", "params" => %{"uri" => uri}}, _ctx) when is_binary(uri) do
+    case Manual.read(uri) do
+      {:ok, text} -> result(id, %{contents: [%{uri: uri, mimeType: "text/markdown", text: text}]})
+      :error -> rpc_error(id, -32_002, "Resource not found: #{uri}")
+    end
+  end
 
   defp request(%{"id" => id, "method" => "tools/call", "params" => %{"name" => name} = params}, ctx) when is_binary(name) do
     args = params["arguments"] || %{}
@@ -132,7 +144,8 @@ defmodule SymphonyElixirWeb.McpController do
     """
     Symphony runs coding agents on Linear issues through factory flows: stages (a Linear state plus a factory/* label) joined by transitions. \
     You act as #{ctx.user.name}, with their permissions limited to #{reach}, and may #{access}. \
-    Start with symphony_status and list_flows. To change a flow, get_flow, edit the definition, and save_flow with the version you read.\
+    When someone asks what this is, how Symphony works or how to use it, call get_manual (also the resource symphony://manual) and explain from it. \
+    For the live state start with symphony_status and list_flows. To change a flow, get_flow, edit the definition, and save_flow with the version you read.\
     """
   end
 

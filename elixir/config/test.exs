@@ -30,6 +30,7 @@ config :symphony_elixir,
   secret_key_base_path: nil,
   users_path: nil,
   mcp_tokens_path: nil,
+  project_routes_path: nil,
   factories_dir: nil,
   # Tests reload the factory store explicitly (Store.reload/0).
   factories_reload_ms: 0,

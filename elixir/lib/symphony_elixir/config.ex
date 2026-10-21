@@ -516,6 +516,7 @@ defmodule SymphonyElixir.Config do
       settings.tracker.projects
       |> List.wrap()
       |> Enum.filter(&(is_binary(&1.slug) and String.trim(&1.slug) != ""))
+      |> with_stored_routes()
 
     case routes do
       [] ->
@@ -529,6 +530,17 @@ defmodule SymphonyElixir.Config do
 
       _ ->
         routes
+    end
+  end
+
+  # Multi-project mode also listens to the projects added at runtime (MCP,
+  # `SymphonyElixir.ProjectRoutes`); a project in the file wins over a stored one.
+  defp with_stored_routes(routes) do
+    if startup_mode() == :global do
+      file_slugs = MapSet.new(routes, & &1.slug)
+      routes ++ Enum.reject(SymphonyElixir.ProjectRoutes.tracker_projects(), &MapSet.member?(file_slugs, &1.slug))
+    else
+      routes
     end
   end
 

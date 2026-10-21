@@ -1,0 +1,173 @@
+# Symphony manual
+
+## Overview
+
+Symphony is an agent factory. It watches Linear for issues and runs coding agents (Codex,
+Claude Code, OpenCode) on them, each issue in its own isolated workspace and sandbox. Agents
+take an issue from a plan to an open pull request, and people stay in charge at the points the
+team chooses: approving a plan, reviewing a PR, unblocking stuck work.
+
+You talk to Symphony through this MCP server. You can see what the factory is doing, read an
+issue's history and agent transcript, change the flow issues move through, move issues by
+hand, message the agent working on an issue, and (as an admin) choose which Linear projects
+Symphony works on. Everything you do here is done as you, with your permissions, and is
+recorded with your name and the token you used.
+
+To answer "what is this?", start here; for the live state, call `symphony_status` and
+`list_flows`.
+
+## Concepts
+
+- **Issue**: a Linear issue. Symphony works an issue when its Linear project is one Symphony
+  listens to (see `list_projects`) and its current stage is one agents run.
+- **Project**: a Linear project mapped to one GitHub repo. An issue's agent works in a fresh
+  clone of that repo, on the branch `symphony/<issue identifier>`, and the repo's
+  `WORKFLOW.md` gives every stage its setup steps and base instructions.
+- **Flow**: the stages issues move through and the connections between them. Each team has a
+  flow, and a project may have its own. An issue follows its project's flow if it has one,
+  otherwise its team's, otherwise the organisation's default flow.
+- **Stage**: a step in a flow, such as Plan, Implement or Review. In Linear a stage is the
+  issue's workflow state plus a `factory/<stage>` label, so several stages can share one
+  state. Every stage has a **kind**:
+  - `queue`: waiting for an agent to pick the issue up;
+  - `agent`: an agent works it;
+  - `human`: waiting on a person; agents never touch it;
+  - `parked`: deliberately on hold (Blocked);
+  - `done`: finished.
+- **Transition**: an allowed move between two stages, with **who** makes it (`agent` or
+  `human`) and **when** (its criteria). Agents can only make the agent moves their stage lists;
+  people can make any move a person is allowed to, and admins can force agent moves.
+- **Stage settings**: an agent stage names its **harness** (codex, claude, opencode), its
+  thinking **effort**, its instructions (and optionally a skill and checks), and runtime
+  controls: **paused** (no new agents start there), **max_agents** (a concurrency cap) and
+  **approval** (a person must approve every move an agent makes out of it).
+- **Autopilot (earned autonomy)**: when a flow turns it on, every agent stage needs approval
+  until it has earned a streak of approvals in a row; a send-back resets the count.
+- **Labels**: besides the `factory/*` stage labels, an issue labelled `codex`, `claude` or
+  `opencode` runs on that harness, and `thinking/<level>` sets the effort, overriding the
+  stage's defaults.
+
+## An issue's life
+
+1. Someone files an issue in a project Symphony listens to. It starts in the flow's queue
+   stage (usually Todo).
+2. On its next poll Symphony picks it up and starts an agent for the first agent stage. The
+   agent gets the issue, the repo's `WORKFLOW.md` prompt, its stage's instructions, and the
+   moves it may make.
+3. The agent works, commits and pushes on `symphony/<issue>`, and ends its stage by writing a
+   result: a summary (posted on the Linear issue as a comment) and the move it chose.
+   Symphony makes that move in Linear: the new state and stage label.
+4. The next agent stage picks the issue up and reads the earlier stages' summaries. A failed
+   test or review sends it back along a loop (for example Test back to Implement).
+5. At a `human` stage the issue waits. A person reads the summary or the PR and moves the
+   issue on, from Linear or the dashboard or with `move_issue` here.
+6. If an agent is stuck (missing access, unclear requirements) it moves the issue to Blocked
+   and says what it needs; a person resolves it and moves it back.
+
+Agents never merge pull requests unless their flow's instructions say so, and they never push
+to the default branch.
+
+## People in the loop
+
+A flow decides where people step in. Common gates:
+
+- **Plan review**: an agent posts a plan; a person approves it (move to Implement) or comments
+  and sends it back to Plan.
+- **Human review**: after the AI review, a person reviews the PR, merges it, and moves the issue
+  to Done, or comments and sends it back to Implement.
+- **Approval on a stage**: the agent's move out of the stage is held (the issue carries an
+  approval label) until a person approves it or sends it back (`review_issue`).
+- **Blocked**: always needs a person.
+
+To find work waiting on you: `list_issues` (each issue shows its stage), or
+`list_issues` with `awaiting_approval: true` for held moves.
+
+## Using this MCP
+
+Every tool is limited to what your token allows. Read tools look; write tools change things
+and need a read-and-write token.
+
+Read:
+- `get_manual`: this manual, or one section of it.
+- `symphony_status`: agents running and retrying, capacity, polling, rate limits, restarts.
+- `list_flows`: the flows you can see, which flow each team or project uses, and whether you
+  may edit it.
+- `get_flow`: a flow's full definition (stages, settings, transitions), the issues in each
+  stage, and its version.
+- `list_issues`: issues Symphony tracks, by flow, stage, or waiting for approval.
+- `get_issue`: one issue's stage, move history, live session and messages to its agent.
+- `get_transcript`: what an issue's agents did: messages, commands with output, edits, turns.
+- `list_projects`: the Linear projects Symphony listens to and their repos.
+
+Write:
+- `save_flow`: replace a flow's definition. Pass the `version` you read; if someone saved since,
+  nothing is written and you get the current version back to redo your change.
+- `set_stage_control`: pause a stage, cap its agents, set its harness or effort, or turn on
+  approval, without editing the whole flow.
+- `set_autopilot`: turn earned autonomy on or off for a flow.
+- `reset_flow`: drop a team's or project's own flow so it inherits again.
+- `move_issue`: move an issue along a connection in its flow.
+- `review_issue`: approve or send back an issue whose move is held for approval.
+- `send_agent_message`: tell the agent on an issue something; it arrives in the running turn
+  (Codex) or at the start of the next one.
+- `refresh`: poll Linear now instead of waiting for the next tick.
+- `add_project` / `remove_project` (admins): choose which Linear projects Symphony works on.
+
+What you can see and change follows your Linear teams: members work in their teams' flows and
+issues, admins in everything. Tokens can be narrowed further to chosen teams or projects.
+Changes to flows apply to the next stage an agent starts; running agents finish their turn.
+
+## Recipes
+
+**Explain what's happening right now.** `symphony_status`, then `list_issues`; for one issue,
+`get_issue` and `get_transcript`.
+
+**Start working a new repo.**
+1. Make sure the repo has a `WORKFLOW.md` on its default branch (setup hook plus base prompt;
+   copy one from a repo Symphony already works) and that Symphony's GitHub access can push and
+   open PRs there.
+2. Create a Linear project for it in the team whose flow should apply.
+3. `add_project` with the project's URL and the repo (`owner/name`).
+4. File an issue in the project; it starts on the next poll.
+
+**Change a flow.** `get_flow`, edit the `definition` (stages, their settings and instructions,
+transitions), then `save_flow` with the `version` you read. Stage ids are lowercase letters,
+digits and dashes; every stage needs a Linear state, and stages sharing a state need different
+labels. Missing `factory/*` labels are created in Linear for you.
+
+**Add a human checkpoint.** Add a stage of kind `human` (its own label, usually in the In Review
+state), point the agent stage's transition at it, and add `human` transitions out of it (for
+example approve to the next stage, send back to the previous one).
+
+**Stop agents in one stage for a while.** `set_stage_control` with `field: paused`,
+`value: true`; set it back to `false` to resume.
+
+**Unblock an issue.** Read why with `get_issue`, fix the cause (access, a clarified
+description), then `move_issue` to the stage its Blocked transitions allow.
+
+**Tell an agent something.** `send_agent_message` with the issue identifier and your message.
+
+## Guardrails
+
+- Agents work only in their own workspace and sandbox, on `symphony/<issue>` branches, and never
+  push to the default branch.
+- Agents can only make the moves their stage allows; people approve where the flow says so.
+- Your MCP token can do what you can do in Symphony, never more, and stops working if your
+  account is disabled or loses the access it was limited to. Create and revoke tokens on your
+  account's MCP tokens page.
+- Flow saves are version-checked, so two editors can't silently overwrite each other.
+- Projects defined in Symphony's config file can't be changed through MCP; projects added
+  through MCP can only point at GitHub repositories.
+
+## Troubleshooting
+
+- **An issue isn't being picked up.** Check its project is in `list_projects`, its stage is a
+  `queue` or `agent` stage (not human, parked or done), the stage isn't paused, and capacity
+  isn't full (`symphony_status`).
+- **An agent keeps failing in a loop.** Read the latest summaries with `get_issue` and the
+  transcript with `get_transcript`; send guidance with `send_agent_message` or move the issue
+  to Blocked.
+- **`save_flow` refused.** A version conflict means someone saved first: re-read with
+  `get_flow` and redo your change. Validation errors name the field to fix.
+- **"Only admins…" or "Only this team's members…".** Your account (or your token's limits)
+  doesn't cover that team, project or action.
