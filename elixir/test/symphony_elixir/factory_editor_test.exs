@@ -627,6 +627,27 @@ defmodule SymphonyElixir.FactoryEditorTest do
       assert Enum.map(json["teams"], & &1["key"]) == ["PAY", "project:checkout"]
     end
 
+    test "a pick never waits behind a server update the orchestrator is slow to answer", %{ada: ada} do
+      UsageLedger.observe_issue(%Issue{id: "1", identifier: "PAY-1", state: "Todo", project_slug: "checkout"})
+      UsageLedger.observe_issue(%Issue{id: "2", identifier: "WEB-1", state: "Todo", project_slug: "site"})
+      {:ok, view, _html} = live(session_for(ada), "/")
+
+      # A busy orchestrator: snapshots hang until they time out.
+      orchestrator = Module.concat(__MODULE__, :Orchestrator)
+      :sys.suspend(orchestrator)
+
+      try do
+        send(view.pid, :observability_updated)
+        {micros, _html} = :timer.tc(fn -> render_change(element(view, "#team-picker"), %{"team" => "PAY"}) end)
+        assert_patch(view, "/?team=PAY")
+        assert micros < 100_000
+        json = view |> element("#factory-data") |> render() |> data_json()
+        assert Enum.map(json["teams"], & &1["key"]) == ["PAY", "project:checkout"]
+      after
+        :sys.resume(orchestrator)
+      end
+    end
+
     test "the project picker narrows the dashboard to one project; the agent count stays Symphony-wide", ctx do
       UsageLedger.observe_issue(%Issue{id: "1", identifier: "PAY-1", state: "Todo", project_slug: "checkout"})
       UsageLedger.observe_issue(%Issue{id: "2", identifier: "WEB-1", state: "Todo", project_slug: "site"})

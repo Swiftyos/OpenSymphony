@@ -39,6 +39,9 @@ defmodule SymphonyElixirWeb.DashboardLive do
       |> assign(:instance_name, SymphonyElixir.Config.instance_name())
       |> assign(:team_filter, nil)
       |> assign(:project_filter, nil)
+      |> assign(:refreshing, false)
+      |> assign(:refresh_again, false)
+      |> assign(:payload_gen, 0)
       |> assign(:sessions_view, "live")
       |> assign(:sessions_window, "day")
       |> assign(:sessions_query, "")
@@ -85,12 +88,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   @impl true
-  def handle_info(:observability_updated, socket) do
-    {:noreply,
-     socket
-     |> assign_payload()
-     |> assign(:now, DateTime.utc_now())}
-  end
+  def handle_info(:observability_updated, socket), do: {:noreply, refresh_payload(socket)}
 
   @impl true
   def handle_event("factory_control", %{"team" => team, "stage" => stage, "field" => field} = params, socket) do
@@ -291,6 +289,29 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   @impl true
+  def handle_async(:refresh, {:ok, fetched}, socket) do
+    socket = assign(socket, :refreshing, false)
+
+    # A read that started before a change made from this page is stale.
+    socket =
+      if fetched.gen == socket.assigns.payload_gen do
+        socket
+        |> assign(pending_accounts: fetched.pending_accounts, now: DateTime.utc_now())
+        |> assign_fetched_chat(fetched.chat)
+        |> assign_snapshot(fetched.snapshot)
+        |> assign_scope()
+      else
+        socket
+      end
+
+    {:noreply, if(socket.assigns.refresh_again, do: refresh_payload(socket), else: socket)}
+  end
+
+  def handle_async(:refresh, {:exit, _reason}, socket) do
+    socket = assign(socket, :refreshing, false)
+    {:noreply, if(socket.assigns.refresh_again, do: refresh_payload(socket), else: socket)}
+  end
+
   def handle_async({:assist, ref}, {:ok, {:ok, suggestion}}, socket) do
     {:noreply, push_event(socket, "factory_assist_result", %{ref: ref, ok: true, suggestion: suggestion})}
   end
@@ -393,10 +414,10 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <span class="status-badge-dot"></span>
           Offline
         </span>
-        <span :if={!@payload[:error]} class="meta-item numeric" title="Agents running across all of Symphony / agent slots">
+        <span :if={!@payload[:error]} class="meta-item meta-agents numeric" title="Agents running across all of Symphony / agent slots">
           <%= @symphony_counts.running %>/<%= @payload.capacity.max_concurrent_agents %> agents
         </span>
-        <span class="meta-item numeric"><%= polling_label(@payload[:polling]) %></span>
+        <span class="meta-item meta-poll numeric"><%= polling_label(@payload[:polling]) %></span>
         <span :if={get_in(@payload, [:delayed_restart, :pending])} class="meta-item status-badge-offline" title="No new agent runs start until Symphony restarts">
           Restart pending: waiting for <%= @payload.delayed_restart.waiting_for %> agent(s)
         </span>
@@ -778,15 +799,42 @@ defmodule SymphonyElixirWeb.DashboardLive do
   # all. The agent count stays Symphony-wide: slots are shared by everyone.
   defp assign_payload(socket) do
     user = socket.assigns[:current_user]
-    teams = if user, do: Enum.map(user.teams, & &1.key), else: []
-    raw = Presenter.state_payload(orchestrator(), snapshot_timeout_ms(), teams: teams)
 
     socket
-    # Kept unrendered for re-scoping; the counts are the Symphony-wide ones.
-    |> assign(:visible, Visibility.filter_payload(raw, user))
-    |> assign(:symphony_counts, raw[:counts] || %{running: 0, retrying: 0})
+    |> update(:payload_gen, &(&1 + 1))
+    |> assign_chat()
+    # An assign, not a template call: LiveView only re-renders template calls
+    # when their arguments change, so an approved account would never clear.
+    |> assign(:pending_accounts, pending_accounts(user))
+    |> assign_snapshot(snapshot(user))
     |> assign_scope()
   end
+
+  # Server updates come in bursts and a snapshot waits on the orchestrator,
+  # so they're read off the LiveView process (which stays free for picks and
+  # clicks), one at a time, with updates that arrive meanwhile folded into one
+  # more read.
+  defp refresh_payload(%{assigns: %{refreshing: true}} = socket), do: assign(socket, :refresh_again, true)
+
+  defp refresh_payload(socket) do
+    %{current_user: user, chat_issue: issue, payload_gen: gen} = socket.assigns
+
+    socket
+    |> assign(refreshing: true, refresh_again: false)
+    |> start_async(:refresh, fn ->
+      %{gen: gen, snapshot: snapshot(user), pending_accounts: pending_accounts(user), chat: {issue, chat_data(issue)}}
+    end)
+  end
+
+  defp snapshot(user) do
+    teams = if user, do: Enum.map(user.teams, & &1.key), else: []
+    raw = Presenter.state_payload(orchestrator(), snapshot_timeout_ms(), teams: teams)
+    # The visible payload is kept unrendered for re-scoping; the counts are the Symphony-wide ones.
+    %{visible: Visibility.filter_payload(raw, user), symphony_counts: raw[:counts] || %{running: 0, retrying: 0}}
+  end
+
+  defp assign_snapshot(socket, %{visible: visible, symphony_counts: counts}),
+    do: assign(socket, visible: visible, symphony_counts: counts)
 
   defp assign_scope(socket) do
     %{visible: visible, current_user: user} = socket.assigns
@@ -800,10 +848,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
         else: Visibility.scope_to_team(visible, team)
 
     socket
-    |> assign_chat()
-    # An assign, not a template call: LiveView only re-renders template calls
-    # when their arguments change, so an approved account would never clear.
-    |> assign(:pending_accounts, pending_accounts(user))
     |> assign(:team_choices, choices)
     |> assign(:team_filter, team)
     |> assign(:project_choices, projects)
@@ -849,13 +893,17 @@ defmodule SymphonyElixirWeb.DashboardLive do
     |> assign(:session_counts, %{"live" => length(live), "completed" => length(ended), "all" => length(live) + length(ended)})
   end
 
-  defp assign_chat(socket) do
-    issue = socket.assigns[:chat_issue]
+  defp assign_chat(socket), do: assign_chat_data(socket, chat_data(socket.assigns[:chat_issue]))
 
-    socket
-    |> assign(:chat_entries, Transcript.entries(issue))
-    |> assign(:chat_queued, if(issue, do: Enum.filter(AgentInbox.messages(issue), &(&1.status == "queued")), else: []))
+  # A transcript read for an issue that's no longer open is dropped.
+  defp assign_fetched_chat(socket, {issue, data}) do
+    if issue == socket.assigns.chat_issue, do: assign_chat_data(socket, data), else: socket
   end
+
+  defp assign_chat_data(socket, {entries, queued}), do: assign(socket, chat_entries: entries, chat_queued: queued)
+
+  defp chat_data(nil), do: {[], []}
+  defp chat_data(issue), do: {Transcript.entries(issue), Enum.filter(AgentInbox.messages(issue), &(&1.status == "queued"))}
 
   # The open issue's running entry, for the chat header.
   defp chat_session(%{running: running}, identifier) when is_list(running) do
