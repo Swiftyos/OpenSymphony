@@ -317,7 +317,11 @@ defmodule SymphonyElixir.Codex.AppServer do
       }
     }
 
-    send_message(port, payload)
+    # A Codex that exited at once has closed its port before this write; the
+    # write is then a no-op and the response wait reads the port's exit status
+    # (already in the mailbox), so the failure is the same `{:port_exit, _}`
+    # whichever side of the exit the write landed on.
+    _ = send_message(port, payload)
 
     with {:ok, _} <- await_response(port, @initialize_id) do
       send_message(port, %{"method" => "initialized", "params" => %{}})
@@ -1183,9 +1187,17 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp tool_call_arguments(_params), do: %{}
 
-  defp send_message(port, message) do
+  # A port whose program has exited is closed, and writing to it raises
+  # ArgumentError. Its `{:exit_status, _}` message is delivered before it
+  # closes, so the caller's next receive reports the exit instead.
+  @doc false
+  @spec send_message(port(), map()) :: :ok | {:error, :port_closed}
+  def send_message(port, message) do
     line = Jason.encode!(message) <> "\n"
     Port.command(port, line)
+    :ok
+  rescue
+    ArgumentError -> {:error, :port_closed}
   end
 
   defp needs_input?(method, payload)

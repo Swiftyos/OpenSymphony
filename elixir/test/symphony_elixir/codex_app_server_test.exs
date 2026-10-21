@@ -991,4 +991,38 @@ defmodule SymphonyElixir.CodexAppServerTest do
 
     File.chmod!(codex_binary, 0o755)
   end
+
+  test "a write to a codex port that already exited is reported, not raised" do
+    port = Port.open({:spawn_executable, String.to_charlist(System.find_executable("true"))}, [:binary, :exit_status])
+    assert_receive {^port, {:exit_status, 0}}, 5_000
+
+    assert {:error, :port_closed} = SymphonyElixir.Codex.AppServer.send_message(port, %{"method" => "initialize"})
+  end
+
+  test "a codex that exits at launch fails start_session with its exit status on either side of the write" do
+    test_root = temp_root!("exit-at-launch")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-EXIT")
+      File.mkdir_p!(workspace)
+      codex_binary = Path.join(test_root, "fake-codex")
+      File.write!(codex_binary, "#!/bin/sh\nexit 7\n")
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        agent_backend: "codex",
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      # The initialize write lands before or after the exit, depending on
+      # scheduling; both must give the same error.
+      for _attempt <- 1..10 do
+        assert {:error, {:port_exit, 7}} = SymphonyElixir.Codex.AppServer.start_session(workspace)
+      end
+    after
+      File.rm_rf(test_root)
+    end
+  end
 end
