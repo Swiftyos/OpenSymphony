@@ -110,6 +110,7 @@ defmodule SymphonyElixirWeb.RunnerControllerTest do
         event(3, "transcript_note", %{identifier: "MT-C-1", text: "A note"}),
         event(4, "turn_started", %{identifier: "MT-C-1", info: %{turn: 1, backend: "codex"}}),
         event(5, "heartbeat", %{}),
+        event(7, "route_info", %{issue_id: "issue-1", backend: "claude", effort: "high"}),
         event(6, "agent_update", %{
           issue_id: "issue-1",
           identifier: "MT-C-1",
@@ -118,10 +119,11 @@ defmodule SymphonyElixirWeb.RunnerControllerTest do
         })
       ]
 
-      assert %{status: 200, resp_body: %{"applied_through" => 6}} =
+      assert %{status: 200, resp_body: %{"applied_through" => 7}} =
                conn(:post, "/runner/v1/runs/#{run_id}/events", token(), %{"events" => batch})
 
       assert_receive {:orchestrator_message, {:worker_runtime_info, "issue-1", %{worker_host: "build-1", workspace_path: "/ws/MT-C-1"}}}
+      assert_receive {:orchestrator_message, {:worker_runtime_info, "issue-1", %{backend: "claude", effort: "high"}}}
       assert_receive {:orchestrator_message, {:codex_worker_update, "issue-1", %{event: :agent_message}}}
       assert_receive {:orchestrator_message, {:agent_worker_update, "issue-1", %{event: :agent_message}}}
 
@@ -133,15 +135,15 @@ defmodule SymphonyElixirWeb.RunnerControllerTest do
              ] = Transcript.entries("MT-C-1")
 
       # Replaying the same batch applies nothing twice.
-      assert %{status: 200, resp_body: %{"applied_through" => 6}} =
+      assert %{status: 200, resp_body: %{"applied_through" => 7}} =
                conn(:post, "/runner/v1/runs/#{run_id}/events", token(), %{"events" => batch})
 
       assert length(Transcript.entries("MT-C-1")) == 4
       refute_received {:orchestrator_message, _}
 
       # An unknown type is ignored but its seq still counts.
-      assert %{status: 200, resp_body: %{"applied_through" => 7}} =
-               conn(:post, "/runner/v1/runs/#{run_id}/events", token(), %{"events" => [event(7, "mystery", %{})]})
+      assert %{status: 200, resp_body: %{"applied_through" => 8}} =
+               conn(:post, "/runner/v1/runs/#{run_id}/events", token(), %{"events" => [event(8, "mystery", %{})]})
     end
 
     test "finished is forwarded and ends the run for every endpoint" do

@@ -162,6 +162,17 @@ defmodule SymphonyElixirWeb.RunnerController do
     )
   end
 
+  defp apply_event(conn, %{type: "route_info", data: data}) do
+    send(
+      orchestrator(),
+      {:worker_runtime_info, issue_id(conn, data),
+       %{
+         backend: data_value(data, :backend),
+         effort: data_value(data, :effort)
+       }}
+    )
+  end
+
   defp apply_event(conn, %{type: "agent_update", data: data}) do
     backend = data_value(data, :backend) || conn.assigns.backend
     message = data_value(data, :message)

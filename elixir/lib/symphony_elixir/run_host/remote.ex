@@ -38,6 +38,15 @@ defmodule SymphonyElixir.RunHost.Remote do
   end
 
   @impl true
+  def route_info(%__MODULE__{outbox: outbox}, %Issue{id: issue_id}, route) when is_map(route) do
+    append(outbox, "route_info", %{
+      issue_id: issue_id,
+      backend: Map.get(route, :backend),
+      effort: Map.get(route, :effort)
+    })
+  end
+
+  @impl true
   def agent_update(%__MODULE__{outbox: outbox}, issue, backend, message) do
     append(outbox, "agent_update", %{
       issue_id: Map.get(issue, :id),

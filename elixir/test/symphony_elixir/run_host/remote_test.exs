@@ -44,12 +44,14 @@ defmodule SymphonyElixir.RunHost.RemoteTest do
     issue = Support.issue_fixture("issue-1", "MT-R-1")
 
     assert :ok = RunHost.runtime_info(host, issue, "build-1", "/ws/MT-R-1")
+    assert :ok = RunHost.route_info(host, issue, %{backend: "claude", effort: "high"})
     assert :ok = RunHost.agent_update(host, issue, "claude", agent_message("remote message"))
     assert :ok = RunHost.transcript_note(host, "MT-R-1", "A note")
     assert :ok = RunHost.turn_started(host, "MT-R-1", %{turn: 1, backend: "claude"})
     assert :ok = RunOutbox.flush(5_000, host.outbox)
 
     assert_receive {:orchestrator_message, {:worker_runtime_info, "issue-1", %{worker_host: "build-1"}}}
+    assert_receive {:orchestrator_message, {:worker_runtime_info, "issue-1", %{backend: "claude", effort: "high"}}}
     assert_receive {:orchestrator_message, {:agent_worker_update, "issue-1", %{event: :agent_message}}}
 
     assert [
@@ -61,6 +63,7 @@ defmodule SymphonyElixir.RunHost.RemoteTest do
     # Without an outbox the host still answers; there's just nowhere to send.
     quiet = %Remote{host | outbox: nil}
     assert :ok = RunHost.runtime_info(quiet, issue, nil, "/ws")
+    assert :ok = RunHost.route_info(quiet, issue, %{backend: "codex"})
     assert :ok = RunHost.agent_update(quiet, issue, "claude", %{event: :x})
     assert :ok = RunHost.transcript_note(quiet, "MT-R-1", "ignored")
     assert :ok = RunHost.turn_started(quiet, "MT-R-1", %{turn: 2})
