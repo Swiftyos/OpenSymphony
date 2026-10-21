@@ -4,7 +4,8 @@ defmodule SymphonyElixir.Codex.AppServer do
   """
 
   require Logger
-  alias SymphonyElixir.{Accounts, Codex.DynamicTool, Codex.TraceLog, Config, RunHost, Sandbox, SSH, Telemetry}
+  alias SymphonyElixir.{Accounts, Config, OsProcess, RunHost, Sandbox, SSH, Telemetry}
+  alias SymphonyElixir.Codex.{DynamicTool, TraceLog}
 
   @initialize_id 1
   @thread_start_id 2
@@ -1127,21 +1128,8 @@ defmodule SymphonyElixir.Codex.AppServer do
     }
   end
 
-  defp stop_port(port) when is_port(port) do
-    case :erlang.port_info(port) do
-      :undefined ->
-        :ok
-
-      _ ->
-        try do
-          Port.close(port)
-          :ok
-        rescue
-          ArgumentError ->
-            :ok
-        end
-    end
-  end
+  # Port.close/1 alone leaves a server that never reads stdin running.
+  defp stop_port(port) when is_port(port), do: OsProcess.stop_port(port)
 
   defp emit_message(on_message, event, details, metadata) when is_function(on_message, 1) do
     message =

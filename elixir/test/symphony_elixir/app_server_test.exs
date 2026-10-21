@@ -443,6 +443,45 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "a finished run leaves no OpenCode server or child process behind" do
+    test_root = Path.join(System.tmp_dir!(), "symphony-elixir-opencode-stop-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-101")
+      File.mkdir_p!(workspace)
+      pid_file = Path.join(test_root, "pids")
+
+      server = start_fake_opencode_server!({:success, workspace})
+      launcher = write_launcher_script!(test_root, server.base_url)
+
+      # Like `opencode serve`: never reads stdin, and has a child of its own.
+      File.write!(launcher, """
+      #!/bin/sh
+      sleep 300 &
+      printf '%s %s\\n' "$$" "$!" > "#{pid_file}"
+      printf 'opencode server listening on #{server.base_url}\\n'
+      while true; do
+        sleep 1
+      done
+      """)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        opencode_command: launcher,
+        opencode_agent: "build"
+      )
+
+      assert {:ok, _result} = AppServer.run(workspace, "Ship the change", issue_fixture())
+
+      pids = pid_file |> File.read!() |> String.split() |> Enum.map(&String.to_integer/1)
+      assert length(pids) == 2
+      refute Enum.any?(pids, &SymphonyElixir.OsProcess.alive?/1)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server passes provider and tracker secrets into the OpenCode launcher environment" do
     test_root =
       Path.join(

@@ -5,7 +5,7 @@ defmodule SymphonyElixir.OpenCode.AppServer do
 
   require Logger
 
-  alias SymphonyElixir.{Config, PathSafety, Telemetry}
+  alias SymphonyElixir.{Config, OsProcess, PathSafety, Telemetry}
 
   @allowed_unattended_permissions MapSet.new([
                                     "read",
@@ -1004,13 +1004,8 @@ defmodule SymphonyElixir.OpenCode.AppServer do
 
   defp resolve_timeout_reason(timeout_reason), do: timeout_reason
 
-  defp stop_port(port) when is_port(port) do
-    Port.close(port)
-    :ok
-  rescue
-    _error ->
-      :ok
-  end
+  # Port.close/1 alone leaves `opencode serve` (it never reads stdin) running.
+  defp stop_port(port) when is_port(port), do: OsProcess.stop_port(port)
 
   defp log_port_output(stream_label, line) when is_binary(line) do
     text =

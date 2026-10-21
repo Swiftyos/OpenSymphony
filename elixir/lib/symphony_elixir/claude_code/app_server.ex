@@ -5,15 +5,12 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
 
   require Logger
 
-  alias SymphonyElixir.{Accounts, Config, Sandbox, SSH, Telemetry}
+  alias SymphonyElixir.{Accounts, Config, OsProcess, Sandbox, SSH, Telemetry}
   alias SymphonyElixir.ClaudeCode.Tooling
 
   @poll_interval_ms 250
   @port_line_bytes 1_048_576
   @max_stream_log_bytes 1_000
-  @shutdown_grace_ms 500
-  @shutdown_kill_wait_ms 500
-  @shutdown_poll_ms 25
 
   @type session :: %{
           port: port(),
@@ -623,82 +620,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
 
   defp truncate_output(text), do: text
 
-  defp stop_port(port) when is_port(port) do
-    case :erlang.port_info(port) do
-      :undefined ->
-        :ok
-
-      _ ->
-        terminate_port_os_process(port)
-
-        try do
-          Port.close(port)
-          :ok
-        rescue
-          ArgumentError ->
-            :ok
-        end
-    end
-  end
-
-  defp terminate_port_os_process(port) when is_port(port) do
-    case :erlang.port_info(port, :os_pid) do
-      {:os_pid, os_pid} when is_integer(os_pid) and os_pid > 0 ->
-        terminate_os_process_group(os_pid)
-
-      _ ->
-        :ok
-    end
-  end
-
-  defp terminate_os_process_group(os_pid) do
-    send_process_signal(os_pid, "TERM")
-
-    unless wait_for_process_exit(os_pid, @shutdown_grace_ms) do
-      send_process_signal(os_pid, "KILL")
-      wait_for_process_exit(os_pid, @shutdown_kill_wait_ms)
-    end
-
-    :ok
-  end
-
-  defp send_process_signal(os_pid, signal) do
-    group_target = "-#{os_pid}"
-    pid_target = Integer.to_string(os_pid)
-
-    case System.cmd("kill", ["-#{signal}", "--", group_target], stderr_to_stdout: true) do
-      {_output, 0} ->
-        :ok
-
-      _ ->
-        System.cmd("kill", ["-#{signal}", "--", pid_target], stderr_to_stdout: true)
-        :ok
-    end
-  rescue
-    _ -> :ok
-  end
-
-  defp wait_for_process_exit(os_pid, remaining_ms) when remaining_ms <= 0 do
-    not os_process_alive?(os_pid)
-  end
-
-  defp wait_for_process_exit(os_pid, remaining_ms) do
-    if os_process_alive?(os_pid) do
-      Process.sleep(@shutdown_poll_ms)
-      wait_for_process_exit(os_pid, remaining_ms - @shutdown_poll_ms)
-    else
-      true
-    end
-  end
-
-  defp os_process_alive?(os_pid) do
-    case System.cmd("kill", ["-0", "--", Integer.to_string(os_pid)], stderr_to_stdout: true) do
-      {_output, 0} -> true
-      _ -> false
-    end
-  rescue
-    _ -> false
-  end
+  defp stop_port(port) when is_port(port), do: OsProcess.stop_port(port)
 
   defp emit_message(on_message, event, payload, metadata) do
     message =
