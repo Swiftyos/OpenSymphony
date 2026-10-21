@@ -9,7 +9,8 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodWatch do
   `agent.kubernetes.namespace`, and `SymphonyElixir.RunLauncher.Kubernetes.status/2`
   reads the pod from the cache (`lookup/2`).
 
-  The watch loop, while the configured launcher is Kubernetes:
+  The watch loop, while the configured launcher is Kubernetes (and the
+  `:pod_watch_enabled` application setting is not `false`, as in tests):
 
     1. List the pods (paged) and replace the cache with them; the list's
        `resourceVersion` is where the watch starts.
@@ -172,7 +173,7 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodWatch do
     case Keyword.fetch(opts, :enabled) do
       {:ok, enabled} when is_function(enabled, 0) -> enabled.() == true
       {:ok, enabled} -> enabled == true
-      :error -> RunLauncher.launcher() == Kubernetes
+      :error -> Application.get_env(:symphony_elixir, :pod_watch_enabled, true) and RunLauncher.launcher() == Kubernetes
     end
   end
 
@@ -210,7 +211,7 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodWatch do
   defp relist(state) do
     state = stop_task(state)
 
-    case Kube.list_pods_with_version(state.client, state.namespace, @selector, list_options(state.opts)) do
+    case safe_list(state) do
       {:ok, pods, resource_version} ->
         replace_cache(state, pods)
 
@@ -224,7 +225,13 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodWatch do
     end
   end
 
-  defp list_options(opts), do: Keyword.take(opts, [:limit])
+  # The list runs in this process, so nothing it raises may take the cache
+  # (and, through restarts, the application) down.
+  defp safe_list(state) do
+    Kube.list_pods_with_version(state.client, state.namespace, @selector, Keyword.take(state.opts, [:limit]))
+  rescue
+    error -> {:error, error}
+  end
 
   defp start_watch(state) do
     owner = self()

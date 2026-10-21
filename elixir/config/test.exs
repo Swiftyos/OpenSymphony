@@ -50,6 +50,9 @@ config :symphony_elixir,
   label_sync_on_boot: false,
   # Tests start the repo cache refresher explicitly when they need it.
   repo_cache_refresher_enabled: false,
+  # Tests start their own runner pod watches; the application's must never
+  # pick up another test's Kubernetes launcher and Req plug.
+  pod_watch_enabled: false,
   # Keep retry/backoff sleeps short; the tests still exercise the retry paths.
   run_host_remote_retry_sleep_ms: 5,
   runner_command_error_backoff_ms: 50,

@@ -321,8 +321,8 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodWatchTest do
 
     assert_receive {:request, :watch, _path, %{"resourceVersion" => "7"}}, 2_000
     assert [%{count: 1, sum: 5.0}] = Enum.filter(Metrics.snapshot().histograms, &(&1.name == "symphony_runner_pod_start_seconds"))
-    eventually(fn -> gauge("symphony_runner_pods", phase: "unknown") == 1 end)
-    assert gauge("symphony_runner_pods", phase: "running") == 3
+    eventually(fn -> gauge("symphony_runner_pods", phase: "running") == 3 end)
+    assert gauge("symphony_runner_pods", phase: "unknown") == 1
   end
 
   test "the namespace comes from the config; stopping mid-backoff cancels the retry", ctx do
@@ -341,6 +341,47 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodWatchTest do
       send(pid, :check)
       eventually(fn -> gauge("symphony_runner_pod_watch_synced", []) == 0 end)
     end)
+  end
+
+  test "without an explicit switch it follows the launcher, and stays off in tests", ctx do
+    previous = Application.get_env(:symphony_elixir, :run_launcher)
+    Application.put_env(:symphony_elixir, :run_launcher, Kubernetes)
+
+    on_exit(fn ->
+      case previous do
+        nil -> Application.delete_env(:symphony_elixir, :run_launcher)
+        launcher -> Application.put_env(:symphony_elixir, :run_launcher, launcher)
+      end
+    end)
+
+    plug = fn _conn -> flunk("the pod watch is off in tests") end
+    pid = start_supervised!({PodWatch, name: nil, table: ctx.table, namespace: "runs", base_url: "https://kube.test", req_options: [plug: plug]})
+    send(pid, :check)
+    :sys.get_state(pid)
+    assert :stale = PodWatch.lookup("runs", "a", ctx.table)
+  end
+
+  test "a list that raises is a failed list, not a crash", ctx do
+    {:ok, attempts} = Agent.start_link(fn -> 0 end)
+
+    plug = fn conn ->
+      case Agent.get_and_update(attempts, &{&1, &1 + 1}) do
+        0 -> raise "plug exploded"
+        _later -> respond(conn, :block)
+      end
+    end
+
+    log =
+      capture_log(fn ->
+        pid =
+          start_supervised!({PodWatch, name: nil, table: ctx.table, enabled: true, namespace: "runs", min_backoff_ms: 60_000, base_url: "https://kube.test", req_options: [retry: false, plug: plug]})
+
+        :sys.get_state(pid)
+        assert Process.alive?(pid)
+      end)
+
+    assert log =~ "Runner pod list failed"
+    assert counter("symphony_runner_pod_watch_reconnects_total", reason: "list_transport") == 1
   end
 
   test "the default table and name are the application's" do
