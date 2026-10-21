@@ -62,7 +62,14 @@ defmodule SymphonyElixir.RunLauncher do
   """
   @callback controller_url(settings :: SymphonyElixir.Config.Schema.t()) :: String.t() | nil
 
-  @optional_callbacks status: 1, release: 1, controller_url: 1
+  @doc """
+  The OTLP endpoint and protocol runs started by this launcher export to
+  instead of the configured telemetry endpoints (a runner pod cannot reach the
+  controller host's collector), or nil to use those. Optional.
+  """
+  @callback otlp_override(settings :: SymphonyElixir.Config.Schema.t()) :: %{endpoint: String.t(), protocol: String.t()} | nil
+
+  @optional_callbacks status: 1, release: 1, controller_url: 1, otlp_override: 1
 
   @doc """
   Starts a run through the given launcher. A launcher that implements
@@ -114,6 +121,13 @@ defmodule SymphonyElixir.RunLauncher do
     else
       SymphonyElixir.RunSpec.controller_url()
     end
+  end
+
+  @doc "The OTLP override for runs this launcher starts (see `c:otlp_override/1`)."
+  @spec otlp_override(module(), SymphonyElixir.Config.Schema.t()) :: %{endpoint: String.t(), protocol: String.t()} | nil
+  def otlp_override(launcher, settings) when is_atom(launcher) do
+    if Code.ensure_loaded?(launcher) and function_exported?(launcher, :otlp_override, 1),
+      do: launcher.otlp_override(settings)
   end
 
   @doc "The configured launcher; `SymphonyElixir.RunLauncher.Local` unless set."

@@ -8,10 +8,20 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodSpec do
   capability. The Secret carries `spec.json` and the ConfigMap the controller's
   config; both are named `run-<run-id>`, the prefix the policy requires of every
   mounted Secret and ConfigMap. The pod is labelled for its Kueue LocalQueue.
+
+  With `telemetry.enabled`, the runner container also gets the run's trace
+  context and collector: `TRACEPARENT` (the run's root span),
+  `OTEL_RESOURCE_ATTRIBUTES` (the run's attributes), and
+  `OTEL_EXPORTER_OTLP_ENDPOINT`/`OTEL_EXPORTER_OTLP_PROTOCOL` from
+  `agent.kubernetes.otlp_endpoint` (else `telemetry.otlp_endpoint`). The
+  runner sets the agents' own variables explicitly; these are what anything
+  else in the pod (hooks, tools) inherits. No exporter header or credential is
+  ever rendered: the collector holds those.
   """
 
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.RunSpec
+  alias SymphonyElixir.RunTrace
 
   @run_label "symphony.n8n.io/run-id"
   @run_annotation "symphony.n8n.io/run-id"
@@ -67,7 +77,7 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodSpec do
          ref: "k8s:#{namespace}/#{name}",
          secret: secret(spec, metadata),
          config_map: config_map(metadata, file_name, content),
-         pod: pod(kube, name, metadata, workspace_root, file_name)
+         pod: pod(kube, name, metadata, workspace_root, file_name, telemetry_env(spec, settings))
        }}
     end
   end
@@ -172,7 +182,7 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodSpec do
     }
   end
 
-  defp pod(kube, name, metadata, workspace_root, config_file_name) do
+  defp pod(kube, name, metadata, workspace_root, config_file_name, telemetry_env) do
     %{
       "apiVersion" => "v1",
       "kind" => "Pod",
@@ -217,7 +227,7 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodSpec do
             "name" => "runner",
             "image" => kube.runner_image,
             "args" => ["runner", @spec_dir <> "/spec.json", @config_dir <> "/" <> config_file_name, @guardrail_flag],
-            "env" => env(kube.secret_env),
+            "env" => env(kube.secret_env) ++ telemetry_env,
             "securityContext" => container_security_context(),
             "volumeMounts" => [
               %{"name" => @tools_volume, "mountPath" => @tools_dir},
@@ -305,6 +315,33 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodSpec do
   end
 
   defp env(_secret_env), do: []
+
+  defp telemetry_env(%RunSpec{} = spec, %Schema{telemetry: %{enabled: true} = telemetry, agent: %{kubernetes: kube}}) do
+    context = RunTrace.from_spec(spec)
+
+    {endpoint, protocol} =
+      case kube.otlp_endpoint do
+        endpoint when is_binary(endpoint) -> {endpoint, kube.otlp_protocol}
+        nil -> {telemetry.otlp_endpoint, telemetry.otlp_protocol}
+      end
+
+    attributes =
+      context
+      |> RunTrace.resource_attributes()
+      |> Enum.sort()
+      |> Enum.map_join(",", fn {key, value} -> key <> "=" <> URI.encode_www_form(value) end)
+
+    [
+      {"TRACEPARENT", RunTrace.traceparent(context)},
+      {"OTEL_RESOURCE_ATTRIBUTES", attributes},
+      {"OTEL_EXPORTER_OTLP_ENDPOINT", endpoint},
+      {"OTEL_EXPORTER_OTLP_PROTOCOL", endpoint && protocol}
+    ]
+    |> Enum.reject(fn {_name, value} -> value in [nil, ""] end)
+    |> Enum.map(fn {name, value} -> %{"name" => name, "value" => value} end)
+  end
+
+  defp telemetry_env(_spec, _settings), do: []
 
   defp secret_env_value(entry, field) do
     Map.get(entry, field) || Map.get(entry, String.to_atom(field))

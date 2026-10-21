@@ -473,9 +473,10 @@ defmodule SymphonyElixir.Config do
     settings!().telemetry.resource_attributes
   end
 
-  @spec telemetry_issue_resource_attributes(map(), String.t() | nil, map() | nil) :: String.t() | nil
-  def telemetry_issue_resource_attributes(issue, backend \\ nil, account \\ nil) when is_map(issue) do
-    base_attrs = telemetry_resource_attributes()
+  @spec telemetry_issue_resource_attributes(map(), String.t() | nil, map() | nil, map()) :: String.t() | nil
+  def telemetry_issue_resource_attributes(issue, backend \\ nil, account \\ nil, extra \\ %{}) when is_map(issue) do
+    # The run's attributes (SymphonyElixir.RunTrace) under the issue's own.
+    base_attrs = Map.merge(telemetry_resource_attributes(), extra)
 
     attrs =
       base_attrs

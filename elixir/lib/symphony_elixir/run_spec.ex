@@ -14,6 +14,12 @@ defmodule SymphonyElixir.RunSpec do
   the platform has no environment catalog. A Kubernetes launcher renders the
   runner's init containers and service sidecars from it; it must not re-resolve
   the repository file, because the runner pod does not read controller state.
+
+  `telemetry` carries the run's trace context (see `SymphonyElixir.RunTrace`):
+  `traceparent` (the run's root span), `launcher`, and the `otlp_endpoint` and
+  `otlp_protocol` a runner pod exports to instead of the configured ones (nil
+  when it uses those). Only these string keys are kept; it never holds
+  credentials.
   """
 
   alias SymphonyElixir.{Config, GitMirror, HttpServer}
@@ -37,7 +43,8 @@ defmodule SymphonyElixir.RunSpec do
     :controller_url,
     :git_mirror_url,
     :target_branch,
-    :token
+    :token,
+    :telemetry
   ]
 
   @issue_fields [
@@ -76,6 +83,7 @@ defmodule SymphonyElixir.RunSpec do
   # A multi-repo project's `repos`: the runner finds the issue's home repo among them.
   @project_repo_fields [:name, :repo, :default_branch, :description]
   @route_fields [:backend, :effort, :warnings]
+  @telemetry_keys ["traceparent", "launcher", "otlp_endpoint", "otlp_protocol"]
 
   @enforce_keys [:run_id, :epoch]
   defstruct @fields
@@ -96,7 +104,8 @@ defmodule SymphonyElixir.RunSpec do
           controller_url: String.t() | nil,
           git_mirror_url: String.t() | nil,
           target_branch: String.t() | nil,
-          token: String.t() | nil
+          token: String.t() | nil,
+          telemetry: %{optional(String.t()) => String.t() | nil} | nil
         }
 
   @doc "The run's directory under the state root."
@@ -185,6 +194,7 @@ defmodule SymphonyElixir.RunSpec do
           :route -> encode_route(value)
           :account -> encode_account(value)
           :environment -> encode_environment(value)
+          :telemetry -> encode_telemetry(value)
           _ -> value
         end
 
@@ -203,6 +213,7 @@ defmodule SymphonyElixir.RunSpec do
           :route -> decode_route(raw)
           :account -> decode_account(raw)
           :environment -> decode_environment(raw)
+          :telemetry -> encode_telemetry(raw)
           :epoch -> raw
           :attempt -> raw
           _ -> raw
@@ -212,6 +223,17 @@ defmodule SymphonyElixir.RunSpec do
     end)
     |> then(&struct(__MODULE__, &1))
   end
+
+  defp encode_telemetry(%{} = telemetry) do
+    for {key, value} <- telemetry,
+        key = to_string(key),
+        key in @telemetry_keys,
+        is_binary(value) or is_nil(value),
+        into: %{},
+        do: {key, value}
+  end
+
+  defp encode_telemetry(_telemetry), do: nil
 
   defp encode_environment(nil), do: nil
   defp encode_environment(%SymphonyElixir.Environment{} = environment), do: SymphonyElixir.Environment.to_map(environment)

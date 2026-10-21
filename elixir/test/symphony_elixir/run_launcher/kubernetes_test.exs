@@ -696,6 +696,20 @@ defmodule SymphonyElixir.RunLauncher.KubernetesTest do
     assert RunLauncher.controller_url(SymphonyElixir.RunLauncher.Process, settings()) == RunSpec.controller_url()
   end
 
+  test "runner pods export to agent.kubernetes.otlp_endpoint when it is set" do
+    assert Kubernetes.otlp_override(settings()) == nil
+    assert RunLauncher.otlp_override(Kubernetes, settings()) == nil
+    assert RunLauncher.otlp_override(SymphonyElixir.RunLauncher.Process, settings()) == nil
+    assert RunLauncher.otlp_override(SymphonyElixir.RunLauncher.Local, settings()) == nil
+
+    assert {:ok, with_collector} =
+             Schema.parse(%{
+               "agent" => %{"kubernetes" => %{"otlp_endpoint" => "http://otel-collector.symphony.svc:4317", "otlp_protocol" => "grpc"}}
+             })
+
+    assert RunLauncher.otlp_override(Kubernetes, with_collector) == %{endpoint: "http://otel-collector.symphony.svc:4317", protocol: "grpc"}
+  end
+
   # The fake launcher of the "held" watcher above: it is never polled.
   @doc false
   def alive?(_ref), do: true

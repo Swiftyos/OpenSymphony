@@ -507,6 +507,11 @@ defmodule SymphonyElixir.Config.Schema do
       # The controller URL as a runner pod reaches it (a cluster Service), for
       # the /runner/v1 endpoints and the git mirror. Required by the launcher.
       field(:controller_url, :string)
+      # The OTLP collector runner pods (the runner and its agents) export to,
+      # such as an in-cluster collector Service; unset, pods use the telemetry
+      # endpoints. A URL only: exporter credentials stay in the collector.
+      field(:otlp_endpoint, :string)
+      field(:otlp_protocol, :string, default: "http/protobuf")
       # How long a finished runner pod is kept for its logs before the janitor
       # deletes it, and how often the janitor sweeps.
       field(:finished_pod_retention_ms, :integer, default: 3_600_000)
@@ -536,6 +541,8 @@ defmodule SymphonyElixir.Config.Schema do
           :agent_tools_ephemeral_storage_request,
           :secret_env,
           :controller_url,
+          :otlp_endpoint,
+          :otlp_protocol,
           :finished_pod_retention_ms,
           :janitor_interval_ms
         ],
@@ -559,6 +566,9 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:finished_pod_retention_ms, greater_than_or_equal_to: 0)
       |> validate_number(:janitor_interval_ms, greater_than: 0)
       |> validate_format(:controller_url, ~r{^https?://[^\s/]+}, message: "must be an http(s) URL such as http://symphony.symphony.svc:4000")
+      |> update_change(:otlp_endpoint, &Schema.normalize_optional_string/1)
+      |> validate_format(:otlp_endpoint, ~r{^https?://[^\s/@]+(/\S*)?$}, message: "must be an http(s) URL without credentials such as http://otel-collector.symphony.svc:4318")
+      |> validate_inclusion(:otlp_protocol, ["grpc", "http/protobuf", "http/json"])
       |> validate_change(:secret_env, &validate_secret_env/2)
     end
 
@@ -1007,6 +1017,13 @@ defmodule SymphonyElixir.Config.Schema do
       field(:log_user_prompts, :boolean, default: false)
       field(:log_tool_details, :boolean, default: false)
       field(:resource_attributes, :map, default: %{})
+      # Symphony's own run spans (SymphonyElixir.TraceExporter): on/off and the
+      # exporter's bounds, so a slow collector costs dropped spans, not memory.
+      field(:symphony_spans, :boolean, default: true)
+      field(:span_max_queue_size, :integer, default: 2048)
+      field(:span_max_batch_size, :integer, default: 512)
+      field(:span_export_interval_ms, :integer, default: 5_000)
+      field(:span_export_timeout_ms, :integer, default: 5_000)
     end
 
     @otlp_protocols ["grpc", "http/protobuf", "http/json"]
@@ -1031,10 +1048,19 @@ defmodule SymphonyElixir.Config.Schema do
           :include_logs,
           :log_user_prompts,
           :log_tool_details,
-          :resource_attributes
+          :resource_attributes,
+          :symphony_spans,
+          :span_max_queue_size,
+          :span_max_batch_size,
+          :span_export_interval_ms,
+          :span_export_timeout_ms
         ],
         empty_values: []
       )
+      |> validate_number(:span_max_queue_size, greater_than: 0)
+      |> validate_number(:span_max_batch_size, greater_than: 0)
+      |> validate_number(:span_export_interval_ms, greater_than: 0)
+      |> validate_number(:span_export_timeout_ms, greater_than: 0)
       |> validate_inclusion(:otlp_protocol, @otlp_protocols)
       |> validate_inclusion(:otlp_traces_protocol, @otlp_protocols)
       |> validate_inclusion(:otlp_logs_protocol, @otlp_protocols)

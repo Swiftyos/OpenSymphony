@@ -99,6 +99,14 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes do
   @spec controller_url(Schema.t()) :: String.t() | nil
   def controller_url(%Schema{} = settings), do: settings.agent.kubernetes.controller_url
 
+  @doc "The collector runner pods export to: `agent.kubernetes.otlp_endpoint`, or nil."
+  @impl true
+  @spec otlp_override(Schema.t()) :: %{endpoint: String.t(), protocol: String.t()} | nil
+  def otlp_override(%Schema{agent: %{kubernetes: %{otlp_endpoint: endpoint} = kube}}) when is_binary(endpoint),
+    do: %{endpoint: endpoint, protocol: kube.otlp_protocol}
+
+  def otlp_override(%Schema{}), do: nil
+
   @doc "Whether the pod named by a reference exists and is Pending or Running."
   @impl true
   @spec alive?(String.t()) :: boolean()

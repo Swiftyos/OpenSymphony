@@ -197,6 +197,41 @@ defmodule SymphonyElixir.RunSpecTest do
     _ = root
   end
 
+  test "telemetry keeps only the trace context keys, and only string values" do
+    traceparent = "00-#{String.duplicate("a", 32)}-#{String.duplicate("b", 16)}-01"
+
+    spec = %RunSpec{
+      run_id: "run-telemetry",
+      epoch: 1,
+      telemetry: %{
+        "traceparent" => traceparent,
+        "launcher" => "kubernetes",
+        "otlp_endpoint" => "http://otel.test:4318",
+        "otlp_protocol" => nil,
+        "headers" => "Authorization=secret",
+        "launcher_count" => 3
+      }
+    }
+
+    assert {:ok, path} = RunSpec.write(spec)
+    assert {:ok, read} = RunSpec.read(path)
+
+    assert read.telemetry == %{
+             "traceparent" => traceparent,
+             "launcher" => "kubernetes",
+             "otlp_endpoint" => "http://otel.test:4318",
+             "otlp_protocol" => nil
+           }
+
+    refute File.read!(path) =~ "secret"
+
+    # Atom keys are kept by name; a spec without telemetry (or a malformed one) reads back nil.
+    assert RunSpec.to_map(%{spec | telemetry: %{launcher: "local"}})["telemetry"] == %{"launcher" => "local"}
+    assert RunSpec.to_map(%{spec | telemetry: "bad"})["telemetry"] == nil
+    assert {:ok, path} = RunSpec.write(%RunSpec{run_id: "run-no-telemetry", epoch: 1})
+    assert {:ok, %RunSpec{telemetry: nil}} = RunSpec.read(path)
+  end
+
   test "read returns errors for a missing or malformed spec" do
     assert {:error, :enoent} = RunSpec.read(Path.join(System.tmp_dir!(), "missing-spec-#{System.unique_integer([:positive])}.json"))
 

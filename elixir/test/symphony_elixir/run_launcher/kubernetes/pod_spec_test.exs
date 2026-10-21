@@ -347,7 +347,75 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodSpecTest do
     settings
   end
 
-  defp settings!(kubernetes_overrides) do
+  describe "telemetry" do
+    test "with telemetry on, the runner gets the run's trace context and the pod collector", %{spec: spec} do
+      traceparent = "00-#{String.duplicate("a", 32)}-#{String.duplicate("b", 16)}-01"
+      spec = %{spec | issue: %{spec.issue | project_slug: "proj"}, telemetry: %{"traceparent" => traceparent, "launcher" => "kubernetes"}}
+
+      settings =
+        settings!(%{"otlp_endpoint" => "http://otel-collector.symphony.svc:4318"}, %{
+          "telemetry" => %{"enabled" => true, "otlp_endpoint" => "http://host.containers.internal:4318"}
+        })
+
+      assert {:ok, rendered} = PodSpec.render(spec, settings, @runner_config)
+      [runner] = rendered.pod["spec"]["containers"]
+      env = Map.new(runner["env"], &{&1["name"], &1["value"]})
+
+      assert env["TRACEPARENT"] == traceparent
+      assert env["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://otel-collector.symphony.svc:4318"
+      assert env["OTEL_EXPORTER_OTLP_PROTOCOL"] == "http/protobuf"
+
+      attributes = env["OTEL_RESOURCE_ATTRIBUTES"]
+      assert attributes =~ "symphony.run.id=Run+ABC_1"
+      assert attributes =~ "symphony.run.attempt=1"
+      assert attributes =~ "symphony.run.launcher=kubernetes"
+      assert attributes =~ "symphony.project=proj"
+      assert attributes =~ "linear.issue.identifier=MT_42"
+      assert attributes =~ "symphony.trace_id=" <> String.duplicate("a", 32)
+
+      # Nothing that authenticates an exporter is rendered anywhere.
+      rendered_text = Jason.encode!(rendered)
+      refute rendered_text =~ "OTEL_EXPORTER_OTLP_HEADERS"
+      refute rendered_text =~ "Authorization"
+    end
+
+    test "without a pod collector the configured endpoint is used, and nothing without telemetry", %{spec: spec} do
+      settings = settings!(%{}, %{"telemetry" => %{"enabled" => true, "otlp_endpoint" => "http://collector.test:4317"}})
+      assert {:ok, rendered} = PodSpec.render(spec, settings, @runner_config)
+      env = Map.new(hd(rendered.pod["spec"]["containers"])["env"], &{&1["name"], &1["value"]})
+      assert env["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://collector.test:4317"
+      assert env["OTEL_EXPORTER_OTLP_PROTOCOL"] == "grpc"
+      # A spec without telemetry gets the trace derived from its run id.
+      assert env["TRACEPARENT"] == SymphonyElixir.RunTrace.traceparent(SymphonyElixir.RunTrace.root("Run ABC_1"))
+
+      settings = settings!(%{}, %{"telemetry" => %{"enabled" => true}})
+      assert {:ok, rendered} = PodSpec.render(spec, settings, @runner_config)
+      env = Map.new(hd(rendered.pod["spec"]["containers"])["env"], &{&1["name"], &1["value"]})
+      refute Map.has_key?(env, "OTEL_EXPORTER_OTLP_ENDPOINT")
+      refute Map.has_key?(env, "OTEL_EXPORTER_OTLP_PROTOCOL")
+      assert Map.has_key?(env, "TRACEPARENT")
+
+      settings = settings!(%{"otlp_endpoint" => "http://otel-collector.symphony.svc:4318"})
+      assert {:ok, rendered} = PodSpec.render(spec, settings, @runner_config)
+      names = Enum.map(hd(rendered.pod["spec"]["containers"])["env"], & &1["name"])
+      refute "TRACEPARENT" in names
+      refute "OTEL_EXPORTER_OTLP_ENDPOINT" in names
+    end
+
+    test "the pod collector must be a plain http(s) URL" do
+      for endpoint <- ["otel:4318", "http://user:secret@otel:4318", "ftp://otel"] do
+        assert {:error, _reason} =
+                 Schema.parse(%{"agent" => %{"kubernetes" => %{"otlp_endpoint" => endpoint}}}),
+               endpoint
+      end
+
+      assert {:error, _reason} = Schema.parse(%{"agent" => %{"kubernetes" => %{"otlp_protocol" => "udp"}}})
+      assert {:ok, settings} = Schema.parse(%{"agent" => %{"kubernetes" => %{"otlp_endpoint" => " "}}})
+      assert settings.agent.kubernetes.otlp_endpoint == nil
+    end
+  end
+
+  defp settings!(kubernetes_overrides, extra \\ %{}) do
     kubernetes =
       Map.merge(
         %{
@@ -363,10 +431,15 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodSpecTest do
       )
 
     assert {:ok, settings} =
-             Schema.parse(%{
-               "workspace" => %{"root" => "/workspace"},
-               "agent" => %{"kubernetes" => kubernetes}
-             })
+             Schema.parse(
+               Map.merge(
+                 %{
+                   "workspace" => %{"root" => "/workspace"},
+                   "agent" => %{"kubernetes" => kubernetes}
+                 },
+                 extra
+               )
+             )
 
     settings
   end
