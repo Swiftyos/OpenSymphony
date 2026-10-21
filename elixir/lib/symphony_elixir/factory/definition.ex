@@ -31,6 +31,7 @@ defmodule SymphonyElixir.Factory.Definition do
   @backends ["codex", "claude", "opencode"]
   @efforts ["low", "medium", "high", "xhigh", "max"]
   @id_pattern ~r/^[a-z][a-z0-9-]{0,31}$/
+  @environment_pattern ~r/^[a-z0-9][a-z0-9._-]{0,63}$/
   @default_streak 10
 
   @type stage :: map()
@@ -218,6 +219,7 @@ defmodule SymphonyElixir.Factory.Definition do
       "instructions" => Keyword.get(opts, :instructions, ""),
       "harness" => nil,
       "effort" => nil,
+      "environment" => nil,
       "max_agents" => nil,
       "paused" => false,
       "approval" => false,
@@ -243,6 +245,7 @@ defmodule SymphonyElixir.Factory.Definition do
       "instructions" => stage |> Map.get("instructions") |> to_s(),
       "harness" => blank_to_nil(Map.get(stage, "harness")),
       "effort" => blank_to_nil(Map.get(stage, "effort")),
+      "environment" => stage |> Map.get("environment") |> blank_to_nil() |> then(&(&1 && normalize(&1))),
       "max_agents" => Map.get(stage, "max_agents"),
       "paused" => Map.get(stage, "paused") == true,
       # A person approves before an issue leaves this stage.
@@ -303,6 +306,7 @@ defmodule SymphonyElixir.Factory.Definition do
       stage["label"] && !Regex.match?(@id_pattern, stage["label"]) && "stage #{label} label must be lowercase letters, digits, or dashes",
       stage["harness"] not in [nil | @backends] && "stage #{label} has unknown harness #{inspect(stage["harness"])}",
       stage["effort"] not in [nil | @efforts] && "stage #{label} has unknown thinking level #{inspect(stage["effort"])}",
+      stage["environment"] && !Regex.match?(@environment_pattern, stage["environment"]) && "stage #{label} environment must be a catalog environment name",
       not valid_max_agents?(stage["max_agents"]) && "stage #{label} max agents must be a whole number from 1 to 100"
     ]
   end

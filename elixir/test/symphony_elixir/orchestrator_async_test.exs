@@ -461,9 +461,8 @@ defmodule SymphonyElixir.OrchestratorAsyncTest do
           1_000
         )
 
-        state = :sys.get_state(pid)
-        assert state.pending_dispatches == %{}
-        refute MapSet.member?(state.claimed, issue.id)
+        wait_until(fn -> :sys.get_state(pid).pending_dispatches == %{} end, 500)
+        wait_until(fn -> not MapSet.member?(:sys.get_state(pid).claimed, issue.id) end, 500)
       end)
 
     assert log =~ "Dispatch revalidation timed out"

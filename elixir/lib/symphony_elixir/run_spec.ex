@@ -7,6 +7,13 @@ defmodule SymphonyElixir.RunSpec do
   state root — a local file even when the state store is Postgres, because it
   belongs to the runner process on this host. `docs/durable-runs.md` has the
   protocol around it.
+
+  `environment` carries the resolved `SymphonyElixir.Environment` as a plain
+  map (see `SymphonyElixir.Environment.to_map/1`): `name`, `image`, `resources`,
+  `services`, `setup`, `egress_extra`, `digest`, and `repo_file`. It is nil when
+  the platform has no environment catalog. A Kubernetes launcher renders the
+  runner's init containers and service sidecars from it; it must not re-resolve
+  the repository file, because the runner pod does not read controller state.
   """
 
   alias SymphonyElixir.{Config, GitMirror, HttpServer}
@@ -23,6 +30,7 @@ defmodule SymphonyElixir.RunSpec do
     :backend,
     :effort,
     :account,
+    :environment,
     :controller_url,
     :git_mirror_url,
     :target_branch,
@@ -61,6 +69,7 @@ defmodule SymphonyElixir.RunSpec do
           backend: String.t() | nil,
           effort: String.t() | nil,
           account: %{backend: String.t(), id: String.t()} | nil,
+          environment: map() | nil,
           controller_url: String.t() | nil,
           git_mirror_url: String.t() | nil,
           target_branch: String.t() | nil,
@@ -140,6 +149,7 @@ defmodule SymphonyElixir.RunSpec do
         case field do
           :issue -> encode_issue(value)
           :account -> encode_account(value)
+          :environment -> encode_environment(value)
           _ -> value
         end
 
@@ -155,6 +165,7 @@ defmodule SymphonyElixir.RunSpec do
         case field do
           :issue -> decode_issue(raw)
           :account -> decode_account(raw)
+          :environment -> decode_environment(raw)
           :epoch -> raw
           :attempt -> raw
           _ -> raw
@@ -164,6 +175,14 @@ defmodule SymphonyElixir.RunSpec do
     end)
     |> then(&struct(__MODULE__, &1))
   end
+
+  defp encode_environment(nil), do: nil
+  defp encode_environment(%SymphonyElixir.Environment{} = environment), do: SymphonyElixir.Environment.to_map(environment)
+  defp encode_environment(%{} = environment), do: encode_value(environment)
+  defp encode_environment(_environment), do: nil
+
+  defp decode_environment(%{} = environment), do: decode_value(environment)
+  defp decode_environment(_environment), do: nil
 
   defp encode_issue(%Issue{} = issue), do: issue |> Map.from_struct() |> Map.new(fn {key, value} -> {key, encode_value(value)} end)
 

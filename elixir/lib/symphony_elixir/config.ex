@@ -67,7 +67,8 @@ defmodule SymphonyElixir.Config do
           backend: String.t() | nil,
           default_branch: String.t() | nil,
           workspace_root: String.t() | nil,
-          repos: [map()]
+          repos: [map()],
+          environment: String.t() | nil
         }
 
   @typedoc """
@@ -545,7 +546,17 @@ defmodule SymphonyElixir.Config do
       [] ->
         case settings.tracker.project_slug do
           project_slug when is_binary(project_slug) ->
-            [%{slug: project_slug, repo: nil, workflow: nil, backend: nil, workspace_root: nil, repos: []}]
+            [
+              %{
+                slug: project_slug,
+                repo: nil,
+                workflow: nil,
+                backend: nil,
+                workspace_root: nil,
+                repos: [],
+                environment: nil
+              }
+            ]
 
           _ ->
             []
@@ -564,6 +575,43 @@ defmodule SymphonyElixir.Config do
       routes ++ Enum.reject(SymphonyElixir.ProjectRoutes.tracker_projects(), &MapSet.member?(file_slugs, &1.slug))
     else
       routes
+    end
+  end
+
+  @doc """
+  The catalog environment a team defaults to, from the platform `teams:` block.
+  Team keys are matched case-insensitively (`PAY` / `pay`).
+  """
+  @spec team_environment(String.t() | nil) :: String.t() | nil
+  def team_environment(team), do: team_environment(team, settings!())
+
+  @spec team_environment(String.t() | nil, Schema.t()) :: String.t() | nil
+  def team_environment(team, %Schema{} = settings) when is_binary(team) do
+    key = team |> String.trim() |> String.upcase()
+
+    settings.teams
+    |> Enum.to_list()
+    |> Enum.find_value(fn {candidate, config} ->
+      if is_binary(candidate) and String.upcase(String.trim(candidate)) == key do
+        environment_from_team_config(config)
+      end
+    end)
+  end
+
+  def team_environment(_team, %Schema{}), do: nil
+
+  defp environment_from_team_config(%{environment: environment}) when is_binary(environment),
+    do: normalize_route_environment(environment)
+
+  defp environment_from_team_config(%{"environment" => environment}) when is_binary(environment),
+    do: normalize_route_environment(environment)
+
+  defp environment_from_team_config(_config), do: nil
+
+  defp normalize_route_environment(environment) do
+    case String.trim(environment) do
+      "" -> nil
+      value -> value
     end
   end
 

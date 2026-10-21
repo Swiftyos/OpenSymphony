@@ -22,8 +22,23 @@ defmodule SymphonyElixir.SandboxCoverageTest do
     dir="#{fake_dir}"
     printf '%s\\n' "$*" >> "$dir/calls.log"
     cmd="$1"
-    if [ -f "$dir/$cmd.out" ]; then cat "$dir/$cmd.out"; fi
-    if [ -f "$dir/$cmd.status" ]; then exit "$(cat "$dir/$cmd.status")"; fi
+    key="$cmd"
+    if [ "$cmd" = "network" ]; then
+      key="network-$2"
+    elif [ "$cmd" = "inspect" ] || [ "$cmd" = "start" ] || [ "$cmd" = "stop" ]; then
+      last=$(printf '%s\n' "$@" | tail -n 1)
+      key="$cmd-$last"
+    fi
+    if [ -f "$dir/$key.out" ]; then
+      cat "$dir/$key.out"
+    elif [ -f "$dir/$cmd.out" ]; then
+      cat "$dir/$cmd.out"
+    fi
+    if [ -f "$dir/$key.status" ]; then
+      exit "$(cat "$dir/$key.status")"
+    elif [ -f "$dir/$cmd.status" ]; then
+      exit "$(cat "$dir/$cmd.status")"
+    fi
     exit 0
     """)
 
@@ -201,6 +216,10 @@ defmodule SymphonyElixir.SandboxCoverageTest do
     assert {:error, :sh_not_found} =
              Sandbox.command_spec(ctx.workspace, "echo hi", [], settings: settings, shell: "symphony-no-such-shell")
 
+    # The three-argument form reads the workflow's default (disabled) sandbox.
+    assert {:ok, %{args: ["-lc", "echo hi"], cd: _workspace}} =
+             Sandbox.command_spec(ctx.workspace, "echo hi", [])
+
     assert calls(ctx) == []
   end
 
@@ -220,6 +239,216 @@ defmodule SymphonyElixir.SandboxCoverageTest do
     assert rm == "rm --force #{name}"
     assert reap =~ "exec #{name} sh -c for p in /proc/[0-9]*; do"
     assert reap =~ "grep -qx 'SYMPHONY_SANDBOX_EXEC=1'"
+  end
+
+  test "an existing network is reused and services start or report failures", ctx do
+    environment = %SymphonyElixir.Environment{
+      name: "svc",
+      image: "registry.example.com/base:1",
+      resources: %{},
+      services: [
+        %{name: "db", image: "registry.example.com/db:1", env: "not-a-map", ports: [], command: []},
+        %{name: "worker", image: "registry.example.com/worker:1", env: %{}, ports: [], command: []}
+      ],
+      setup: [],
+      egress_extra: [],
+      digest: "digest",
+      repo_file: false
+    }
+
+    settings = settings(ctx, %{environment: environment})
+    name = Sandbox.container_name(ctx.workspace)
+
+    respond(ctx, "network-inspect", "", 0)
+    respond(ctx, "inspect-#{name}", "true\n", 0)
+    respond(ctx, "inspect-#{name}-worker", "true\n", 0)
+
+    assert :ok = Sandbox.ensure_container(ctx.workspace, settings)
+    calls = calls(ctx)
+
+    refute Enum.any?(calls, &String.starts_with?(&1, "network create"))
+    db_run = Enum.find(calls, &String.starts_with?(&1, "run --detach --name #{name}-db"))
+    assert db_run
+    refute db_run =~ "--env"
+
+    respond(ctx, "inspect-#{name}-worker", "false\n", 0)
+    respond(ctx, "start-#{name}-worker", "", 0)
+    assert :ok = Sandbox.ensure_container(ctx.workspace, settings)
+    assert "start #{name}-worker" in calls(ctx)
+
+    respond(ctx, "start-#{name}-worker", "cannot start", 3)
+
+    assert {:error, {:sandbox_service_start_failed, 3, "cannot start"}} =
+             Sandbox.ensure_container(ctx.workspace, settings)
+  end
+
+  test "a non-map environment option leaves the sandbox unchanged", ctx do
+    settings = settings(ctx)
+    respond(ctx, "inspect", "missing", 1)
+
+    assert :ok = Sandbox.ensure_container(ctx.workspace, settings, environment: "not-a-map")
+    run = Enum.find(calls(ctx), &String.starts_with?(&1, "run "))
+    assert run =~ "symphony-test:latest"
+    refute run =~ "--network"
+  end
+
+  test "a resolved environment sets the image, resources, network, and sibling services", ctx do
+    environment = %SymphonyElixir.Environment{
+      name: "python",
+      image: "registry.example.com/agents/python:3.12",
+      resources: %{"cpu" => 2, "memory" => "4g"},
+      services: [
+        %{
+          name: "db",
+          image: "registry.example.com/services/postgres:16",
+          env: %{"POSTGRES_PASSWORD" => "secret"},
+          ports: ["5432"],
+          command: []
+        },
+        %{
+          name: "redis",
+          image: "registry.example.com/services/redis:7",
+          env: %{},
+          ports: [],
+          command: ["redis-server", "--save", ""]
+        }
+      ],
+      setup: [],
+      egress_extra: [],
+      digest: "digest",
+      repo_file: true
+    }
+
+    settings = settings(ctx, %{environment: environment})
+    name = Sandbox.container_name(ctx.workspace)
+    network = Sandbox.network_name(ctx.workspace)
+
+    respond(ctx, "network-inspect", "not found", 1)
+    respond(ctx, "inspect", "not found", 1)
+
+    log = capture_log(fn -> assert :ok = Sandbox.ensure_container(ctx.workspace, settings) end)
+    assert log =~ "image=registry.example.com/agents/python:3.12"
+
+    calls = calls(ctx)
+
+    assert Enum.take(calls, 2) == [
+             "network inspect #{network}",
+             "network create --label symphony.workspace=#{ctx.workspace} #{network}"
+           ]
+
+    main_run = Enum.find(calls, &String.starts_with?(&1, "run --detach --init"))
+    assert main_run =~ "--network #{network}"
+    assert main_run =~ "--cpus 2 --memory 4g"
+    assert main_run =~ "--entrypoint sleep registry.example.com/agents/python:3.12 infinity"
+    refute main_run =~ "symphony-test:latest"
+
+    assert Enum.any?(calls, fn call ->
+             call ==
+               "run --detach --name #{name}-db --label symphony.workspace=#{ctx.workspace} " <>
+                 "--label symphony.service-of=#{name} --network #{network} --network-alias db " <>
+                 "--env POSTGRES_PASSWORD=secret --expose 5432 registry.example.com/services/postgres:16"
+           end)
+
+    assert Enum.any?(
+             calls,
+             &(&1 ==
+                 "run --detach --name #{name}-redis --label symphony.workspace=#{ctx.workspace} " <>
+                   "--label symphony.service-of=#{name} --network #{network} --network-alias redis " <>
+                   "registry.example.com/services/redis:7 redis-server --save ")
+           )
+
+    assert :ok = Sandbox.reap(ctx.workspace, settings)
+    assert List.last(calls(ctx)) == "stop #{name}-redis"
+
+    File.write!(Path.join(ctx.fake_dir, "ps.out"), "#{name}-db\n#{name}-redis\n")
+    assert :ok = Sandbox.remove_container(ctx.workspace, settings)
+
+    calls = calls(ctx)
+
+    assert Enum.slice(calls, -4, 4) == [
+             "ps -aq --filter label=symphony.service-of=#{name}",
+             "rm --force #{name}-db #{name}-redis",
+             "rm --force #{name}",
+             "network rm #{network}"
+           ]
+  end
+
+  test "environment services stop is idempotent and skips stopping when there are none", ctx do
+    environment = %SymphonyElixir.Environment{
+      name: "plain",
+      image: "symphony-test:latest",
+      resources: %{},
+      services: [],
+      setup: [],
+      egress_extra: [],
+      digest: "digest",
+      repo_file: false
+    }
+
+    settings = settings(ctx, %{environment: environment})
+    respond(ctx, "inspect", "true\n", 0)
+
+    assert :ok = Sandbox.ensure_container(ctx.workspace, settings)
+    assert :ok = Sandbox.reap(ctx.workspace, settings)
+    assert Enum.any?(calls(ctx), &String.starts_with?(&1, "exec "))
+    refute Enum.any?(calls(ctx), &String.starts_with?(&1, "stop "))
+
+    assert :ok = Sandbox.remove_container(ctx.workspace, settings)
+    respond(ctx, "ps", "cannot list", 1)
+    assert :ok = Sandbox.remove_container(ctx.workspace, settings)
+    assert Enum.any?(calls(ctx), &(&1 == "rm --force #{Sandbox.container_name(ctx.workspace)}"))
+    refute Enum.any?(calls(ctx), &String.starts_with?(&1, "rm --force #{Sandbox.container_name(ctx.workspace)}-"))
+  end
+
+  test "environment setup commands run once when the container is created", ctx do
+    environment = %SymphonyElixir.Environment{
+      name: "python",
+      image: "registry.example.com/agents/python:3.12",
+      resources: %{},
+      services: [],
+      setup: ["pip install -r requirements.txt", "npm ci"],
+      egress_extra: [],
+      digest: "digest",
+      repo_file: true
+    }
+
+    settings = settings(ctx, %{environment: environment})
+    name = Sandbox.container_name(ctx.workspace)
+    respond(ctx, "inspect", "missing", 1)
+
+    assert :ok = Sandbox.ensure_container(ctx.workspace, settings)
+    calls = calls(ctx)
+
+    assert "exec --workdir #{ctx.workspace} #{name} sh -lc pip install -r requirements.txt" in calls
+    assert "exec --workdir #{ctx.workspace} #{name} sh -lc npm ci" in calls
+
+    respond(ctx, "inspect", "true\n", 0)
+    exec_count = Enum.count(calls, &String.starts_with?(&1, "exec "))
+    assert :ok = Sandbox.ensure_container(ctx.workspace, settings)
+    assert Enum.count(calls(ctx), &String.starts_with?(&1, "exec ")) == exec_count
+  end
+
+  test "a failed setup command removes the half-prepared container", ctx do
+    environment = %SymphonyElixir.Environment{
+      name: "python",
+      image: "registry.example.com/agents/python:3.12",
+      resources: %{},
+      services: [],
+      setup: ["false"],
+      egress_extra: [],
+      digest: "digest",
+      repo_file: true
+    }
+
+    settings = settings(ctx, %{environment: environment})
+    name = Sandbox.container_name(ctx.workspace)
+    respond(ctx, "inspect", "missing", 1)
+    respond(ctx, "exec", "setup failed", 42)
+
+    assert {:error, {:sandbox_setup_failed, 42, "setup failed"}} =
+             Sandbox.ensure_container(ctx.workspace, settings)
+
+    assert "rm --force #{name}" in calls(ctx)
   end
 
   test "default-argument variants read the sandbox from the workflow", ctx do

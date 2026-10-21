@@ -385,6 +385,7 @@ defmodule SymphonyElixirWeb.Presenter do
       workflow: Map.get(route, :workflow),
       backend: Map.get(route, :backend),
       default_branch: Map.get(route, :default_branch),
+      environment: Map.get(route, :environment),
       workspace_root: Map.get(route, :workspace_root),
       configured?: true
     }
@@ -398,6 +399,7 @@ defmodule SymphonyElixirWeb.Presenter do
       workflow: nil,
       backend: nil,
       default_branch: nil,
+      environment: nil,
       workspace_root: nil,
       configured?: false
     }
@@ -413,6 +415,7 @@ defmodule SymphonyElixirWeb.Presenter do
       workflow: nil,
       backend: nil,
       default_branch: nil,
+      environment: nil,
       workspace_root: nil,
       configured?: false
     }

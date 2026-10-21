@@ -81,7 +81,7 @@ defmodule SymphonyElixir.Config.Schema do
 
     @primary_key false
     @hook_keys ["after_create", "before_run", "after_run", "before_remove", "timeout_ms"]
-    @fields [:slug, :repo, :workflow, :prompt, :hooks, :backend, :default_branch, :workspace_root]
+    @fields [:slug, :repo, :workflow, :prompt, :hooks, :backend, :default_branch, :workspace_root, :environment]
 
     embedded_schema do
       field(:slug, :string)
@@ -97,6 +97,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:workspace_root, :string)
       # More repos agents may work in for this project; `repo` stays the primary.
       embeds_many(:repos, TrackerProjectRepo, on_replace: :delete)
+      field(:environment, :string)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -110,6 +111,7 @@ defmodule SymphonyElixir.Config.Schema do
       |> update_change(:backend, &Schema.normalize_optional_string/1)
       |> update_change(:default_branch, &Schema.normalize_optional_string/1)
       |> update_change(:workspace_root, &Schema.normalize_optional_string/1)
+      |> update_change(:environment, &Schema.normalize_optional_string/1)
       |> validate_change(:backend, fn :backend, value ->
         if value in ["codex", "opencode", "claude"] do
           []
@@ -298,6 +300,10 @@ defmodule SymphonyElixir.Config.Schema do
       field(:mounts, {:array, :string}, default: [])
       field(:env, {:array, :string}, default: [])
       field(:run_args, {:array, :string}, default: [])
+      # The per-issue environment resolved at dispatch (`SymphonyElixir.Environment`).
+      # It is deliberately not cast from config: the platform catalog and the
+      # repository's `.symphony/environment.yaml` are the only sources.
+      field(:environment, :map)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -1083,6 +1089,11 @@ defmodule SymphonyElixir.Config.Schema do
     # USD per million tokens, keyed by "<backend>/<model>" or "<backend>":
     # %{"claude" => %{"input_per_mtok" => 3.0, "output_per_mtok" => 15.0}}
     field(:pricing, :map, default: %{})
+    # Platform-owned environment catalog, keyed by name. Each entry owns the
+    # security bounds (image prefixes, max resources) that a repo file may not widen.
+    field(:environments, :map, default: %{})
+    # Team defaults, keyed by Linear team key (e.g. PAY) -> %{"environment" => name}.
+    field(:teams, :map, default: %{})
     embeds_one(:tracker, Tracker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:polling, Polling, on_replace: :update, defaults_to_struct: true)
     embeds_one(:workspace, Workspace, on_replace: :update, defaults_to_struct: true)
@@ -1209,8 +1220,10 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp changeset(attrs) do
     %__MODULE__{}
-    |> cast(attrs, [:pricing])
+    |> cast(attrs, [:pricing, :environments, :teams])
     |> validate_change(:pricing, &validate_pricing/2)
+    |> validate_change(:environments, &validate_environments/2)
+    |> validate_change(:teams, &validate_teams/2)
     |> cast_embed(:tracker, with: &Tracker.changeset/2)
     |> cast_embed(:polling, with: &Polling.changeset/2)
     |> cast_embed(:workspace, with: &Workspace.changeset/2)
@@ -1251,6 +1264,76 @@ defmodule SymphonyElixir.Config.Schema do
   defp valid_pricing_rate?({rate_key, value}) do
     rate_key in ["input_per_mtok", "output_per_mtok", "cached_input_per_mtok"] and is_number(value) and value >= 0
   end
+
+  @environment_name_pattern ~r/^[a-z0-9][a-z0-9._-]{0,63}$/
+
+  defp validate_environments(:environments, environments) when is_map(environments) do
+    Enum.flat_map(environments, fn {name, entry} ->
+      case environment_entry_error(name, entry) do
+        nil -> []
+        message -> [environments: message]
+      end
+    end)
+  end
+
+  defp environment_entry_error(name, entry) when is_binary(name) and name != "" do
+    cond do
+      not is_map(entry) ->
+        "environment #{inspect(name)} must be a map"
+
+      not is_binary(Map.get(entry, "image")) or String.trim(Map.get(entry, "image", "")) == "" ->
+        "environment #{inspect(name)} needs an image"
+
+      true ->
+        environment_entry_list_error(name, entry)
+    end
+  end
+
+  defp environment_entry_error(_name, _entry), do: "environment names must be non-empty strings"
+
+  defp environment_entry_list_error(name, entry) do
+    cond do
+      not is_map(Map.get(entry, "resources", %{})) ->
+        "environment #{inspect(name)} resources must be a map"
+
+      not is_list(Map.get(entry, "services", [])) ->
+        "environment #{inspect(name)} services must be a list"
+
+      not string_list?(Map.get(entry, "allowed_images", [])) ->
+        "environment #{inspect(name)} allowed_images must be a list of strings"
+
+      not string_list?(Map.get(entry, "egress_extra", [])) ->
+        "environment #{inspect(name)} egress_extra must be a list of strings"
+
+      true ->
+        nil
+    end
+  end
+
+  defp validate_teams(:teams, teams) when is_map(teams) do
+    Enum.flat_map(teams, fn {key, team} ->
+      cond do
+        not is_binary(key) or String.trim(key) == "" ->
+          [teams: "team keys must be non-empty strings"]
+
+        not is_map(team) ->
+          [teams: "team #{inspect(key)} must be a map"]
+
+        not valid_environment_name?(Map.get(team, "environment")) ->
+          [teams: "team #{inspect(key)} environment must be a catalog environment name"]
+
+        true ->
+          []
+      end
+    end)
+  end
+
+  defp string_list?(value) when is_list(value), do: Enum.all?(value, &is_binary/1)
+  defp string_list?(_value), do: false
+
+  defp valid_environment_name?(nil), do: true
+  defp valid_environment_name?(name) when is_binary(name), do: Regex.match?(@environment_name_pattern, name)
+  defp valid_environment_name?(_name), do: false
 
   defp finalize_settings(settings, raw_config, opts) do
     base_dir = Keyword.get(opts, :base_dir, File.cwd!())
@@ -1334,8 +1417,27 @@ defmodule SymphonyElixir.Config.Schema do
         claude: claude,
         telemetry: telemetry,
         observability: observability,
-        log: log
+        log: log,
+        environments: normalize_environments(settings.environments),
+        teams: normalize_teams(settings.teams)
     }
+  end
+
+  defp normalize_environments(environments) when is_map(environments) do
+    Map.new(environments, fn {name, entry} ->
+      {name |> to_string() |> String.trim() |> String.downcase(), normalize_keys(entry)}
+    end)
+  end
+
+  defp normalize_teams(teams) when is_map(teams) do
+    Map.new(teams, fn {key, team} ->
+      key = key |> to_string() |> String.trim() |> String.upcase()
+
+      team =
+        if is_map(team), do: normalize_keys(team), else: team
+
+      {key, team}
+    end)
   end
 
   # Secrets and URLs may be `$ENV_VAR` references; a missing variable leaves the field unset.

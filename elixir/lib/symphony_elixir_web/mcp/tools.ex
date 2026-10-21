@@ -217,7 +217,8 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
             },
             required: ["repo"]
           }
-        }
+        },
+        environment: %{type: "string", description: "Platform catalog environment for this project's runs (stage and team defaults still win)."}
       },
       required: ["project", "repo"]
     },
@@ -522,12 +523,12 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
       Config.linear_project_routes()
       |> Enum.reject(&(MapSet.member?(stored_slugs, &1.slug) and not MapSet.member?(file_slugs, &1.slug)))
       # Legacy single-project routes are plain maps without every key.
-      |> Enum.map(&(&1 |> Map.take([:repo, :workflow, :default_branch, :backend]) |> Map.merge(%{project: &1.slug, repos: extra_repos(&1), source: "config", active: true})))
+      |> Enum.map(&(&1 |> Map.take([:repo, :workflow, :default_branch, :backend, :environment]) |> Map.merge(%{project: &1.slug, repos: extra_repos(&1), source: "config", active: true})))
 
     from_mcp =
       Enum.map(stored, fn route ->
         route
-        |> Map.take([:repo, :workflow, :default_branch, :backend, :repos, :added_by, :added_at])
+        |> Map.take([:repo, :workflow, :default_branch, :backend, :repos, :environment, :added_by, :added_at])
         |> Map.merge(%{project: route.slug, source: "mcp", active: live? and not MapSet.member?(file_slugs, route.slug)})
       end)
 
@@ -548,7 +549,7 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
 
       {:ok,
        %{
-         added: Map.take(route, [:slug, :repo, :workflow, :default_branch, :backend, :repos]),
+         added: Map.take(route, [:slug, :repo, :workflow, :default_branch, :backend, :repos, :environment]),
          note:
            "Symphony polls this project from now on. Before filing issues: " <>
              if(route.workflow, do: "#{route.repo} needs #{route.workflow} on #{route.default_branch}, and ", else: "") <>

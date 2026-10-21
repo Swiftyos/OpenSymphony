@@ -52,6 +52,16 @@ defmodule SymphonyElixir.RunSpecTest do
       backend: "claude",
       effort: "high",
       account: %{backend: "claude", id: "acct-1"},
+      environment: %SymphonyElixir.Environment{
+        name: "python",
+        image: "registry.example.com/python:3.12",
+        resources: %{"cpu" => 2, "memory" => "4g"},
+        services: [%{name: "db", image: "registry.example.com/postgres:16", env: %{}, ports: ["5432"], command: []}],
+        setup: ["pip install -r requirements.txt"],
+        egress_extra: ["api.example.com"],
+        digest: "digest-1",
+        repo_file: true
+      },
       controller_url: "http://127.0.0.1:4321",
       git_mirror_url: "http://127.0.0.1:4321/git/run-1/checkout-abc123",
       target_branch: "main",
@@ -73,6 +83,18 @@ defmodule SymphonyElixir.RunSpecTest do
     assert loaded.backend == "claude"
     assert loaded.effort == "high"
     assert loaded.account == %{backend: "claude", id: "acct-1"}
+
+    assert loaded.environment == %{
+             "name" => "python",
+             "image" => "registry.example.com/python:3.12",
+             "resources" => %{"cpu" => 2, "memory" => "4g"},
+             "services" => [%{"name" => "db", "image" => "registry.example.com/postgres:16", "env" => %{}, "ports" => ["5432"], "command" => []}],
+             "setup" => ["pip install -r requirements.txt"],
+             "egress_extra" => ["api.example.com"],
+             "digest" => "digest-1",
+             "repo_file" => true
+           }
+
     assert loaded.controller_url == "http://127.0.0.1:4321"
     assert loaded.git_mirror_url == "http://127.0.0.1:4321/git/run-1/checkout-abc123"
     assert loaded.target_branch == "main"
@@ -92,14 +114,20 @@ defmodule SymphonyElixir.RunSpecTest do
       run_id: "run-2",
       epoch: 1,
       issue: %{id: "issue-2", identifier: "MT-2", labels: []},
-      account: %{"backend" => "codex", "id" => "acct-2"}
+      account: %{"backend" => "codex", "id" => "acct-2"},
+      environment: %{"name" => "base", "image" => "registry.example.com/base:1"}
     }
 
     assert {:ok, path} = RunSpec.write(spec)
     assert {:ok, loaded} = RunSpec.read(path)
     assert %Issue{id: "issue-2", identifier: "MT-2"} = RunSpec.to_issue(loaded)
     assert loaded.account == %{backend: "codex", id: "acct-2"}
+    assert loaded.environment == %{"name" => "base", "image" => "registry.example.com/base:1"}
     assert loaded.attempt == nil
+
+    bad = %RunSpec{run_id: "run-bad-environment", epoch: 1, environment: "not-a-map"}
+    assert {:ok, path} = RunSpec.write(bad)
+    assert {:ok, %RunSpec{environment: nil}} = RunSpec.read(path)
   end
 
   test "read returns errors for a missing or malformed spec" do

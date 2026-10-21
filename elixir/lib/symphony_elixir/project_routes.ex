@@ -29,6 +29,7 @@ defmodule SymphonyElixir.ProjectRoutes do
   @repo_pattern ~r/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/
   @branch_pattern ~r/^[A-Za-z0-9][A-Za-z0-9._\/-]{0,199}$/
   @repo_name_pattern ~r/^[a-z0-9][a-z0-9._-]{0,63}$/
+  @environment_pattern ~r/^[a-z0-9][a-z0-9._-]{0,63}$/
   @backends ["codex", "claude", "opencode"]
   @max_routes 100
   @max_extra_repos 10
@@ -41,6 +42,7 @@ defmodule SymphonyElixir.ProjectRoutes do
           default_branch: String.t(),
           backend: String.t() | nil,
           repos: [%{name: String.t(), repo: String.t(), default_branch: String.t(), description: String.t() | nil}],
+          environment: String.t() | nil,
           added_by: String.t(),
           added_at: String.t()
         }
@@ -71,7 +73,8 @@ defmodule SymphonyElixir.ProjectRoutes do
         backend: route.backend,
         default_branch: route.default_branch,
         workspace_root: nil,
-        repos: Enum.map(route.repos, &struct(TrackerProjectRepo, &1))
+        repos: Enum.map(route.repos, &struct(TrackerProjectRepo, &1)),
+        environment: Map.get(route, :environment)
       }
     end)
   end
@@ -143,6 +146,7 @@ defmodule SymphonyElixir.ProjectRoutes do
     workflow = string(attrs, "workflow", nil)
     branch = string(attrs, "default_branch", "main")
     backend = string(attrs, "backend", nil)
+    environment = string(attrs, "environment", nil)
 
     cond do
       not Regex.match?(@slug_pattern, slug) ->
@@ -160,6 +164,9 @@ defmodule SymphonyElixir.ProjectRoutes do
       backend not in [nil | @backends] ->
         {:error, "backend must be one of #{Enum.join(@backends, ", ")}, or left out for the default."}
 
+      not (is_nil(environment) or Regex.match?(@environment_pattern, environment)) ->
+        {:error, "environment must be a catalog environment name (lowercase letters, digits, dots, underscores, or dashes)."}
+
       true ->
         with {:ok, repos} <- validate_repos(Map.get(attrs, "repos"), repo) do
           {:ok,
@@ -170,6 +177,7 @@ defmodule SymphonyElixir.ProjectRoutes do
              default_branch: branch,
              backend: backend,
              repos: repos,
+             environment: environment,
              added_by: added_by,
              added_at: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
            }}

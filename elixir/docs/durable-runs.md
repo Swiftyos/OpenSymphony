@@ -261,6 +261,52 @@ never delays a dashboard `:snapshot`, `/api/v1/state`, or an MCP call such as
 `request_refresh`. It also means a crashed fetch is isolated and logged, and the
 next tick still polls.
 
+## Environments (Phase 3/4)
+
+Per-project agent environments are resolved by the controller at dispatch, from
+the platform catalog plus the repository's `.symphony/environment.yaml`, and the
+result is written into the run spec:
+
+```json
+{
+  "environment": {
+    "name": "python",
+    "image": "registry.example.com/agents/python:3.12",
+    "resources": {"cpu": 2, "memory": "4g"},
+    "services": [
+      {"name": "db", "image": "registry.example.com/postgres:16",
+       "env": {}, "ports": ["5432"], "command": []}
+    ],
+    "setup": ["pip install -r requirements.txt"],
+    "egress_extra": ["api.example.com"],
+    "digest": "sha256 of the resolved content",
+    "repo_file": true
+  }
+}
+```
+
+`environment` is `null` when the platform has no catalog. On the VM
+(`sandbox.kind: docker`) the resolved image and resources replace the sandbox
+defaults, each service runs as a sibling container on a per-issue network, and
+`setup` commands run once when the container is created; services stop at reap
+and are removed with the workspace. The controller owns the bounds: catalog
+`resources` are maxima, and repo/service images must match `allowed_images`; a
+rejected file fails the dispatch closed.
+
+For Phase 3 the launcher renders this spec directly: the runner pod's main
+container uses `environment.image` and `resources`; each service becomes a
+sidecar on the same pod network (reachable by its `name`), and `setup` commands
+become init containers or a startup script. The digest is the pod/workspace
+cache key, so two runs with the same environment can share a prepared volume.
+The runner must not re-read `.symphony/environment.yaml`: a runner pod has no
+controller or repo-cache state, and the controller's resolution is the one whose
+bounds were enforced.
+
+For Phase 4, environment changes are ordinary dispatch changes: the controller
+resolves the file at each dispatch, so a merged `.symphony/environment.yaml`
+applies to the next run without a controller restart. Changing the catalog
+requires a config reload/restart, like other `symphony.yml` platform settings.
+
 ## Rules for Phase 3
 
 - **Runners read no controller state.** A runner pod is untrusted and has no database

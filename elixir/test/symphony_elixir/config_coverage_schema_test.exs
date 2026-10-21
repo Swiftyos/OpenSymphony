@@ -72,6 +72,47 @@ defmodule SymphonyElixir.ConfigCoverageSchemaTest do
     end
   end
 
+  describe "environment catalog validation" do
+    test "parses and normalizes the catalog and team defaults" do
+      settings =
+        parse!(%{
+          "environments" => %{
+            "Python" => %{
+              "image" => "registry.example.com/python:1",
+              "resources" => %{"cpu" => 2, "memory" => "4g"},
+              "allowed_images" => ["registry.example.com/"],
+              "services" => [%{"name" => "db", "image" => "registry.example.com/postgres:16"}],
+              "egress_extra" => ["api.example.com"]
+            }
+          },
+          "teams" => %{"pay" => %{"environment" => "python"}}
+        })
+
+      assert %{"python" => %{"image" => "registry.example.com/python:1"}} = settings.environments
+      assert settings.teams == %{"PAY" => %{"environment" => "python"}}
+      assert parse!(%{"teams" => %{"PAY" => %{}}}).teams == %{"PAY" => %{}}
+    end
+
+    test "rejects malformed catalog entries and team defaults" do
+      for {config, message} <- [
+            {%{"environments" => %{"x" => %{"image" => ""}}}, "needs an image"},
+            {%{"environments" => %{"x" => "nope"}}, "must be a map"},
+            {%{"environments" => %{"x" => %{"image" => "i", "resources" => "bad"}}}, "resources must be a map"},
+            {%{"environments" => %{"x" => %{"image" => "i", "services" => "bad"}}}, "services must be a list"},
+            {%{"environments" => %{"x" => %{"image" => "i", "allowed_images" => "bad"}}}, "allowed_images"},
+            {%{"environments" => %{"x" => %{"image" => "i", "egress_extra" => "bad"}}}, "egress_extra"},
+            {%{"environments" => "bad"}, "environments is invalid"},
+            {%{"environments" => %{"" => %{"image" => "i"}}}, "environment names must be non-empty strings"},
+            {%{"teams" => %{"PAY" => %{"environment" => "Bad/Name"}}}, "environment must be a catalog environment name"},
+            {%{"teams" => %{"PAY" => "nope"}}, "must be a map"},
+            {%{"teams" => "bad"}, "teams is invalid"},
+            {%{"teams" => %{"PAY" => %{"environment" => 1}}}, "environment must be a catalog environment name"}
+          ] do
+        assert parse_error(config) =~ message
+      end
+    end
+  end
+
   describe "pricing validation" do
     test "accepts non-negative per-mtok rates" do
       pricing = %{"claude" => %{"input_per_mtok" => 3.0, "output_per_mtok" => 15}}

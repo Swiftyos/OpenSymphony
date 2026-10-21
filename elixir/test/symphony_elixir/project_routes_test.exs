@@ -72,6 +72,19 @@ defmodule SymphonyElixir.ProjectRoutesTest do
     end
   end
 
+  test "a route may name a catalog environment, and the name is validated" do
+    good = %{"slug" => "envproject", "repo" => "acme/widgets"}
+
+    assert {:ok, route} = ProjectRoutes.put(Map.put(good, "environment", "python"), "ada")
+    assert route.environment == "python"
+
+    assert %SymphonyElixir.Config.Schema.TrackerProject{environment: "python"} =
+             Enum.find(ProjectRoutes.tracker_projects(), &(&1.slug == "envproject"))
+
+    assert {:error, message} = ProjectRoutes.put(Map.put(good, "environment", "Bad/Name"), "ada")
+    assert message =~ "environment"
+  end
+
   test "routes are persisted, and re-validated on load" do
     dir = Path.join(System.tmp_dir!(), "project-routes-#{System.unique_integer([:positive])}")
     path = Path.join(dir, "project_routes.json")

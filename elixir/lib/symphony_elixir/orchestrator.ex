@@ -21,6 +21,7 @@ defmodule SymphonyElixir.Orchestrator do
     SessionHistory,
     StatusDashboard,
     Tracker,
+    Transcript,
     Unblocker,
     UsageLedger,
     Workspace
@@ -1284,9 +1285,17 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, reason} ->
         Logger.error("Skipping dispatch; issue config resolution failed for #{issue_context(issue)}: #{inspect(reason)}")
+        note_environment_error(issue, reason)
         {:error, state}
     end
   end
+
+  defp note_environment_error(%Issue{identifier: identifier}, {:environment_invalid, _identifier, message})
+       when is_binary(identifier) do
+    Transcript.note(identifier, "Environment rejected; the run will not start. #{message}")
+  end
+
+  defp note_environment_error(_issue, _reason), do: :ok
 
   defp dispatch_issue_with_account(%State{} = state, issue, attempt, recipient, worker_host, route, issue_config) do
     case select_account_for_dispatch(route.backend, worker_host, state, issue_config.settings) do

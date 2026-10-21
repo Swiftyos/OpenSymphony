@@ -5,6 +5,7 @@ defmodule SymphonyElixir.IssueConfig do
 
   alias SymphonyElixir.{AgentPrompt, Config}
   alias SymphonyElixir.Config.Schema
+  alias SymphonyElixir.Environment
   alias SymphonyElixir.ProjectWorkflow
   alias SymphonyElixir.Workflow
   alias SymphonyElixir.Workspace
@@ -15,6 +16,7 @@ defmodule SymphonyElixir.IssueConfig do
     :workflow_path,
     :workflow,
     :settings,
+    :environment,
     :prompt_template
   ]
 
@@ -24,6 +26,7 @@ defmodule SymphonyElixir.IssueConfig do
           workflow_path: Path.t() | nil,
           workflow: map() | nil,
           settings: Schema.t(),
+          environment: Environment.t() | nil,
           prompt_template: String.t()
         }
 
@@ -49,27 +52,41 @@ defmodule SymphonyElixir.IssueConfig do
         with {:ok, repo_root} <- Workspace.ensure_local_repo_cache(project_route, settings),
              {:ok, workflow_path} <- Config.resolve_project_workflow_path(repo_root, workflow_ref),
              {:ok, workflow} <- ProjectWorkflow.load(workflow_path),
-             {:ok, prompt} <- project_prompt(project_route, prompt_template(workflow.prompt_template)) do
+             {:ok, prompt} <- project_prompt(project_route, prompt_template(workflow.prompt_template)),
+             {:ok, environment} <- resolve_environment(issue, settings, project_route, repo_root) do
+          effective_settings =
+            settings
+            |> merge_settings(project_route, workflow)
+            |> merge_project_hooks(project_route)
+            |> put_environment(environment)
+
           {:ok,
            %__MODULE__{
              mode: :global,
              project_route: project_route,
              workflow_path: workflow_path,
              workflow: workflow,
-             settings: settings |> merge_settings(project_route, workflow) |> merge_project_hooks(project_route),
+             settings: effective_settings,
+             environment: environment,
              prompt_template: prompt
            }}
         end
 
       %{slug: _slug} = project_route ->
-        with {:ok, prompt} <- project_prompt(project_route, AgentPrompt.template()) do
+        with {:ok, prompt} <- project_prompt(project_route, AgentPrompt.template()),
+             {:ok, environment} <- resolve_environment(issue, settings, project_route, nil) do
           {:ok,
            %__MODULE__{
              mode: :global,
              project_route: project_route,
              workflow_path: nil,
              workflow: nil,
-             settings: settings |> merge_route_backend(project_route) |> merge_project_hooks(project_route),
+             settings:
+               settings
+               |> merge_route_backend(project_route)
+               |> merge_project_hooks(project_route)
+               |> put_environment(environment),
+             environment: environment,
              prompt_template: prompt
            }}
         end
@@ -105,18 +122,45 @@ defmodule SymphonyElixir.IssueConfig do
   defp merge_project_hooks(settings, _route), do: settings
 
   defp resolve_legacy(issue, %Schema{} = settings) do
-    with {:ok, workflow} <- Workflow.current() do
+    project_route = Config.linear_project_route(issue, settings)
+
+    with {:ok, workflow} <- Workflow.current(),
+         {:ok, environment} <- resolve_environment(issue, settings, project_route, nil) do
       {:ok,
        %__MODULE__{
          mode: :legacy,
-         project_route: Config.linear_project_route(issue, settings),
+         project_route: project_route,
          workflow_path: Workflow.workflow_file_path(),
          workflow: workflow,
-         settings: settings,
+         settings: put_environment(settings, environment),
+         environment: environment,
          prompt_template: prompt_template(workflow.prompt_template)
        }}
     end
   end
+
+  defp resolve_environment(issue, settings, project_route, repo_root) do
+    opts =
+      [route: project_route]
+      |> then(&if(is_binary(repo_root), do: Keyword.put(&1, :repo_root, repo_root), else: &1))
+
+    case Environment.resolve_optional(issue, settings, opts) do
+      {:ok, environment} ->
+        {:ok, environment}
+
+      {:error, reason} ->
+        {:error, {:environment_invalid, issue_identifier(issue), Environment.format_error(reason)}}
+    end
+  end
+
+  defp put_environment(%Schema{} = settings, nil), do: settings
+
+  defp put_environment(%Schema{} = settings, %Environment{} = environment) do
+    %{settings | sandbox: %{settings.sandbox | environment: environment}}
+  end
+
+  defp issue_identifier(issue) when is_map(issue),
+    do: Map.get(issue, :identifier) || Map.get(issue, "identifier")
 
   defp merge_settings(%Schema{} = settings, project_route, workflow) do
     updated_agent =

@@ -17,6 +17,26 @@ defmodule SymphonyElixir.FactoryDefinitionTest do
     assert Definition.active_states(template) == ["Todo", "In Progress"]
   end
 
+  test "a stage may name a catalog environment, and the name is validated" do
+    template = Definition.default_template()
+
+    good =
+      Map.update!(template, "stages", fn stages ->
+        Enum.map(stages, fn stage -> if stage["id"] == "implement", do: %{stage | "environment" => "python"}, else: stage end)
+      end)
+
+    assert {:ok, validated} = Definition.validate(good)
+    assert Definition.stage(validated, "implement")["environment"] == "python"
+
+    bad =
+      Map.update!(good, "stages", fn stages ->
+        Enum.map(stages, fn stage -> if stage["id"] == "implement", do: %{stage | "environment" => "Bad/Name"}, else: stage end)
+      end)
+
+    assert {:error, errors} = Definition.validate(bad)
+    assert Enum.any?(errors, &(&1 =~ "environment must be a catalog environment name"))
+  end
+
   test "stages are found by Linear state and stage label, with a per-state default" do
     template = Definition.default_template()
     find = fn state, labels -> (Definition.stage_for(template, state, labels, "factory") || %{})["id"] end

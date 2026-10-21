@@ -696,6 +696,88 @@ A delayed restart lets you deploy without cutting off running agents.
 - **Cancel** with `DELETE /api/v1/restart`.
 - **While pending,** the dashboard shows "Restart pending", and `/api/v1/state` carries `delayed_restart`.
 
+### Environments
+
+An environment is the image, resource limits, and sibling services a run gets.
+The platform catalog in `symphony.yml` owns every security bound; a repository
+may narrow an environment but never widen it.
+
+```yaml
+environments:
+  default:
+    image: registry.example.com/agents/base:1
+    resources: {cpu: 4, memory: 8g}     # catalog MAXIMA for a repo file
+    allowed_images:                     # prefixes a repo file may choose from
+      - registry.example.com/agents/
+      - ghcr.io/acme/
+    services:
+      - name: cache
+        image: registry.example.com/services/redis:7
+    egress_extra: [api.example.com]
+
+  python:
+    image: registry.example.com/agents/python:3.12
+    resources: {cpu: 8, memory: 16g}
+    allowed_images: [registry.example.com/agents/]
+
+teams:
+  PAY: {environment: python}            # team default, keyed by issue prefix
+```
+
+A Linear project route may also name one, in `symphony.yml` or through the
+`add_project` MCP tool:
+
+```yaml
+projects:
+  - linear_project: checkout
+    repo: acme/checkout
+    workflow: WORKFLOW.md
+    environment: python
+```
+
+Factory stages can override everything for their stage with an `environment`
+field (edit the stage in the dashboard). The resolution order is first
+non-blank: **stage** › **project route** › **team** › **`default`**.
+
+The repository owns its image, services, and `setup` commands in
+`.symphony/environment.yaml` on the default branch. Symphony reads it from the
+repo cache at dispatch time:
+
+```yaml
+image: registry.example.com/agents/python:3.13   # must match allowed_images
+resources: {cpu: 2, memory: 4g}                  # <= the catalog maximum
+setup:
+  - pip install -r requirements.txt
+services:
+  - name: db
+    image: ghcr.io/acme/postgres:16              # must match allowed_images
+    env: {POSTGRES_PASSWORD: local-only}
+    ports: [5432]
+    command: ["postgres", "-c", "fsync=off"]
+```
+
+What is enforced: repo and service images must match the catalog's
+`allowed_images` prefixes; resources may lower, not raise, the catalog maxima,
+and a resource the catalog does not bound may not be set; service names, env
+names, ports, commands, setup entries, and unknown keys are validated. Invalid
+or disallowed values **fail closed**: the run is not started, the issue gets a
+transcript note and a log line naming the file and reason, and the next poll
+tries again. There is no fallback to a wider environment.
+
+With `sandbox.kind: docker`, the resolved `image` replaces `sandbox.image` for
+that issue's container, resource limits become `--cpus`/`--memory`, and declared
+services start as sibling containers on a per-issue network (`<container>-net`,
+container names `<container>-<service>`) where the sandbox reaches them by
+service name. `setup` commands run inside the container once, when Symphony
+creates it; a failing setup command discards the container so the next attempt
+starts clean. Services stop at the end of each run and are removed with the
+workspace. Without an `environments:` catalog, Symphony keeps today's sandbox
+behaviour exactly.
+
+The resolved environment (name, image, resources, services, setup, egress
+extras, and a content digest) is stored on the `RunSpec` for the Kubernetes
+launcher. `docs/durable-runs.md` has the field contract.
+
 ### Docker sandbox
 
 Set `sandbox.kind: docker` to run each issue's hooks and agent process inside its

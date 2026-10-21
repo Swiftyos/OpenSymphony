@@ -104,6 +104,26 @@ sandbox:
     - ~/.gitconfig:/root/.gitconfig:ro
   # run_args: ["--cpus", "4", "--memory", "8g"]
 
+# Optional per-project agent environments. The catalog owns the security
+# bounds: repo files may pick an image from allowed_images and lower, not raise,
+# resources. Routes and teams choose one; stages can override in the dashboard.
+# environments:
+#   default:
+#     image: registry.example.com/agents/base:1
+#     resources: {cpu: 4, memory: 8g}
+#     allowed_images: [registry.example.com/agents/, ghcr.io/acme/]
+#     services:
+#       - name: cache
+#         image: registry.example.com/services/redis:7
+#     egress_extra: [api.example.com]
+#   python:
+#     image: registry.example.com/agents/python:3.12
+#     resources: {cpu: 8, memory: 16g}
+#     allowed_images: [registry.example.com/agents/]
+# teams:
+#   PAY:
+#     environment: python
+
 telemetry:
   enabled: false
   # otlp_endpoint: http://localhost:11338
@@ -145,6 +165,7 @@ projects:
     #     repo: your-org/project-a-worker
     #     default_branch: main
     #     description: Queue consumers and scheduled jobs
+    # environment: python   # a catalog entry; stage and team defaults still apply
 
   - linear_project: project-b
     repo: your-org/project-b
