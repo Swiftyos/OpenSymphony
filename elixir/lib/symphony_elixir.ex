@@ -85,6 +85,7 @@ defmodule SymphonyElixir.Application do
       SymphonyElixir.RunRegistry.Server,
       # One shared `ps` snapshot for the process launcher's watchers.
       SymphonyElixir.RunLauncher.Process.ProcessTable,
+      SymphonyElixir.RunWatcher.LastSeen,
       {Registry, keys: :unique, name: SymphonyElixir.RunWatcher.Registry},
       {DynamicSupervisor, strategy: :one_for_one, name: SymphonyElixir.RunWatcher.Supervisor},
       # Deletes finished runner pods and orphaned run Secrets (Kubernetes launcher only).

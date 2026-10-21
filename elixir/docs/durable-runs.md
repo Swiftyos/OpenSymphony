@@ -141,6 +141,9 @@ Kubernetes they move behind a tool gateway.
      - If the runner disappears without one, it exits with `:runner_lost` after a 10s grace.
      - Heartbeat events (every 30s) and every other event reset the stall clock; the
        orchestrator also reads the watcher's last-seen time for process runs.
+       The last-seen times live in one public ETS table (`RunWatcher.LastSeen`): an event
+       is an ETS write in the request, not a message to the watcher, and the orchestrator's
+       per-poll stall check reads the table instead of calling each watcher in turn.
    - **Adoption.** On start, `recover_runs/1` adopts each registered run whose
      `launcher.alive?(ref)` and whose launcher is still available: it starts a watcher, rebuilds
      the running entry from the registry metadata, and puts the run back in `running` without

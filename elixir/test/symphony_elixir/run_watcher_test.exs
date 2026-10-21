@@ -214,6 +214,75 @@ defmodule SymphonyElixir.RunWatcherTest do
     assert_receive {:DOWN, ^monitor, :process, ^watcher, :runner_lost}, 1_000
   end
 
+  test "touches and reads go through the shared table, not the watcher", %{run_id: run_id} do
+    alias SymphonyElixir.RunWatcher.LastSeen
+    FakeLauncher.set("fake:" <> run_id, true)
+    {:ok, watcher} = RunWatcher.start(%{run_id: run_id}, "fake:" <> run_id, launcher: FakeLauncher, poll_interval_ms: 60_000)
+
+    assert is_integer(LastSeen.get(run_id, watcher))
+    :ok = LastSeen.put(run_id, watcher, 1_000)
+    assert RunWatcher.last_seen(run_id) == DateTime.from_unix!(1_000, :millisecond)
+
+    # A touch is an ETS write: the watcher's mailbox stays empty.
+    :erlang.trace(watcher, true, [:receive])
+    for _ <- 1..100, do: :ok = RunWatcher.touch(run_id)
+    refute_receive {:trace, ^watcher, :receive, _message}, 50
+    :erlang.trace(watcher, false, [:receive])
+    assert DateTime.compare(RunWatcher.last_seen(run_id), DateTime.from_unix!(1_000, :millisecond)) == :gt
+
+    # A row left by another watcher of the run is not this watcher's.
+    :ok = LastSeen.put(run_id, self(), 5)
+    assert RunWatcher.last_seen(run_id) == nil
+    assert LastSeen.get(run_id, self()) == 5
+
+    # Stopping removes the watcher's own row only.
+    :ok = LastSeen.put(run_id, watcher, 7)
+    monitor = Process.monitor(watcher)
+    :ok = RunWatcher.finished(run_id, "normal")
+    assert_receive {:DOWN, ^monitor, :process, ^watcher, :normal}
+    assert LastSeen.get(run_id, watcher) == nil
+  end
+
+  test "without the shared table the watcher keeps its own last-seen time", %{run_id: run_id} do
+    alias SymphonyElixir.RunWatcher.LastSeen
+    FakeLauncher.set("fake:" <> run_id, true)
+    :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, LastSeen)
+
+    try do
+      assert LastSeen.put(run_id, self(), 1) == :unavailable
+      assert LastSeen.get(run_id, self()) == :unavailable
+      assert LastSeen.delete(run_id, self()) == :ok
+
+      {:ok, watcher} = RunWatcher.start(%{run_id: run_id}, "fake:" <> run_id, launcher: FakeLauncher, poll_interval_ms: 60_000)
+      first = RunWatcher.last_seen(run_id)
+      assert %DateTime{} = first
+      Process.sleep(5)
+      :ok = RunWatcher.touch(run_id)
+      assert DateTime.compare(RunWatcher.last_seen(run_id), first) == :gt
+      RunWatcher.stop(watcher)
+    after
+      {:ok, _pid} = Supervisor.restart_child(SymphonyElixir.Supervisor, LastSeen)
+    end
+  end
+
+  test "reading every run's last-seen time is cheap with a thousand watchers" do
+    run_ids = for n <- 1..1_000, do: "run-many-#{n}-#{System.unique_integer([:positive])}"
+
+    watchers =
+      for run_id <- run_ids do
+        {:ok, pid} = RunWatcher.start(%{run_id: run_id}, "fake:" <> run_id, launcher: FakeLauncher, poll_interval_ms: 600_000)
+        pid
+      end
+
+    try do
+      {micros, seen} = :timer.tc(fn -> Enum.map(run_ids, &RunWatcher.last_seen/1) end)
+      assert Enum.all?(seen, &match?(%DateTime{}, &1))
+      assert micros < 500_000
+    after
+      Enum.each(watchers, &RunWatcher.stop/1)
+    end
+  end
+
   test "last_seen degrades when the watcher is the calling process", %{run_id: run_id} do
     Registry.register(RunWatcher.registry(), run_id, nil)
     assert RunWatcher.last_seen(run_id) == nil

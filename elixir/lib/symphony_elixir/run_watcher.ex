@@ -33,6 +33,8 @@ defmodule SymphonyElixir.RunWatcher do
 
   require Logger
 
+  alias SymphonyElixir.RunWatcher.LastSeen
+
   @registry SymphonyElixir.RunWatcher.Registry
   @supervisor SymphonyElixir.RunWatcher.Supervisor
   @poll_interval_ms 5_000
@@ -79,12 +81,16 @@ defmodule SymphonyElixir.RunWatcher do
     }
   end
 
-  @doc "Tells the watcher for `run_id` that the run is still alive."
+  @doc """
+  Tells the watcher for `run_id` that the run is still alive. Called for every
+  runner event: it writes the shared last-seen table (`RunWatcher.LastSeen`)
+  directly, without a message to the watcher.
+  """
   @spec touch(String.t()) :: :ok
   def touch(run_id) when is_binary(run_id) do
     case lookup(run_id) do
       nil -> :ok
-      pid -> GenServer.cast(pid, :touch)
+      pid -> if LastSeen.put(run_id, pid, now_ms()) == :unavailable, do: GenServer.cast(pid, :touch)
     end
 
     :ok
@@ -105,23 +111,34 @@ defmodule SymphonyElixir.RunWatcher do
 
   def finished(_run_id, _reason), do: :ok
 
-  @doc "The last time an event arrived for `run_id`, or nil when no watcher has it."
+  @doc """
+  The last time an event arrived for `run_id`, or nil when no watcher has it.
+  An ETS read (the orchestrator asks for every run on each poll); a call to
+  the watcher only without the shared table.
+  """
   @spec last_seen(String.t()) :: DateTime.t() | nil
   def last_seen(run_id) when is_binary(run_id) do
     case lookup(run_id) do
-      nil ->
-        nil
-
-      pid ->
-        try do
-          GenServer.call(pid, :last_seen, 1_000)
-        catch
-          :exit, _reason -> nil
-        end
+      nil -> nil
+      pid -> last_seen_of(run_id, pid)
     end
   end
 
   def last_seen(_run_id), do: nil
+
+  defp last_seen_of(run_id, pid) do
+    case LastSeen.get(run_id, pid) do
+      ms when is_integer(ms) -> DateTime.from_unix!(ms, :millisecond)
+      nil -> nil
+      :unavailable -> call_last_seen(pid)
+    end
+  end
+
+  defp call_last_seen(pid) do
+    GenServer.call(pid, :last_seen, 1_000)
+  catch
+    :exit, _reason -> nil
+  end
 
   @doc "Stops the watcher for `run_id`, usually because the run was cancelled."
   @spec stop(String.t()) :: :ok
@@ -155,6 +172,8 @@ defmodule SymphonyElixir.RunWatcher do
   end
 
   defp init_watcher(args) do
+    now = now_ms()
+    LastSeen.put(args.run_id, self(), now)
     # A just-launched runner is checked once at startup_check_ms; regular
     # polling starts after that check passes.
     case Map.get(args, :log) do
@@ -173,7 +192,7 @@ defmodule SymphonyElixir.RunWatcher do
        log: Map.get(args, :log),
        status: Map.get(args, :status),
        unauthorized_timeout_ms: Map.get(args, :unauthorized_timeout_ms, @unauthorized_timeout_ms),
-       last_seen_ms: now_ms(),
+       last_seen_ms: now,
        gone_since_ms: nil,
        unauthorized_since_ms: nil
      }}
@@ -224,6 +243,12 @@ defmodule SymphonyElixir.RunWatcher do
   end
 
   def handle_info(_message, state), do: {:noreply, state}
+
+  @impl true
+  def terminate(_reason, state) do
+    LastSeen.delete(state.run_id, self())
+    :ok
+  end
 
   defp lost(%{gone_since_ms: nil} = state, _reason) do
     schedule_poll(state.poll_interval_ms)
