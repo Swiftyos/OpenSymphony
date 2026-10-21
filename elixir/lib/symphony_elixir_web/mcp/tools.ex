@@ -198,8 +198,8 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
       description:
         "Admins: make Symphony listen to a Linear project and work its issues in a GitHub repo, from the next poll. Issues follow the project's flow, else its team's. The repo must have the workflow file (default WORKFLOW.md) on its default branch, and Symphony's GitHub access must be able to push to it. Adding an existing slug updates it.",
       properties: %{
-        project: %{type: "string", description: "The Linear project's URL or slug id (e.g. 185b1980c0bc)."},
-        repo: %{type: "string", description: "GitHub repository as owner/name, e.g. n8n-io/lang-tracer."},
+        project: %{type: "string", description: "The Linear project's URL or slug id (e.g. 0a1b2c3d4e5f)."},
+        repo: %{type: "string", description: "GitHub repository as owner/name, e.g. acme/widgets."},
         workflow: %{type: "string", description: "Path of the workflow file in the repo (default WORKFLOW.md)."},
         default_branch: %{type: "string", description: "Branch PRs target (default main)."},
         backend: %{type: "string", enum: ["codex", "claude", "opencode"], description: "Default harness (stage settings and labels still win)."}

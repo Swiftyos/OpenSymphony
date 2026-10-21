@@ -13,7 +13,7 @@ defmodule SymphonyElixir.DashboardComponentsTest do
         md("""
         ## Plan
         Fixed **the route** so `/a<b>` resolves, *quietly*.
-        See [the PR](https://github.com/n8n-io/ai-gym/pull/1) and [bad](javascript:alert(1)).
+        See [the PR](https://github.com/acme/gadgets/pull/1) and [bad](javascript:alert(1)).
 
         - one
         - two
@@ -34,7 +34,7 @@ defmodule SymphonyElixir.DashboardComponentsTest do
       assert html =~ "<strong>the route</strong>"
       assert html =~ "<code>/a&lt;b&gt;</code>"
       assert html =~ "<em>quietly</em>"
-      assert html =~ ~s(<a href="https://github.com/n8n-io/ai-gym/pull/1" target="_blank" rel="noopener noreferrer">the PR</a>)
+      assert html =~ ~s(<a href="https://github.com/acme/gadgets/pull/1" target="_blank" rel="noopener noreferrer">the PR</a>)
       refute html =~ "javascript:alert(1)\""
       assert html =~ "<ul><li>one</li><li>two</li></ul>"
       assert html =~ "<ol><li>first</li><li>second</li></ol>"

@@ -139,10 +139,10 @@ defmodule SymphonyElixir.ProjectRoutes do
 
     cond do
       not Regex.match?(@slug_pattern, slug) ->
-        {:error, "slug must be the Linear project's slug id (the hex part of its URL, e.g. 8f808f014d87)."}
+        {:error, "slug must be the Linear project's slug id (the hex part of its URL, e.g. 9e8d7c6b5a40)."}
 
       not Regex.match?(@repo_pattern, repo) ->
-        {:error, "repo must be a GitHub repository as owner/name, e.g. n8n-io/lang-tracer."}
+        {:error, "repo must be a GitHub repository as owner/name, e.g. acme/widgets."}
 
       not safe_workflow_path?(workflow) ->
         {:error, "workflow must be a path inside the repo, e.g. WORKFLOW.md."}

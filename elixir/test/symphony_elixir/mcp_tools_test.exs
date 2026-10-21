@@ -284,30 +284,30 @@ defmodule SymphonyElixir.McpToolsTest do
     end
 
     test "admins add and remove projects; members can only look", %{admin_token: admin, mia_token: mia} do
-      url = "https://linear.app/n8n/project/agent-factory-lang-tracer-185b1980c0bc/"
+      url = "https://linear.app/acme/project/widgets-0a1b2c3d4e5f/"
 
-      assert %{"added" => %{"slug" => "185b1980c0bc", "repo" => "n8n-io/lang-tracer", "workflow" => "WORKFLOW.md"}, "note" => note} =
-               ok!(admin, "add_project", %{"project" => url, "repo" => "n8n-io/lang-tracer"})
+      assert %{"added" => %{"slug" => "0a1b2c3d4e5f", "repo" => "acme/widgets", "workflow" => "WORKFLOW.md"}, "note" => note} =
+               ok!(admin, "add_project", %{"project" => url, "repo" => "acme/widgets"})
 
       assert note =~ "WORKFLOW.md on main"
       # Its name and its teams' labels are looked up in Linear in the background.
-      assert_receive {:graphql, "query SymphonyProjectTeams" <> _, %{slugs: ["185b1980c0bc"]}}, 1_000
-      assert eventually(fn -> SymphonyElixir.LabelSync.project_names()["185b1980c0bc"] == "Project 185b1980c0bc" end)
+      assert_receive {:graphql, "query SymphonyProjectTeams" <> _, %{slugs: ["0a1b2c3d4e5f"]}}, 1_000
+      assert eventually(fn -> SymphonyElixir.LabelSync.project_names()["0a1b2c3d4e5f"] == "Project 0a1b2c3d4e5f" end)
       assert [%{added_by: "ada via MCP (agent)"}] = SymphonyElixir.ProjectRoutes.list()
 
       # This test runs Symphony with a single WORKFLOW.md, where stored projects aren't live.
       assert %{"projects" => projects} = ok!(mia, "list_projects")
 
-      assert Enum.any?(projects, &match?(%{"project" => "185b1980c0bc", "source" => "mcp", "active" => false, "added_by" => "ada via MCP (agent)"}, &1))
+      assert Enum.any?(projects, &match?(%{"project" => "0a1b2c3d4e5f", "source" => "mcp", "active" => false, "added_by" => "ada via MCP (agent)"}, &1))
 
-      assert error!(mia, "add_project", %{"project" => "abc123def456", "repo" => "n8n-io/n8n"}) =~ "Only admins"
-      assert error!(mia, "remove_project", %{"project" => "185b1980c0bc"}) =~ "Only admins"
+      assert error!(mia, "add_project", %{"project" => "abc123def456", "repo" => "acme/app"}) =~ "Only admins"
+      assert error!(mia, "remove_project", %{"project" => "0a1b2c3d4e5f"}) =~ "Only admins"
 
       assert error!(admin, "add_project", %{"project" => "abc123def456", "repo" => "../srv"}) =~ "owner/name"
       assert error!(admin, "add_project", %{"project" => "not a project!", "repo" => "a/b"}) =~ "Linear project URL"
 
-      assert %{"removed" => "185b1980c0bc"} = ok!(admin, "remove_project", %{"project" => "185b1980c0bc"})
-      assert error!(admin, "remove_project", %{"project" => "185b1980c0bc"}) =~ "isn't listening"
+      assert %{"removed" => "0a1b2c3d4e5f"} = ok!(admin, "remove_project", %{"project" => "0a1b2c3d4e5f"})
+      assert error!(admin, "remove_project", %{"project" => "0a1b2c3d4e5f"}) =~ "isn't listening"
     end
 
     test "projects set in the config file can't be changed here; controls off blocks changes", %{admin_token: admin} do

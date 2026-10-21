@@ -1693,7 +1693,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       telemetry_enabled: true,
       telemetry_otlp_endpoint: "http://host.containers.internal:4318",
       telemetry_otlp_protocol: "http/protobuf",
-      telemetry_resource_attributes: %{"environment" => "agent-factory"}
+      telemetry_resource_attributes: %{"environment" => "staging"}
     )
 
     assert with_overrides.(Config.codex_command()) ==
@@ -1702,7 +1702,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
                ~s( -c 'otel.trace_exporter={ otlp-http = { endpoint = "http://host.containers.internal:4318/v1/traces", protocol = "binary" } }') <>
                ~s( -c 'otel.metrics_exporter={ otlp-http = { endpoint = "http://host.containers.internal:4318/v1/metrics", protocol = "binary" } }') <>
                " -c 'analytics.enabled=true' -c 'otel.log_user_prompt=false' -c 'otel.log_agent_responses=false'" <>
-               ~s( -c 'otel.environment="agent-factory"')
+               ~s( -c 'otel.environment="staging"')
 
     # Settings before `app-server` keep the overrides there too.
     write_workflow_file!(Workflow.workflow_file_path(),
