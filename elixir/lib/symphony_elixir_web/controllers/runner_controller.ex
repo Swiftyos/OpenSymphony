@@ -16,6 +16,7 @@ defmodule SymphonyElixirWeb.RunnerController do
 
   alias Plug.Conn
   alias SymphonyElixir.AgentInbox
+  alias SymphonyElixir.AgentMetrics
   alias SymphonyElixir.Capacity.RunUsage
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.RunEvents
@@ -201,6 +202,7 @@ defmodule SymphonyElixirWeb.RunnerController do
     backend = data_value(data, :backend) || conn.assigns.backend
     message = data_value(data, :message)
     Transcript.record(identifier(conn, data), message, backend: backend)
+    AgentMetrics.tool_call(message, backend)
     send_agent_update(conn.assigns.issue_id, backend, message)
   end
 
@@ -209,7 +211,9 @@ defmodule SymphonyElixirWeb.RunnerController do
   end
 
   defp do_apply_event(conn, %{type: "turn_started", data: data}) do
-    Transcript.turn_started(identifier(conn, data), data_value(data, :info))
+    info = data_value(data, :info)
+    AgentMetrics.turn_started(info)
+    Transcript.turn_started(identifier(conn, data), info)
   end
 
   defp do_apply_event(_conn, %{type: "heartbeat"}), do: :ok

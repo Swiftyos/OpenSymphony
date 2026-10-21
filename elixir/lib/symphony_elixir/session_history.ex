@@ -18,7 +18,7 @@ defmodule SymphonyElixir.SessionHistory do
   use GenServer
   require Logger
 
-  alias SymphonyElixir.{IssueStage, StateStore, StatusDashboard, UsageLedger}
+  alias SymphonyElixir.{AgentMetrics, IssueStage, StateStore, StatusDashboard, UsageLedger}
   alias SymphonyElixir.Linear.Issue
 
   @format_version 1
@@ -43,6 +43,8 @@ defmodule SymphonyElixir.SessionHistory do
   """
   @spec record(map(), outcome(), String.t() | nil) :: :ok
   def record(entry, outcome, error \\ nil) when is_map(entry) and is_atom(outcome) do
+    # Every run leaving `running` passes here, in-process or runner-hosted.
+    AgentMetrics.run_ended(entry, outcome)
     GenServer.cast(__MODULE__, {:record, entry, outcome, error, DateTime.utc_now()})
   end
 

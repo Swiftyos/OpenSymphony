@@ -12,6 +12,7 @@ defmodule SymphonyElixir.RunHost.Local do
   @behaviour SymphonyElixir.RunHost
 
   alias SymphonyElixir.AgentInbox
+  alias SymphonyElixir.AgentMetrics
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.SessionStore
   alias SymphonyElixir.Transcript
@@ -61,6 +62,7 @@ defmodule SymphonyElixir.RunHost.Local do
   @impl true
   def agent_update(%__MODULE__{recipient: recipient}, issue, backend, message) do
     Transcript.record(issue_identifier(issue), message, backend: backend)
+    AgentMetrics.tool_call(message, backend)
     send_agent_update(recipient, issue, backend, message)
   end
 
@@ -68,7 +70,10 @@ defmodule SymphonyElixir.RunHost.Local do
   def transcript_note(_host, identifier, text), do: Transcript.note(identifier, text)
 
   @impl true
-  def turn_started(_host, identifier, info), do: Transcript.turn_started(identifier, info)
+  def turn_started(_host, identifier, info) do
+    AgentMetrics.turn_started(info)
+    Transcript.turn_started(identifier, info)
+  end
 
   @impl true
   def session_get(_host, issue_id), do: SessionStore.get(issue_id)

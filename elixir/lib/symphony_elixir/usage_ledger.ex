@@ -16,7 +16,7 @@ defmodule SymphonyElixir.UsageLedger do
   use GenServer
   require Logger
 
-  alias SymphonyElixir.{Config, IssueStage, Pricing}
+  alias SymphonyElixir.{AgentMetrics, Config, IssueStage, Pricing}
   alias SymphonyElixir.Linear.Issue
 
   @usage_table :symphony_usage_ledger
@@ -47,8 +47,10 @@ defmodule SymphonyElixir.UsageLedger do
 
   def record_tokens(%{issue: %Issue{} = issue} = running_entry, %{input_tokens: input, output_tokens: output} = delta)
       when is_integer(input) and is_integer(output) and (input > 0 or output > 0) do
+    backend = Map.get(running_entry, :backend) || Config.agent_backend()
+    AgentMetrics.tokens(backend, delta)
+
     if ready?() do
-      backend = Map.get(running_entry, :backend) || Config.agent_backend()
       # The stage the issue is in while the tokens are spent, so cost splits by stage.
       stage = factory_node(issue)
       model = usage_model(running_entry, delta, backend)
