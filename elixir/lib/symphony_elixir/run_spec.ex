@@ -60,7 +60,19 @@ defmodule SymphonyElixir.RunSpec do
     :blocked_by
   ]
 
-  @project_route_fields [:slug, :repo, :workflow, :prompt, :hooks, :backend, :default_branch, :workspace_root, :repos, :added_by, :added_at]
+  @project_route_fields [
+    :slug,
+    :repo,
+    :workflow,
+    :prompt,
+    :hooks,
+    :backend,
+    :default_branch,
+    :workspace_root,
+    :repos,
+    :added_by,
+    :added_at
+  ]
   # A multi-repo project's `repos`: the runner finds the issue's home repo among them.
   @project_repo_fields [:name, :repo, :default_branch, :description]
   @route_fields [:backend, :effort, :warnings]

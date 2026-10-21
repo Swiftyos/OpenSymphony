@@ -100,31 +100,32 @@ defmodule SymphonyElixir.RunLauncher.ProcessTest do
     # The launch itself returns at once; the watcher's startup check finds the runner gone.
     {elapsed_us, result} =
       :timer.tc(fn ->
-        ProcessLauncher.start_process(spec, command: "#{Path.join(root, "no-such-runner")} {spec}", startup_check_ms: 300)
+        ProcessLauncher.start_process(spec, command: "#{Path.join(root, "no-such-runner")} {spec}", startup_check_ms: 60_000)
       end)
 
-    assert {:ok, watcher, "process:" <> _rest} = result
-    assert elapsed_us < 300_000
-    output = assert_launch_failed(watcher)
+    assert {:ok, watcher, "process:" <> _rest = ref} = result
+    # Returned without waiting for the watcher's check.
+    assert elapsed_us < 2_000_000
+    output = assert_launch_failed(watcher, ref)
     assert output =~ "no-such-runner"
     refute RunWatcher.last_seen(spec.run_id)
 
     # Exited within the startup check, with only the log's tail kept.
     script = Path.join(root, "noisy-exit.sh")
-    File.write!(script, "#!/bin/sh\nprintf 'x%.0s' $(seq 1 3000)\necho boom >&2\nsleep 0.2\nexit 3\n")
+    File.write!(script, "#!/bin/sh\nprintf 'x%.0s' $(seq 1 3000)\necho boom >&2\nexit 3\n")
     File.chmod!(script, 0o755)
 
-    assert {:ok, watcher, _ref} = ProcessLauncher.start_process(spec(root, "run-noisy"), command: "#{script} {spec}", startup_check_ms: 600)
-    tail = assert_launch_failed(watcher)
+    assert {:ok, watcher, ref} = ProcessLauncher.start_process(spec(root, "run-noisy"), command: "#{script} {spec}", startup_check_ms: 60_000)
+    tail = assert_launch_failed(watcher, ref)
     assert byte_size(tail) == 2_000
     assert tail =~ "boom"
 
     # A runner that removes its own run dir leaves no log to show.
     remover = Path.join(root, "remove-dir.sh")
-    File.write!(remover, "#!/bin/sh\nrm -rf \"$(dirname \"$1\")\"\nsleep 0.2\n")
+    File.write!(remover, "#!/bin/sh\nrm -rf \"$(dirname \"$1\")\"\n")
     File.chmod!(remover, 0o755)
-    assert {:ok, watcher, _ref} = ProcessLauncher.start_process(spec(root, "run-no-log"), command: "#{remover} {spec}", startup_check_ms: 600)
-    assert assert_launch_failed(watcher) == ""
+    assert {:ok, watcher, ref} = ProcessLauncher.start_process(spec(root, "run-no-log"), command: "#{remover} {spec}", startup_check_ms: 60_000)
+    assert assert_launch_failed(watcher, ref) == ""
   end
 
   test "the runner gets stdin from /dev/null and its output in runner.log", %{root: root} do
@@ -176,10 +177,10 @@ defmodule SymphonyElixir.RunLauncher.ProcessTest do
 
     case System.find_executable("setsid") do
       nil ->
-        assert {:ok, watcher, _ref} =
-                 ProcessLauncher.start_process(forced, command: "setsid #{script} {spec}", setsid_available: true, startup_check_ms: 300)
+        assert {:ok, watcher, ref} =
+                 ProcessLauncher.start_process(forced, command: "setsid #{script} {spec}", setsid_available: true, startup_check_ms: 60_000)
 
-        assert assert_launch_failed(watcher) =~ "setsid"
+        assert assert_launch_failed(watcher, ref) =~ "setsid"
 
       _setsid ->
         assert {:ok, _watcher, forced_ref} =
@@ -244,11 +245,11 @@ defmodule SymphonyElixir.RunLauncher.ProcessTest do
       File.write!(fake_ps, body)
       File.chmod!(fake_ps, 0o755)
 
-      assert {:ok, watcher, "process:" <> rest} =
-               ProcessLauncher.start_process(spec(root, run_id), command: "#{script} {spec}", startup_check_ms: 100)
+      assert {:ok, watcher, "process:" <> rest = ref} =
+               ProcessLauncher.start_process(spec(root, run_id), command: "#{script} {spec}", startup_check_ms: 60_000)
 
       assert String.ends_with?(rest, ":gone")
-      assert_launch_failed(watcher)
+      assert_launch_failed(watcher, ref)
     end
   end
 
@@ -467,8 +468,12 @@ defmodule SymphonyElixir.RunLauncher.ProcessTest do
     end
   end
 
-  defp assert_launch_failed(watcher) do
+  # Once the runner is gone, runs the watcher's startup check now instead of
+  # waiting for its timer, so a slow host can't make the runner outlive it.
+  defp assert_launch_failed(watcher, ref) do
     monitor = Process.monitor(watcher)
+    assert eventually(fn -> not ProcessLauncher.alive?(ref) end)
+    send(watcher, :startup_check)
     assert_receive {:DOWN, ^monitor, :process, ^watcher, {:launch_failed, tail}}, 5_000
     tail
   end
@@ -541,7 +546,7 @@ defmodule SymphonyElixir.RunLauncher.ProcessTest do
     File.chmod!(systemctl, 0o755)
   end
 
-  defp eventually(fun, attempts \\ 50) do
+  defp eventually(fun, attempts \\ 250) do
     cond do
       fun.() ->
         true

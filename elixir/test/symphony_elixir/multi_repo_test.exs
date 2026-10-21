@@ -91,6 +91,49 @@ defmodule SymphonyElixir.MultiRepoTest do
     end
   end
 
+  describe "run spec routes" do
+    test "a runner given the spec's route and workspace root checks out the issue's home repo and the references" do
+      test_root = Path.join(System.tmp_dir!(), "symphony-multi-repo-spec-#{System.unique_integer([:positive])}")
+      api = Path.join(test_root, "api")
+      worker = Path.join(test_root, "worker")
+
+      try do
+        init_repo!(api, "api v1\n")
+        init_repo!(worker, "worker v1\n")
+
+        # The runner's own config doesn't have the project (added through MCP).
+        write_workflow_file!(Workflow.workflow_file_path(),
+          tracker_project_slug: nil,
+          tracker_projects: [%{slug: "other", repo: api}],
+          workspace_root: Path.join(test_root, "elsewhere")
+        )
+
+        settings = put_in(Config.settings!().workspace.repo_cache.max_age_ms, 0)
+        # The controller resolved `root/<slug>` (it has several routes); still under the root.
+        workspace_root = Path.join([test_root, "elsewhere", "project-a"])
+
+        route = %{
+          slug: "project-a",
+          repo: api,
+          default_branch: nil,
+          repos: [%{name: "worker", repo: worker, default_branch: nil, description: nil}]
+        }
+
+        issue = %Issue{id: "i-9", identifier: "PI-9", project_slug: "project-a", labels: ["repo/worker"]}
+
+        opts = [settings: settings, project_route: route, workspace_root: workspace_root]
+        assert {:ok, workspace} = Workspace.create_for_issue(issue, nil, opts)
+
+        assert String.contains?(workspace, "/elsewhere/project-a/")
+        assert File.read!(Path.join(workspace, "README.md")) == "worker v1\n"
+        assert {"symphony/PI-9\n", 0} = System.cmd("git", ["-C", workspace, "branch", "--show-current"])
+        assert File.read!(Path.join(workspace, ".symphony/repos/api/README.md")) == "api v1\n"
+      after
+        File.rm_rf(test_root)
+      end
+    end
+  end
+
   describe "repositories prompt" do
     test "names the home repo, the references, and how to block on another repo" do
       write_workflow_file!(Workflow.workflow_file_path(),

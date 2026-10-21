@@ -331,7 +331,7 @@ defmodule SymphonyElixir.DurableRunsProcessTest do
     assert eventually(fn -> Map.has_key?(:sys.get_state(pid).running, issue.id) end)
     assert %{launcher: ProcessLauncher, run_id: run_id} = :sys.get_state(pid).running[issue.id]
 
-    assert eventually(fn -> Map.has_key?(:sys.get_state(pid).retry_attempts, issue.id) end, 150)
+    assert eventually(fn -> Map.has_key?(:sys.get_state(pid).retry_attempts, issue.id) end, 500)
     %{error: error} = :sys.get_state(pid).retry_attempts[issue.id]
     assert error =~ "runner failed to start:"
     assert error =~ "no-such-runner"

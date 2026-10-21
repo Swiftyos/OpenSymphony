@@ -163,7 +163,9 @@ defmodule SymphonyElixir.RunSpecTest do
       repo: "acme/widgets",
       workflow: "WORKFLOW.md",
       backend: "codex",
-      workspace_root: "/tmp/checkout"
+      workspace_root: "/tmp/checkout",
+      hooks: %{"after_create" => "make deps"},
+      repos: [%SymphonyElixir.Config.Schema.TrackerProjectRepo{name: "worker", repo: "acme/jobs-worker", default_branch: "trunk"}]
     }
 
     spec = %RunSpec{
@@ -178,6 +180,13 @@ defmodule SymphonyElixir.RunSpecTest do
     assert {:ok, loaded} = RunSpec.read(path)
     assert loaded.project_route.slug == "checkout"
     assert loaded.project_route.repo == "acme/widgets"
+    assert loaded.project_route.hooks == %{"after_create" => "make deps"}
+    # A multi-repo route keeps its repos, so a runner finds the issue's home repo.
+    assert [%{name: "worker", repo: "acme/jobs-worker", default_branch: "trunk"}] = loaded.project_route.repos
+
+    assert %{name: "worker", default_branch: "trunk"} =
+             SymphonyElixir.Config.issue_repo_for_route(%{labels: ["repo/worker"]}, loaded.project_route)
+
     assert loaded.route == %{backend: "codex", effort: "high", warnings: []}
 
     File.mkdir_p!(RunSpec.dir("run-odd-route"))
