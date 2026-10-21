@@ -17,7 +17,7 @@
   --line: rgba(0, 0, 0, 0.07);
   --line-strong: rgba(0, 0, 0, 0.14);
   /* Flow diagram connections not used yet: dark enough to read at a glance. */
-  --edge-idle: rgba(0, 0, 0, 0.62);
+  --edge-idle: rgba(0, 0, 0, 0.52);
   --ink: #1f1f1f;
   --ink-2: #3d3d3d;
   --muted: #6f6f6f;
@@ -2210,12 +2210,12 @@ a.brand:hover {
 
 .fx-edge-human {
   stroke: var(--ink-2);
-  opacity: 1;
+  opacity: 0.9;
 }
 
 .fx-edge-agent {
   stroke: var(--flow);
-  opacity: 1;
+  opacity: 0.9;
 }
 
 .fx-edge-selected {
@@ -3303,7 +3303,7 @@ a.brand:hover {
 
 .fx-edge-live {
   stroke: #4a4a4a;
-  opacity: 1;
+  opacity: 0.9;
 }
 
 .fx-arrow-live {
