@@ -6,9 +6,11 @@ defmodule SymphonyElixir.GitMirror do
   A runner clones and fetches from `/git/<run_id>/<repo-key>`, where the repo
   key is the cache key of a configured project repo (the same key
   `SymphonyElixir.Workspace` uses for the cache directory). A run may only read
-  the repo of its own issue's project (`run_repo/2`, which also picks the
-  mirror URL a spec gets). A run whose metadata has no project slug at all may
-  read the repo only when exactly one repo is configured.
+  the repos of its own issue's project (`run_repos/2`): the issue's home repo,
+  which the spec's mirror URL names (`mirror_for/2`), and the project's other
+  repos, which the runner checks out read-only under `.symphony/repos/<name>`
+  (`reference_commands/4`). A run whose metadata has no project slug at all may
+  read only when exactly one project has a repo.
 
   The cache is served as it is and never changed for serving. Its local
   branches are not kept up to date, only `refs/remotes/origin/*` is, so a
@@ -34,9 +36,12 @@ defmodule SymphonyElixir.GitMirror do
   @fetched_at_file "symphony-fetched-at"
   @max_repo_key_bytes 128
 
-  @typedoc "A configured repo whose cache exists on this controller."
+  @typedoc "A configured project repo; servable once its cache exists on this controller."
   @type repo :: %{
           route: map(),
+          name: String.t(),
+          primary: boolean(),
+          default_branch: String.t() | nil,
           repo_source: Config.repo_source(),
           repo_key: String.t(),
           cache_path: Path.t()
@@ -68,49 +73,55 @@ defmodule SymphonyElixir.GitMirror do
   def resolve(_repo_key, %Schema{}), do: {:error, :unknown_repo}
 
   @doc """
-  The configured repo a run with this project slug may read.
+  The configured repos a run with this project slug may read, primary first.
 
-  With a slug, the repo of the project route matching it (none when the slug
-  matches no route or the route has no repo). Without a slug, the single
-  configured repo when there is exactly one, otherwise none. Both the
+  With a slug, the repos of the project route matching it (none when the slug
+  matches no route or the route has no repo). Without a slug, the repos of the
+  only project with a repo when there is exactly one, otherwise none. Both the
   endpoint's authorization and the spec's mirror URL use this lookup.
   """
-  @spec run_repo(String.t() | nil, Schema.t()) :: {:ok, repo()} | :none
-  def run_repo(project_slug, %Schema{} = settings) do
+  @spec run_repos(String.t() | nil, Schema.t()) :: [repo()]
+  def run_repos(project_slug, %Schema{} = settings) do
     candidates = candidates(settings)
 
-    found =
-      if is_binary(project_slug) and String.trim(project_slug) != "" do
-        case Config.linear_project_route(%{project_slug: project_slug}, settings) do
-          %{slug: slug} -> Enum.find(candidates, &(&1.route.slug == slug))
-          nil -> nil
-        end
-      else
-        case Enum.uniq_by(candidates, & &1.repo_key) do
-          [only] -> only
-          _none_or_many -> nil
-        end
+    if is_binary(project_slug) and String.trim(project_slug) != "" do
+      case Config.linear_project_route(%{project_slug: project_slug}, settings) do
+        %{slug: slug} -> Enum.filter(candidates, &(&1.route.slug == slug))
+        nil -> []
       end
-
-    if found, do: {:ok, found}, else: :none
+    else
+      case candidates |> Enum.filter(& &1.primary) |> Enum.uniq_by(& &1.repo_key) do
+        [%{route: %{slug: slug}}] -> Enum.filter(candidates, &(&1.route.slug == slug))
+        _none_or_many -> []
+      end
+    end
   end
 
   @doc """
-  Whether the run may read `repo`: only the repo `run_repo/2` picks for the
+  The primary repo of `run_repos/2`.
+  """
+  @spec run_repo(String.t() | nil, Schema.t()) :: {:ok, repo()} | :none
+  def run_repo(project_slug, %Schema{} = settings) do
+    case run_repos(project_slug, settings) do
+      [primary | _] -> {:ok, primary}
+      [] -> :none
+    end
+  end
+
+  @doc """
+  Whether the run may read `repo`: only the repos `run_repos/2` lists for the
   project slug in the run's registry metadata.
   """
   @spec authorize(map() | nil, repo(), Schema.t()) :: :ok | {:error, :forbidden}
   def authorize(metadata, %{repo_key: repo_key}, %Schema{} = settings) do
-    case run_repo(metadata_value(metadata, :project_slug), settings) do
-      {:ok, %{repo_key: ^repo_key}} ->
-        :ok
+    if Enum.any?(run_repos(metadata_value(metadata, :project_slug), settings), &(&1.repo_key == repo_key)) do
+      :ok
+    else
+      Logger.warning(
+        "Git mirror repo not allowed for run issue_identifier=#{metadata_value(metadata, :identifier) || "n/a"} project_slug=#{metadata_value(metadata, :project_slug) || "n/a"} repo=#{repo_key}"
+      )
 
-      _other ->
-        Logger.warning(
-          "Git mirror repo not allowed for run issue_identifier=#{metadata_value(metadata, :identifier) || "n/a"} project_slug=#{metadata_value(metadata, :project_slug) || "n/a"} repo=#{repo_key}"
-        )
-
-        {:error, :forbidden}
+      {:error, :forbidden}
     end
   end
 
@@ -122,21 +133,33 @@ defmodule SymphonyElixir.GitMirror do
   end
 
   @doc """
-  The mirror URL and target branch for a spec's issue, when this controller
-  has the cache of the repo `run_repo/2` picks for the issue's project.
+  The URL of another repo on the same mirror as `git_mirror_url` (a run's
+  mirror URL names its home repo; its project's other repos sit beside it).
+  """
+  @spec repo_url(String.t(), Config.repo_source()) :: String.t()
+  def repo_url(git_mirror_url, repo_source) when is_binary(git_mirror_url) do
+    String.replace(git_mirror_url, ~r{/[^/]*$}, "/" <> repo_key(repo_source))
+  end
 
-  The target branch is the project's configured `default_branch`, else the
+  @doc """
+  The mirror URL and target branch for a spec's issue, when this controller
+  has the cache of the issue's home repo: the repo its `repo/<name>` label
+  names among `run_repos/2`, else the project's primary.
+
+  The target branch is that repo's configured `default_branch`, else the
   cache's `origin/HEAD`, else nil (the clone then falls back to `main` or
   `master`).
   """
   @spec mirror_for(RunSpec.t(), Schema.t()) :: %{url: String.t(), target_branch: String.t() | nil} | nil
   def mirror_for(%RunSpec{run_id: run_id, issue: issue, controller_url: controller_url}, %Schema{} = settings)
       when is_binary(run_id) and is_binary(controller_url) do
-    with {:ok, repo} <- run_repo(metadata_value(issue, :project_slug), settings),
+    with [primary | _] = repos <- run_repos(metadata_value(issue, :project_slug), settings),
+         home = Config.issue_repo_for_route(issue, primary.route),
+         %{} = repo <- Enum.find(repos, &(home && &1.name == home.name)) || primary,
          true <- File.dir?(repo.cache_path) do
       %{
         url: mirror_url(controller_url, run_id, repo.repo_source),
-        target_branch: Map.get(repo.route, :default_branch) || cache_default_branch(repo.cache_path)
+        target_branch: repo.default_branch || cache_default_branch(repo.cache_path)
       }
     else
       _ -> nil
@@ -215,16 +238,83 @@ defmodule SymphonyElixir.GitMirror do
          ])
       |> Enum.join("\n")
 
-    env = [
+    {:ok, %{script: script, env: auth_env(token)}}
+  end
+
+  def clone_commands(%RunSpec{}, _workspace, _opts), do: {:error, :no_git_mirror}
+
+  @doc """
+  The commands a runner runs to check out one of its project's other repos,
+  read-only, at `target` (`.symphony/repos/<name>` in the workspace) from the
+  mirror `url`: a fetch of `refs/remotes/origin/*` and a detached checkout of
+  the target branch (`:target_branch`, else `main` or `master`). Run on every run, so the checkout follows the repo's latest
+  default branch; local changes there are discarded.
+
+  `origin` is `:origin_url` (the real remote), so the checkout names the repo
+  it came from. With `:workspace`, the reference directory is added to the
+  workspace's `.git/info/exclude`. Authentication is the run token in the
+  environment, as for `clone_commands/3`.
+  """
+  @spec reference_commands(RunSpec.t(), String.t(), Path.t(), keyword()) ::
+          {:ok, %{script: String.t(), env: [{String.t(), String.t()}]}} | {:error, :no_git_mirror}
+  def reference_commands(%RunSpec{token: token}, url, target, opts)
+      when is_binary(token) and is_binary(url) and is_binary(target) do
+    workspace = Keyword.get(opts, :workspace)
+    reference_dir = workspace && "/" <> Path.relative_to(Path.dirname(target), workspace) <> "/"
+
+    exclude =
+      if reference_dir do
+        [
+          "workspace=#{shell_escape(workspace)}",
+          "if [ -d \"$workspace/.git\" ]; then",
+          "  mkdir -p \"$workspace/.git/info\"",
+          "  grep -qxF #{shell_escape(reference_dir)} \"$workspace/.git/info/exclude\" 2>/dev/null || " <>
+            "printf '%s\\n' #{shell_escape(reference_dir)} >> \"$workspace/.git/info/exclude\"",
+          "fi"
+        ]
+      else
+        []
+      end
+
+    script =
+      ([
+         "set -eu",
+         "export GIT_TERMINAL_PROMPT=0",
+         "mirror_url=#{shell_escape(url)}",
+         "origin_url=#{shell_escape(Keyword.get(opts, :origin_url) || url)}",
+         "target=#{shell_escape(target)}",
+         "target_branch=#{shell_escape(Keyword.get(opts, :target_branch) || "")}"
+       ] ++
+         exclude ++
+         [
+           "if [ ! -e \"$target/.git\" ]; then",
+           "  rm -rf \"$target\"",
+           "  mkdir -p \"$target\"",
+           "  git init --quiet \"$target\"",
+           "  git -C \"$target\" remote add origin \"$origin_url\"",
+           "fi",
+           "git -C \"$target\" fetch --quiet --no-tags --prune \"$mirror_url\" '+refs/remotes/origin/*:refs/remotes/origin/*'",
+           "if [ -z \"$target_branch\" ] || ! git -C \"$target\" show-ref --verify --quiet \"refs/remotes/origin/$target_branch\"; then",
+           "  for candidate in main master; do",
+           "    if git -C \"$target\" show-ref --verify --quiet \"refs/remotes/origin/$candidate\"; then target_branch=\"$candidate\"; break; fi",
+           "  done",
+           "fi",
+           "git -C \"$target\" checkout --quiet --force --detach \"origin/$target_branch\""
+         ])
+      |> Enum.join("\n")
+
+    {:ok, %{script: script, env: auth_env(token)}}
+  end
+
+  def reference_commands(%RunSpec{}, _url, _target, _opts), do: {:error, :no_git_mirror}
+
+  defp auth_env(token) do
+    [
       {"GIT_CONFIG_COUNT", "1"},
       {"GIT_CONFIG_KEY_0", "http.extraHeader"},
       {"GIT_CONFIG_VALUE_0", "Authorization: Bearer " <> token}
     ]
-
-    {:ok, %{script: script, env: env}}
   end
-
-  def clone_commands(%RunSpec{}, _workspace, _opts), do: {:error, :no_git_mirror}
 
   @doc "Whether the cache's last fetch is older than `max_age_ms`."
   @spec stale?(Path.t(), non_neg_integer()) :: boolean()
@@ -257,29 +347,26 @@ defmodule SymphonyElixir.GitMirror do
     :ok
   end
 
+  # Every repo of every project route, primary first within a route. The
+  # caches of a route's repos all live under its workspace root.
   defp candidates(%Schema{} = settings) do
     settings
     |> Config.linear_project_routes()
     |> Enum.flat_map(fn route ->
-      case Map.get(route, :repo) do
-        repo when is_binary(repo) and repo != "" ->
-          repo_source = Config.repo_source(repo)
+      root = Config.workspace_root_for_route(route, settings)
 
-          [
-            %{
-              route: route,
-              repo_source: repo_source,
-              repo_key: repo_key(repo_source),
-              cache_path:
-                Workspace.repo_cache_path(
-                  Config.workspace_root_for_route(route, settings),
-                  repo_source
-                )
-            }
-          ]
+      for project_repo <- Config.project_repos(route) do
+        repo_source = Config.repo_source(project_repo.repo)
 
-        _ ->
-          []
+        %{
+          route: route,
+          name: project_repo.name,
+          primary: project_repo.primary,
+          default_branch: project_repo.default_branch,
+          repo_source: repo_source,
+          repo_key: repo_key(repo_source),
+          cache_path: Workspace.repo_cache_path(root, repo_source)
+        }
       end
     end)
   end

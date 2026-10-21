@@ -111,3 +111,7 @@ GitHub access is not a blocker by default: try the other remote/auth modes first
 you tried. For a real blocker (a missing required tool, access or secret), write a short brief in
 the workpad (what is missing, why it blocks the work, the exact action a person must take), then
 finish the stage with a move to a blocked stage if your stage offers one.
+
+You change only the repo checked out in this workspace. If the fix needs a change in another
+repository that isn't checked out under `.symphony/repos/`, that is a blocker too: name the repo
+and the change it needs in the brief.

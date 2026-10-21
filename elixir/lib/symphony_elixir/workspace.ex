@@ -30,8 +30,14 @@ defmodule SymphonyElixir.Workspace do
   token in the git environment, and its `origin` is the repo's real remote,
   so pushes go to GitHub with the agent's own credentials. Where the cache
   exists the workspace is cloned from it as before, and the mirror is unused.
-  The project's reference repos are not checked out in a mirror workspace: the
-  mirror serves only the issue's home repo.
+  In a mirror workspace the project's other repos are fetched from the same
+  mirror (which serves a run every repo of its own project, read-only) into
+  `.symphony/repos/<name>`, like the cache path does.
+
+  An existing workspace whose home repo is no longer the issue's (its
+  `repo/<name>` label changed) is replaced by a fresh checkout of the new home
+  repo: the prompt, the GitHub token and the reference repos all follow the
+  label, so the checkout must too.
   """
   @spec create_for_issue(map() | String.t() | nil, worker_host(), keyword()) ::
           {:ok, Path.t()} | {:error, term()}
@@ -72,6 +78,8 @@ defmodule SymphonyElixir.Workspace do
              ) do
         if is_nil(mirror) do
           sync_reference_repos(workspace, issue_context, worker_host, settings, project_route, workspace_root)
+        else
+          sync_mirror_reference_repos(workspace, issue_context, settings, project_route, mirror)
         end
 
         {:ok, workspace}
@@ -407,6 +415,7 @@ defmodule SymphonyElixir.Workspace do
       end
 
     with :ok <- bootstrap,
+         :ok <- maybe_mark_home_repo(workspace, issue_context, created?, worker_host, settings, project_route),
          :ok <- maybe_run_after_create_hook(workspace, issue_context, created?, worker_host, settings) do
       :ok
     else
@@ -424,17 +433,69 @@ defmodule SymphonyElixir.Workspace do
     do: {:ok, true}
 
   defp maybe_recreate_incomplete_workspace(workspace, issue_context, false, worker_host, settings, project_route, _workspace_root) do
-    repo_configured? = match?(%{display: _}, project_repo_source_for_issue(issue_context, settings, project_route))
+    repo_source = project_repo_source_for_issue(issue_context, settings, project_route)
 
-    if repo_configured? and not workspace_git_repo?(workspace, worker_host, settings) do
-      Logger.warning("Recreating workspace without a git checkout #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=#{worker_host_for_log(worker_host)}")
-      discard_workspace(workspace, worker_host, settings)
+    case recreate_reason(workspace, repo_source, worker_host, settings) do
+      nil ->
+        {:ok, false}
 
-      with {:ok, _workspace, created?} <- ensure_workspace(workspace, worker_host, settings) do
-        {:ok, created?}
-      end
-    else
-      {:ok, false}
+      reason ->
+        Logger.warning("Recreating workspace #{reason} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=#{worker_host_for_log(worker_host)}")
+        discard_workspace(workspace, worker_host, settings)
+
+        with {:ok, _workspace, created?} <- ensure_workspace(workspace, worker_host, settings) do
+          {:ok, created?}
+        end
+    end
+  end
+
+  defp recreate_reason(workspace, %{display: _} = repo_source, worker_host, settings) do
+    cond do
+      not workspace_git_repo?(workspace, worker_host, settings) ->
+        "without a git checkout"
+
+      (marked = marked_home_repo(workspace, worker_host, settings)) not in [nil, repo_source.raw] ->
+        "for a new home repo from=#{marked} to=#{repo_source.display}"
+
+      true ->
+        nil
+    end
+  end
+
+  defp recreate_reason(_workspace, _repo_source, _worker_host, _settings), do: nil
+
+  # The home repo a workspace was checked out from, kept in its own git config
+  # so a later run can tell when the issue's `repo/<name>` label has moved it.
+  @home_repo_key "symphony.homerepo"
+
+  defp maybe_mark_home_repo(workspace, issue_context, true, worker_host, settings, project_route) do
+    case project_repo_source_for_issue(issue_context, settings, project_route) do
+      %{raw: raw} ->
+        script = "git config --file #{shell_escape(Path.join([workspace, ".git", "config"]))} #{@home_repo_key} #{shell_escape(raw)}"
+
+        # Best effort: without the mark the workspace is simply never recreated.
+        _ = run_workspace_script(script, worker_host, hooks_timeout_ms(settings))
+        :ok
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp maybe_mark_home_repo(_workspace, _issue_context, _created?, _worker_host, _settings, _project_route), do: :ok
+
+  defp marked_home_repo(workspace, worker_host, settings) do
+    script = "git config --file #{shell_escape(Path.join([workspace, ".git", "config"]))} --get #{@home_repo_key} || true"
+
+    case run_workspace_script(script, worker_host, hooks_timeout_ms(settings)) do
+      {:ok, {output, 0}} ->
+        case output |> IO.iodata_to_binary() |> String.split("\n", trim: true) |> List.last() do
+          nil -> nil
+          value -> String.trim(value)
+        end
+
+      _other ->
+        nil
     end
   end
 
@@ -492,7 +553,7 @@ defmodule SymphonyElixir.Workspace do
     cache_repo = repo_cache_path(workspace_root, repo_source)
     target = Path.join([workspace, @reference_repos_dir, project_repo.name])
     timeout_ms = hooks_timeout_ms(settings)
-    script = build_reference_repo_script(cache_repo, target, project_repo.default_branch, worker_host)
+    script = build_reference_repo_script(cache_repo, workspace, target, project_repo.default_branch, worker_host)
 
     branch = project_repo.default_branch
 
@@ -518,16 +579,18 @@ defmodule SymphonyElixir.Workspace do
   defp run_workspace_script(script, nil, timeout_ms), do: run_local_script(script, timeout_ms)
   defp run_workspace_script(script, worker_host, timeout_ms), do: run_remote_command(worker_host, script, timeout_ms)
 
-  defp build_reference_repo_script(cache_repo, target, target_branch, worker_host) do
+  defp build_reference_repo_script(cache_repo, workspace, target, target_branch, worker_host) do
     assign = if worker_host, do: &remote_shell_assign/2, else: &"#{&1}=#{shell_escape(&2)}"
 
     ([
        "set -eu",
        assign.("cache_repo", cache_repo),
+       assign.("workspace", workspace),
        assign.("target", target),
        assign.("target_branch", target_branch || "")
      ] ++
        resolve_target_branch_shell_lines("cache_repo", "target_branch") ++
+       exclude_reference_repos_shell_lines() ++
        [
          "export GIT_TERMINAL_PROMPT=0",
          "if [ ! -e \"$target/.git\" ]; then",
@@ -540,6 +603,53 @@ defmodule SymphonyElixir.Workspace do
          "git -C \"$target\" checkout --quiet --force --detach \"origin/$target_branch\""
        ])
     |> Enum.join("\n")
+  end
+
+  # The reference checkouts are nested repos inside the home repo's checkout;
+  # keep them out of its `git status` so `git add -A` never commits them.
+  defp exclude_reference_repos_shell_lines do
+    [
+      "if [ -d \"$workspace/.git\" ]; then",
+      "  mkdir -p \"$workspace/.git/info\"",
+      "  grep -qxF '/#{@reference_repos_dir}/' \"$workspace/.git/info/exclude\" 2>/dev/null || " <>
+        "printf '%s\\n' '/#{@reference_repos_dir}/' >> \"$workspace/.git/info/exclude\"",
+      "fi"
+    ]
+  end
+
+  # A runner pod has no repo caches: the project's other repos come from the
+  # controller's mirror, which serves a run every repo of its project. Each is
+  # fetched into `.symphony/repos/<name>` and checked out (detached) at its
+  # default branch on every run, as the cache path does; a failure is logged
+  # and the run goes on without that repo.
+  defp sync_mirror_reference_repos(workspace, issue_context, settings, project_route, %{spec: spec, repo_source: home_source}) do
+    route = project_route || Config.linear_project_route(issue_context, settings)
+
+    for project_repo <- Config.project_repos(route),
+        repo_source = Config.repo_source(project_repo.repo),
+        repo_source.cache_key != home_source.cache_key do
+      target = Path.join([workspace, @reference_repos_dir, project_repo.name])
+      url = GitMirror.repo_url(spec.git_mirror_url, repo_source)
+
+      {:ok, %{script: script, env: env}} =
+        GitMirror.reference_commands(spec, url, target,
+          origin_url: repo_source.clone_url,
+          target_branch: project_repo.default_branch,
+          workspace: workspace
+        )
+
+      case run_local_script(script, hooks_timeout_ms(settings), env) do
+        {:ok, {_output, 0}} ->
+          :ok
+
+        failure ->
+          Logger.warning(
+            "Reference repo checkout from the git mirror failed #{issue_log_context(issue_context)} workspace=#{workspace} repo=#{repo_source.display} result=#{inspect(reference_repo_failure(failure))}"
+          )
+      end
+    end
+
+    :ok
   end
 
   # The mirror applies to a local workspace whose home repo has no cache on

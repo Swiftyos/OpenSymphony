@@ -36,12 +36,25 @@ defmodule SymphonyElixir.IssueConfig do
     project_route = Keyword.get(opts, :project_route)
     workspace_root = Keyword.get(opts, :workspace_root)
 
-    case Config.startup_mode() do
-      :global ->
-        resolve_global(issue, settings, project_route, workspace_root)
+    resolved =
+      case Config.startup_mode() do
+        :global -> resolve_global(issue, settings, project_route, workspace_root)
+        _ -> resolve_legacy(issue, settings, project_route)
+      end
 
-      _ ->
-        resolve_legacy(issue, settings, project_route)
+    with {:ok, %__MODULE__{} = config} <- resolved,
+         :ok <- check_repo_label(issue, config.project_route) do
+      {:ok, config}
+    end
+  end
+
+  # An issue whose `repo/<name>` label names no repo of its project (or that has
+  # two) isn't worked anywhere: guessing the primary would put the work in a repo
+  # nobody asked for. `SymphonyElixir.RepoLabelCheck` tells the issue why.
+  defp check_repo_label(issue, project_route) do
+    case Config.check_issue_repo(issue, project_route) do
+      {:ok, _repo} -> :ok
+      {:error, reason} -> {:error, {:repo_label_invalid, issue_identifier(issue), reason}}
     end
   end
 

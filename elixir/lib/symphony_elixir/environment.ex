@@ -9,7 +9,8 @@ defmodule SymphonyElixir.Environment do
   refers to an entry in the platform catalog (`environments:` in `symphony.yml`).
 
   The platform catalog owns every security bound. A repository's
-  `.symphony/environment.yaml` (read from the repo cache at its default branch)
+  `.symphony/environment.yaml` (read from the cache of the issue's home repo,
+  the one its `repo/<name>` label picks, at its default branch)
   may choose an image only from the catalog's `allowed_images` prefixes, and may
   lower but never raise `resources` past the catalog entry's values. Service
   images must also be in `allowed_images`; the catalog caps the number of
@@ -317,25 +318,38 @@ defmodule SymphonyElixir.Environment do
   defp read_repo_file(issue, settings, opts) do
     route = route_for(issue, settings, opts)
 
-    with {:ok, repo_root} <- repo_root(route, settings, opts) do
+    with {:ok, repo_root} <- repo_root(issue, route, settings, opts) do
       read_repo_yaml(if(repo_root, do: Path.join(repo_root, @repo_file), else: nil))
     end
   end
 
-  defp repo_root(nil, _settings, _opts), do: {:ok, nil}
+  defp repo_root(_issue, nil, _settings, _opts), do: {:ok, nil}
 
-  defp repo_root(route, settings, opts) do
-    case Keyword.get(opts, :repo_root) do
-      repo_root when is_binary(repo_root) ->
+  # The file comes from the repo the issue is worked in. `:repo_root` is the
+  # primary's cache (a WORKFLOW.md project has just synced it), so it only
+  # stands in when the primary is the home repo.
+  defp repo_root(issue, route, settings, opts) do
+    home = Config.issue_repo_for_route(issue, route)
+
+    case {Keyword.get(opts, :repo_root), home} do
+      {_repo_root, %{primary: false}} ->
+        Workspace.ensure_local_repo_cache(home_route(route, home), settings)
+
+      {repo_root, _home} when is_binary(repo_root) ->
         {:ok, repo_root}
 
-      nil ->
+      {nil, _home} ->
         case map_get(route, :repo) do
           repo when is_binary(repo) and repo != "" -> Workspace.ensure_local_repo_cache(route, settings)
           _repo -> {:ok, nil}
         end
     end
   end
+
+  # The route with its home repo in the primary's place, for the cache lookup
+  # (caches are per repo, under the route's workspace root).
+  defp home_route(%_{} = route, home), do: route |> Map.from_struct() |> home_route(home)
+  defp home_route(route, home), do: Map.merge(route, %{repo: home.repo, default_branch: home.default_branch})
 
   defp read_repo_yaml(nil), do: {:ok, nil, nil}
 

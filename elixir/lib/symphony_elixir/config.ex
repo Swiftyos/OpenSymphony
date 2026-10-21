@@ -746,6 +746,42 @@ defmodule SymphonyElixir.Config do
   end
 
   @doc """
+  Checks an issue's `repo/<name>` labels against its project route: the issue's
+  home repo when they pick one unambiguously (or there are none, which picks the
+  primary), else why not. A project without a repo accepts any labels.
+
+  `issue_repo_for_route/2` falls back to the primary for an unknown label;
+  dispatch uses this instead, so such an issue waits for a person rather than
+  being worked in the wrong repo.
+  """
+  @type repo_label_error ::
+          {:unknown_repo_label, String.t(), [project_repo()]}
+          | {:conflicting_repo_labels, [String.t()], [project_repo()]}
+
+  @spec check_issue_repo(map() | String.t() | nil, map() | nil) ::
+          {:ok, project_repo() | nil} | {:error, repo_label_error()}
+  def check_issue_repo(issue, route) do
+    repos = project_repos(route)
+
+    case {repos, issue_repo_label_names(issue)} do
+      {[], _names} ->
+        {:ok, nil}
+
+      {[primary | _], []} ->
+        {:ok, primary}
+
+      {_repos, [name]} ->
+        case Enum.find(repos, &(&1.name == name)) do
+          nil -> {:error, {:unknown_repo_label, name, repos}}
+          repo -> {:ok, repo}
+        end
+
+      {_repos, names} ->
+        {:error, {:conflicting_repo_labels, names, repos}}
+    end
+  end
+
+  @doc """
   The Linear label group that picks an issue's repo (`repo/<name>`).
   """
   @spec repo_label_group() :: String.t()
@@ -777,15 +813,18 @@ defmodule SymphonyElixir.Config do
     end
   end
 
-  defp issue_repo_label_name(issue) do
+  defp issue_repo_label_name(issue), do: issue |> issue_repo_label_names() |> List.first()
+
+  defp issue_repo_label_names(issue) do
     prefix = @repo_label_group <> "/"
 
     issue
     |> issue_labels()
-    |> Enum.find_value(fn label ->
+    |> Enum.flat_map(fn label ->
       label = String.downcase(label)
-      if String.starts_with?(label, prefix), do: String.replace_prefix(label, prefix, "")
+      if String.starts_with?(label, prefix), do: [String.replace_prefix(label, prefix, "")], else: []
     end)
+    |> Enum.uniq()
   end
 
   defp issue_labels(%{labels: labels}) when is_list(labels), do: Enum.filter(labels, &is_binary/1)

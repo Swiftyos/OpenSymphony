@@ -75,6 +75,8 @@ defmodule SymphonyElixir.Application do
       SymphonyElixir.RepoCacheRefresher,
       # Moves blocked issues back to work once their blockers are done.
       SymphonyElixir.Unblocker,
+      # Comments on issues whose repo/<name> label picks no repo of their project.
+      SymphonyElixir.RepoLabelCheck,
       # Caps concurrent `git upload-pack` processes for the read-only git mirror.
       SymphonyElixir.GitMirror.Limiter,
       SymphonyElixir.RunnerCommands,

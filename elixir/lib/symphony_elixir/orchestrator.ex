@@ -16,6 +16,7 @@ defmodule SymphonyElixir.Orchestrator do
     FactoryControls,
     IssueConfig,
     IssueStage,
+    RepoLabelCheck,
     RetryStore,
     RunLauncher,
     RunOutbox,
@@ -530,6 +531,7 @@ defmodule SymphonyElixir.Orchestrator do
     Enum.each(issues, &UsageLedger.observe_issue/1)
     # A cast: the unblocking (tracker reads and writes) happens in its own tasks.
     Unblocker.observe(issues)
+    RepoLabelCheck.observe(issues)
 
     if available_slots(state) > 0 do
       choose_issues(issues, state)

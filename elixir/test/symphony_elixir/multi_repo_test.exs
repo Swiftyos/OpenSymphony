@@ -2,8 +2,8 @@ defmodule SymphonyElixir.MultiRepoTest do
   use SymphonyElixir.TestSupport
 
   alias SymphonyElixir.Factory.{Definition, Store}
+  alias SymphonyElixir.{IssueConfig, RepoLabelCheck, RepoPrompt, Unblocker}
   alias SymphonyElixir.Linear.Adapter
-  alias SymphonyElixir.{RepoPrompt, Unblocker}
 
   defmodule FakeLinear do
     def graphql(_query, variables, _opts \\ []), do: Application.get_env(:symphony_elixir, :multi_repo_linear_reply).(variables)
@@ -29,6 +29,109 @@ defmodule SymphonyElixir.MultiRepoTest do
       assert Config.project_default_branch_for_issue(worker, settings) == "trunk"
       assert Config.project_default_branch_for_issue(plain, settings) == "main"
       assert %{name: "api"} = Config.issue_repo(unknown, settings)
+    end
+
+    test "a repo label must name one of the project's repos, and only one" do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_project_slug: nil,
+        tracker_projects: [
+          %{slug: "project-a", repo: "acme/api", repos: [%{name: "worker", repo: "acme/jobs-worker"}]},
+          %{slug: "project-b", repo: "acme/web"},
+          %{slug: "project-c"}
+        ]
+      )
+
+      route = Config.linear_project_route(%{project_slug: "project-a"})
+      single = Config.linear_project_route(%{project_slug: "project-b"})
+
+      assert {:ok, %{name: "api", primary: true}} = Config.check_issue_repo(%{labels: []}, route)
+      assert {:ok, %{name: "worker"}} = Config.check_issue_repo(%{labels: ["Repo/Worker", "bug"]}, route)
+      assert {:ok, %{name: "worker"}} = Config.check_issue_repo(%{"labels" => ["repo/worker", "repo/worker"]}, route)
+      assert {:error, {:unknown_repo_label, "nope", [_, _]}} = Config.check_issue_repo(%{labels: ["repo/nope"]}, route)
+      assert {:error, {:conflicting_repo_labels, ["api", "worker"], _}} = Config.check_issue_repo(%{labels: ["repo/api", "repo/worker"]}, route)
+
+      # A single-repo project: its own name is fine, any other repo label isn't.
+      assert {:ok, %{name: "web"}} = Config.check_issue_repo(%{labels: ["repo/web"]}, single)
+      assert {:error, {:unknown_repo_label, "api", [%{name: "web"}]}} = Config.check_issue_repo(%{labels: ["repo/api"]}, single)
+
+      # Without a repo (or a route) there is nothing to check.
+      assert {:ok, nil} = Config.check_issue_repo(%{labels: ["repo/api"]}, Config.linear_project_route(%{project_slug: "project-c"}))
+      assert {:ok, nil} = Config.check_issue_repo("PI-1", nil)
+    end
+
+    test "an issue with a bad repo label isn't dispatched, and is told why once" do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_project_slug: nil,
+        tracker_projects: [%{slug: "project-a", repo: "acme/api", repos: [%{name: "worker", repo: "acme/jobs-worker"}]}]
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      todo = %Issue{id: "i-5", identifier: "PI-5", title: "T", project_slug: "project-a", state: "Todo", labels: ["repo/billing"]}
+      two = %{todo | id: "i-6", identifier: "PI-6", labels: ["repo/api", "repo/worker"]}
+      good = %{todo | id: "i-7", identifier: "PI-7", labels: ["repo/worker"]}
+      parked = %{todo | id: "i-8", identifier: "PI-8", state: "In Progress", labels: ["factory/blocked", "repo/billing"]}
+
+      assert {:error, {:repo_label_invalid, "PI-5", {:unknown_repo_label, "billing", _}}} = IssueConfig.resolve(todo)
+      assert {:ok, _config} = IssueConfig.resolve(good)
+
+      state = %Orchestrator.State{
+        max_concurrent_agents: 5,
+        running: %{},
+        claimed: MapSet.new(),
+        agent_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      refute Orchestrator.should_dispatch_issue_for_test(todo, state)
+      assert Orchestrator.should_dispatch_issue_for_test(good, state)
+
+      # Only issues in a stage agents work are reported; a parked one waits for a person anyway.
+      assert [{^todo, unknown}, {^two, conflicting}] = RepoLabelCheck.problems([todo, two, good, parked])
+      assert unknown =~ "## Repo label problem"
+      assert unknown =~ "`repo/billing` doesn't name a repo of this project"
+      assert unknown =~ "- `repo/api`: `acme/api`, the primary: used when there's no repo label"
+      assert unknown =~ "- `repo/worker`: `acme/jobs-worker`"
+      assert unknown =~ "`add_project` with `repos`"
+      assert conflicting =~ "PI-6 has 2 repo labels, `repo/api` and `repo/worker`"
+
+      pid = start_supervised!({RepoLabelCheck, name: :repo_label_check_test})
+      assert :ok = RepoLabelCheck.observe([todo, good], :repo_label_check_test)
+      :sys.get_state(pid)
+      assert_received {:memory_tracker_comment, "i-5", ^unknown}
+
+      # Once per issue and set of labels.
+      assert :ok = RepoLabelCheck.observe([todo], :repo_label_check_test)
+      :sys.get_state(pid)
+      refute_received {:memory_tracker_comment, "i-5", _}
+
+      assert :ok = RepoLabelCheck.observe([good], :repo_label_check_test)
+      assert :ok = RepoLabelCheck.observe([todo], :no_such_server)
+    end
+
+    test "a failed comment is retried on a later poll" do
+      defmodule FailingTracker do
+        def create_comment(_id, _body, _opts), do: {:error, :down}
+      end
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_project_slug: nil,
+        tracker_projects: [%{slug: "project-a", repo: "acme/api"}]
+      )
+
+      issue = %Issue{id: "i-5", identifier: "PI-5", title: "T", project_slug: "project-a", state: "Todo", labels: ["repo/billing"]}
+      pid = start_supervised!({RepoLabelCheck, name: :repo_label_check_failing, tracker: FailingTracker})
+
+      log =
+        capture_log(fn ->
+          assert :ok = RepoLabelCheck.observe([issue], :repo_label_check_failing)
+          :sys.get_state(pid)
+        end)
+
+      assert log =~ "Repo label comment failed"
+      assert MapSet.size(:sys.get_state(pid).done) == 0
     end
 
     test "repo names come from the last path segment" do
@@ -85,6 +188,60 @@ defmodule SymphonyElixir.MultiRepoTest do
 
         assert {:ok, ^workspace} = Workspace.create_for_issue(primary_issue, nil, settings: settings)
         assert File.read!(Path.join(workspace, ".symphony/repos/worker/README.md")) == "worker v2\n"
+
+        # The reference checkouts stay out of the home repo's git status.
+        assert File.read!(Path.join(workspace, ".git/info/exclude")) =~ "/.symphony/repos/\n"
+        assert {"", 0} = System.cmd("git", ["-C", workspace, "status", "--porcelain"])
+        assert {:ok, ^workspace} = Workspace.create_for_issue(primary_issue, nil, settings: settings)
+        assert length(String.split(File.read!(Path.join(workspace, ".git/info/exclude")), "/.symphony/repos/")) == 2
+      after
+        File.rm_rf(test_root)
+      end
+    end
+  end
+
+  describe "relabelled issues" do
+    test "an issue whose repo label changes is worked in a fresh checkout of the new repo" do
+      test_root = Path.join(System.tmp_dir!(), "symphony-multi-repo-relabel-#{System.unique_integer([:positive])}")
+      api = Path.join(test_root, "api")
+      worker = Path.join(test_root, "worker")
+
+      try do
+        init_repo!(api, "api v1\n")
+        init_repo!(worker, "worker v1\n")
+
+        write_workflow_file!(Workflow.workflow_file_path(),
+          tracker_project_slug: nil,
+          tracker_projects: [%{slug: "project-a", repo: api, repos: [%{name: "worker", repo: worker}]}],
+          workspace_root: Path.join(test_root, "workspaces")
+        )
+
+        settings = put_in(Config.settings!().workspace.repo_cache.max_age_ms, 0)
+        issue = %Issue{id: "i-1", identifier: "PI-1", project_slug: "project-a", labels: []}
+
+        assert {:ok, workspace} = Workspace.create_for_issue(issue, nil, settings: settings)
+        assert File.read!(Path.join(workspace, "README.md")) == "api v1\n"
+        File.write!(Path.join(workspace, "scratch.txt"), "unpushed\n")
+
+        # Same label: the workspace (and its local changes) is kept.
+        assert {:ok, ^workspace} = Workspace.create_for_issue(issue, nil, settings: settings)
+        assert File.exists?(Path.join(workspace, "scratch.txt"))
+
+        log =
+          capture_log(fn ->
+            assert {:ok, ^workspace} = Workspace.create_for_issue(%{issue | labels: ["repo/worker"]}, nil, settings: settings)
+          end)
+
+        assert log =~ "Recreating workspace for a new home repo"
+        assert File.read!(Path.join(workspace, "README.md")) == "worker v1\n"
+        refute File.exists?(Path.join(workspace, "scratch.txt"))
+        assert File.read!(Path.join(workspace, ".symphony/repos/api/README.md")) == "api v1\n"
+        refute File.exists?(Path.join(workspace, ".symphony/repos/worker"))
+
+        # A workspace from before the home repo was recorded is left alone.
+        {_output, 0} = System.cmd("git", ["config", "--file", Path.join(workspace, ".git/config"), "--unset", "symphony.homerepo"])
+        assert {:ok, ^workspace} = Workspace.create_for_issue(issue, nil, settings: settings)
+        assert File.read!(Path.join(workspace, "README.md")) == "worker v1\n"
       after
         File.rm_rf(test_root)
       end
@@ -147,7 +304,11 @@ defmodule SymphonyElixir.MultiRepoTest do
       prompt = RepoPrompt.render(issue)
 
       assert prompt =~ "## Repositories"
+      assert prompt =~ "its home repo: the repo its `repo/<name>` label names, else the project's primary repo (**api**)"
       assert prompt =~ "This issue is worked in **api** (`acme/api`)"
+      assert prompt =~ "branch (`symphony/PI-1`) and PR go there only"
+      assert prompt =~ "One issue changes one repo."
+      assert prompt =~ "If the fix belongs in a repo that isn't listed here"
       assert prompt =~ "**worker** (`acme/jobs-worker`) at `.symphony/repos/worker`: Queue consumers"
       assert prompt =~ "`repo/worker`"
       assert prompt =~ "type: blocks"

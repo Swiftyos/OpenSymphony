@@ -432,6 +432,45 @@ defmodule SymphonyElixir.EnvironmentTest do
     assert environment.resources["cpu"] == 1
   end
 
+  test "the repo file comes from the issue's home repo, not the project's primary", %{root: root} do
+    primary = Path.join(root, "web")
+    api = Path.join(root, "api")
+
+    for {repo, cpu} <- [{primary, 1}, {api, 2}] do
+      File.mkdir_p!(Path.join(repo, ".symphony"))
+      File.write!(Path.join([repo, ".symphony", "environment.yaml"]), "resources:\n  cpu: #{cpu}\n")
+      System.cmd("git", ["init", "-q", "-b", "main", repo])
+      System.cmd("git", ["-C", repo, "config", "user.email", "test@example.com"])
+      System.cmd("git", ["-C", repo, "config", "user.name", "Test"])
+      System.cmd("git", ["-C", repo, "add", "."])
+      System.cmd("git", ["-C", repo, "commit", "-qm", "init"])
+    end
+
+    settings =
+      settings(catalog())
+      |> Map.put(:workspace, %{settings(catalog()).workspace | root: Path.join(root, "workspaces")})
+
+    route = %{
+      slug: "proj",
+      repo: primary,
+      environment: "default",
+      workspace_root: nil,
+      default_branch: "main",
+      repos: [%{name: "api", repo: api, default_branch: "main", description: nil}]
+    }
+
+    assert {:ok, %{resources: %{"cpu" => 1}}} = Environment.resolve(issue(), settings, route: route)
+    assert {:ok, %{resources: %{"cpu" => 2}}} = Environment.resolve(issue("PAY-2", "In Progress", ["repo/api"]), settings, route: route)
+
+    # A WORKFLOW.md project passes the primary's cache; it stands in only for the primary.
+    other = Path.join(root, "elsewhere")
+    write_repo_file(other, "resources:\n  cpu: 3\n")
+    assert {:ok, %{resources: %{"cpu" => 3}}} = Environment.resolve(issue(), settings, route: route, repo_root: other)
+
+    assert {:ok, %{resources: %{"cpu" => 2}}} =
+             Environment.resolve(issue("PAY-2", "In Progress", ["repo/api"]), settings, route: route, repo_root: other)
+  end
+
   test "IssueConfig applies the environment to the run's settings and fails closed", %{root: root} do
     write_workflow_file!(Workflow.workflow_file_path(), workspace_root: root)
     previous = Application.get_env(:symphony_elixir, :startup_mode)

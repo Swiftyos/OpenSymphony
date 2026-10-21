@@ -3,8 +3,9 @@ defmodule SymphonyElixir.RepoPrompt do
   The "repositories" part of an agent's prompt, for a Linear project with more
   than one repo (`repos:` on its route).
 
-  Each issue is worked in one repo, its home repo: the one its `repo/<name>`
-  label names, else the project's primary repo. The workspace is a checkout of
+  Each issue is worked in exactly one repo, its home repo: the one its
+  `repo/<name>` label names, else the project's primary repo (a label naming
+  no repo of the project stops the issue instead, `SymphonyElixir.RepoLabelCheck`). The workspace is a checkout of
   the home repo, and the project's other repos are checked out read-only under
   `.symphony/repos/<name>` (`SymphonyElixir.Workspace`).
 
@@ -66,11 +67,13 @@ defmodule SymphonyElixir.RepoPrompt do
     [
       "## Repositories",
       "",
-      "This project's work spans #{length(repos)} repos. This issue is worked in **#{home.name}** (`#{home.repo}`): " <>
-        "the workspace is its checkout, and your commits, branch and PR go there only.",
+      "This project has #{length(repos)} repos. An issue is worked in exactly one of them, its home repo: the repo its " <>
+        "`#{Config.repo_label_group()}/<name>` label names, else the project's primary repo (**#{hd(repos).name}**). " <>
+        "This issue is worked in **#{home.name}** (`#{home.repo}`): the workspace is its checkout, and your commits, " <>
+        "branch (`#{Workspace.issue_branch(issue.identifier)}`) and PR go there only. Your GitHub access can push to this repo only.",
       "",
-      "The project's other repos are checked out read-only at their default branch, refreshed at the start of each run " <>
-        "(changes there are thrown away):",
+      "The project's other repos are checked out read-only at their default branch, refreshed at the start of every run " <>
+        "(changes there are thrown away). Read them freely; never commit, push or open PRs in them:",
       "",
       Enum.map_join(others, "\n", &other_line/1),
       "",
@@ -97,7 +100,7 @@ defmodule SymphonyElixir.RepoPrompt do
     """
     ### When the fix belongs in another repo
 
-    If the problem, or part of it, has to be fixed in one of the other repos, don't change that repo from here. Instead:
+    One issue changes one repo. If the problem, or part of it, has to be fixed in one of the other repos, don't change that repo from here. Instead:
 
     1. Create a Linear issue for it with `linear_graphql`, in this issue's project and team (read their ids from this issue),
        in the `#{queue_state(issue)}` state, assigned like this issue, with the labels #{Enum.join(labels, " and ")}. Its description must say what needs to change in that repo
@@ -105,8 +108,13 @@ defmodule SymphonyElixir.RepoPrompt do
     2. Link it as blocking this issue: `issueRelationCreate(input: {issueId: "<new issue id>", relatedIssueId: "<this issue's id>", type: blocks})`.
     3. Commit and push whatever you have on this issue's branch, then #{blocked_move(issue)}
 
-    Once every issue blocking this one is done, Symphony moves this issue back to work and comments what each blocker
-    changed. The next run then starts from that comment, with the other repos refreshed to their latest default branch.
+    Symphony works the new issue in its own repo, with its own branch and PR. Once every issue blocking this one is done
+    (in the default flow: its PR merged), Symphony moves this issue back to work and comments `## Unblocked` with what each
+    blocker changed. The next run then starts from that comment, with the other repos refreshed to their latest default branch.
+
+    If the fix belongs in a repo that isn't listed here, Symphony can't work there for this project yet: write in the
+    workpad and your summary which repo needs what change, and finish as blocked (see "When you are blocked"); a person
+    adds the repo to the project or makes the change.
 
     Work that only needs #{home.name} stays here as usual.
     """

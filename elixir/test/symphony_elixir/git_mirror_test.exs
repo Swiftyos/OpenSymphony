@@ -91,6 +91,41 @@ defmodule SymphonyElixir.GitMirrorTest do
       assert RunSpec.attach_git_mirror(spec, settings) == spec
     end
 
+    test "a run reads every repo of its own project, and its spec names the issue's home repo" do
+      context = mirror_context!(extra_repo: true, two_repos: true)
+      settings = Config.settings!()
+      lib_key = context.lib_repo_source.cache_key
+
+      assert {:ok, lib} = GitMirror.resolve(lib_key, settings)
+      assert %{name: "lib", primary: false} = lib
+      assert [%{name: "origin", primary: true}, %{name: "lib"}] = GitMirror.run_repos("project-a", settings)
+      assert {:ok, %{primary: true}} = GitMirror.run_repo("project-a", settings)
+
+      assert :ok = GitMirror.authorize(%{project_slug: "project-a"}, lib, settings)
+      assert {:error, :forbidden} = GitMirror.authorize(%{project_slug: "project-b"}, lib, settings)
+      # Two projects with repos: a run without a slug reads none of them.
+      assert [] = GitMirror.run_repos(nil, settings)
+
+      base = %RunSpec{run_id: "run-1", epoch: 1, issue: context.issue, controller_url: "http://c", token: "t"}
+      assert %{url: primary_url} = GitMirror.mirror_for(base, settings)
+      assert String.ends_with?(primary_url, "/" <> context.repo_key)
+
+      labelled = %{base | issue: %{context.issue | labels: ["repo/lib"]}}
+      assert %{url: lib_url, target_branch: "main"} = GitMirror.mirror_for(labelled, settings)
+      assert lib_url == "http://c/git/run-1/" <> lib_key
+      assert GitMirror.repo_url(primary_url, context.lib_repo_source) == lib_url
+
+      assert {:error, :no_git_mirror} = GitMirror.reference_commands(%{base | token: nil}, lib_url, "/tmp/x", [])
+    end
+
+    test "with one multi-repo project a run without a slug reads its repos" do
+      context = mirror_context!(extra_repo: true)
+      settings = Config.settings!()
+      assert [%{primary: true}, %{name: "lib"}] = GitMirror.run_repos(nil, settings)
+      assert {:ok, lib} = GitMirror.resolve(context.lib_repo_source.cache_key, settings)
+      assert :ok = GitMirror.authorize(nil, lib, settings)
+    end
+
     test "a project's configured default branch is the spec's target branch" do
       context = mirror_context!(default_branch: "main")
       spec = %RunSpec{run_id: "run-1", epoch: 1, issue: context.issue, controller_url: "http://c", token: "t"}
@@ -259,6 +294,52 @@ defmodule SymphonyElixir.GitMirrorTest do
         end)
 
       refute log =~ "from the git mirror"
+    end
+
+    test "a runner checks the project's other repos out read-only from the mirror" do
+      context = mirror_context!(extra_repo: true)
+      endpoint = Support.start_endpoint!()
+      token = RunToken.sign(context.run_id, 1)
+      spec = mirror_spec(context, endpoint, token)
+      runner_root = Path.join(Config.workspace_root_for_route(context.repo.route, context.settings), "runner")
+      opts = [settings: context.settings, workspace_root: runner_root, git_mirror: spec]
+
+      assert {:ok, workspace} = Workspace.create_for_issue(context.issue, nil, opts)
+      reference = Path.join(workspace, ".symphony/repos/lib")
+      assert File.read!(Path.join(reference, "README.md")) == "lib\n"
+      assert git_config(reference, "remote.origin.url") == context.lib_origin
+      refute File.read!(Path.join([reference, ".git", "config"])) =~ token
+      refute File.dir?(Workspace.repo_cache_path(runner_root, context.lib_repo_source))
+      assert File.read!(Path.join(workspace, ".git/info/exclude")) =~ "/.symphony/repos/\n"
+      assert {"", 0} = System.cmd("git", ["-C", workspace, "status", "--porcelain"])
+
+      # Every run refreshes it; local edits there are thrown away.
+      File.write!(Path.join(reference, "README.md"), "edited\n")
+      assert {:ok, ^workspace} = Workspace.create_for_issue(context.issue, nil, opts)
+      assert File.read!(Path.join(reference, "README.md")) == "lib\n"
+      assert length(String.split(File.read!(Path.join(workspace, ".git/info/exclude")), "/.symphony/repos/")) == 2
+
+      # An issue labelled for the other repo has it as its workspace, and the primary beside it.
+      lib_issue = %{context.issue | id: "issue-2", identifier: "PI-2", labels: ["repo/lib"]}
+      lib_spec = mirror_spec(%{context | issue: lib_issue}, endpoint, token)
+      assert String.ends_with?(lib_spec.git_mirror_url, "/" <> context.lib_repo_source.cache_key)
+
+      assert {:ok, lib_workspace} = Workspace.create_for_issue(lib_issue, nil, Keyword.put(opts, :git_mirror, lib_spec))
+      assert File.read!(Path.join(lib_workspace, "README.md")) == "lib\n"
+      assert current_branch(lib_workspace) == "symphony/PI-2"
+      assert File.read!(Path.join(lib_workspace, ".symphony/repos/origin/README.md")) == "base\n"
+
+      # A repo the mirror can't serve is skipped with a warning; the run goes on.
+      File.rm_rf!(Workspace.repo_cache_path(Config.workspace_root_for_route(context.repo.route, context.settings), context.lib_repo_source))
+      issue = %{context.issue | id: "issue-3", identifier: "PI-3"}
+
+      log =
+        capture_log(fn ->
+          assert {:ok, other} = Workspace.create_for_issue(issue, nil, Keyword.put(opts, :git_mirror, mirror_spec(%{context | issue: issue}, endpoint, token)))
+          refute File.exists?(Path.join(other, ".symphony/repos/lib/README.md"))
+        end)
+
+      assert log =~ "Reference repo checkout from the git mirror failed"
     end
 
     test "where the cache exists, or the mirror serves another repo, the workspace is cloned as before" do
@@ -674,6 +755,16 @@ defmodule SymphonyElixir.GitMirrorTest do
         branch -> %{slug: "project-a", repo: origin, default_branch: branch}
       end
 
+    # A second repo of project-a, checked out beside the home repo.
+    {project_a, lib} =
+      if Keyword.get(opts, :extra_repo, false) do
+        lib_origin = Path.join(root, "lib.git")
+        init_bare_origin!(lib_origin, Path.join(root, "lib-agent"), "lib\n")
+        {Map.put(project_a, :repos, [%{name: "lib", repo: lib_origin}]), lib_origin}
+      else
+        {project_a, nil}
+      end
+
     projects = [project_a, %{slug: "project-c", repo: nil}]
 
     other =
@@ -732,6 +823,8 @@ defmodule SymphonyElixir.GitMirrorTest do
       repo: repo,
       other_repo_source: other_repo_source,
       other_cache_path: if(other_repo_source, do: other_repo_source.cache_path),
+      lib_origin: lib,
+      lib_repo_source: lib && Config.repo_source(lib),
       run_id: "run-1"
     }
   end
