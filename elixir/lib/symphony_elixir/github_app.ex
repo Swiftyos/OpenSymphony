@@ -27,6 +27,7 @@ defmodule SymphonyElixir.GitHubApp do
   alias SymphonyElixir.{Config, RunSpec}
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.GitHubApp.Cache
+  alias SymphonyElixir.GitHubApp.RunnerToken
 
   @default_base_url "https://api.github.com"
   # Only repository permissions an issue-scoped run needs. Anything else
@@ -149,7 +150,7 @@ defmodule SymphonyElixir.GitHubApp do
   def env_pairs(issue, opts \\ []) do
     settings = Keyword.get(opts, :settings) || Config.settings!()
 
-    if configured?(settings) and not SymphonyElixir.GitHubApp.RunnerToken.active?() do
+    if configured?(settings) and not RunnerToken.active?() do
       case Config.project_repo_source_for_issue(issue, settings) do
         %{kind: :github_slug, raw: repo} -> token_env(repo, settings, opts)
         _ -> []

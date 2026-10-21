@@ -161,7 +161,12 @@ defmodule SymphonyElixirWeb.RunnerController do
 
     issue =
       metadata[:issue] ||
-        %{id: nil, identifier: metadata[:identifier], project_slug: metadata[:project_slug], labels: metadata[:labels] || []}
+        %{
+          id: nil,
+          identifier: metadata[:identifier],
+          project_slug: metadata[:project_slug],
+          labels: metadata[:labels] || []
+        }
 
     %RunSpec{run_id: run_id, epoch: run.epoch, issue: issue}
   end
