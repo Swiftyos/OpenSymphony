@@ -19,6 +19,8 @@ defmodule SymphonyElixirWeb.RunnerController do
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.RunEvents
   alias SymphonyElixir.RunnerCommands
+  alias SymphonyElixir.RunRegistry
+  alias SymphonyElixir.RunWatcher
   alias SymphonyElixir.SessionStore
   alias SymphonyElixir.Transcript
   alias SymphonyElixirWeb.Endpoint
@@ -119,9 +121,24 @@ defmodule SymphonyElixirWeb.RunnerController do
 
   defp apply_events(conn, run_id, events) do
     case RunnerCommands.apply_events(run_id, events, &apply_event(conn, &1)) do
-      {:ok, last_seq} -> json(conn, %{applied_through: last_seq})
-      {:error, :finished} -> error(conn, 409, "finished")
-      {:error, :unavailable} -> error(conn, 503, "unavailable")
+      {:ok, last_seq} ->
+        # One write per applied batch, not per event. This keeps the seq across
+        # a controller restart with a bounded cost; a crash can still replay
+        # the last batch, whose transcript entries are then duplicated.
+        RunRegistry.advance_progress(
+          conn.assigns.issue_id,
+          run_id,
+          last_seq,
+          RunnerCommands.finished_reason(run_id)
+        )
+
+        json(conn, %{applied_through: last_seq})
+
+      {:error, :finished} ->
+        error(conn, 409, "finished")
+
+      {:error, :unavailable} ->
+        error(conn, 503, "unavailable")
     end
   end
 
@@ -151,7 +168,12 @@ defmodule SymphonyElixirWeb.RunnerController do
 
   defp decode_event(_event), do: :error
 
-  defp apply_event(conn, %{type: "runtime_info", data: data}) do
+  defp apply_event(conn, event) do
+    RunWatcher.touch(conn.assigns.run_id)
+    do_apply_event(conn, event)
+  end
+
+  defp do_apply_event(conn, %{type: "runtime_info", data: data}) do
     send(
       orchestrator(),
       {:worker_runtime_info, issue_id(conn, data),
@@ -162,7 +184,7 @@ defmodule SymphonyElixirWeb.RunnerController do
     )
   end
 
-  defp apply_event(conn, %{type: "route_info", data: data}) do
+  defp do_apply_event(conn, %{type: "route_info", data: data}) do
     send(
       orchestrator(),
       {:worker_runtime_info, issue_id(conn, data),
@@ -173,30 +195,30 @@ defmodule SymphonyElixirWeb.RunnerController do
     )
   end
 
-  defp apply_event(conn, %{type: "agent_update", data: data}) do
+  defp do_apply_event(conn, %{type: "agent_update", data: data}) do
     backend = data_value(data, :backend) || conn.assigns.backend
     message = data_value(data, :message)
     Transcript.record(identifier(conn, data), message, backend: backend)
     send_agent_update(conn.assigns.issue_id, backend, message)
   end
 
-  defp apply_event(conn, %{type: "transcript_note", data: data}) do
+  defp do_apply_event(conn, %{type: "transcript_note", data: data}) do
     Transcript.note(identifier(conn, data), data_value(data, :text))
   end
 
-  defp apply_event(conn, %{type: "turn_started", data: data}) do
+  defp do_apply_event(conn, %{type: "turn_started", data: data}) do
     Transcript.turn_started(identifier(conn, data), data_value(data, :info))
   end
 
-  defp apply_event(_conn, %{type: "heartbeat"}), do: :ok
+  defp do_apply_event(_conn, %{type: "heartbeat"}), do: :ok
 
-  defp apply_event(conn, %{type: "finished", data: data}) do
+  defp do_apply_event(conn, %{type: "finished", data: data}) do
     reason = data_value(data, :reason)
     send(orchestrator(), {:run_finished, conn.assigns.issue_id, conn.assigns.run_id, reason})
     Logger.info("Runner finished issue_id=#{conn.assigns.issue_id} run_id=#{conn.assigns.run_id} reason=#{inspect(reason)}")
   end
 
-  defp apply_event(conn, %{type: type}) do
+  defp do_apply_event(conn, %{type: type}) do
     Logger.warning("Runner sent an unknown event type=#{inspect(type)} run_id=#{conn.assigns.run_id}")
   end
 

@@ -27,6 +27,7 @@ defmodule SymphonyElixir.RunOutbox do
   @min_retry_ms 200
   @max_retry_ms 5_000
   @request_timeout_ms 5_000
+  @heartbeat_interval_ms 30_000
 
   @doc false
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -77,6 +78,7 @@ defmodule SymphonyElixir.RunOutbox do
       pending: [],
       next_seq: 1,
       timer: nil,
+      heartbeat_timer: nil,
       retry_ms: @min_retry_ms,
       flush_waiters: []
     }
@@ -106,20 +108,7 @@ defmodule SymphonyElixir.RunOutbox do
   end
 
   def handle_cast({:append, type, data}, state) do
-    event = %{seq: state.next_seq, type: type, data: RunEvents.encode(data)}
-
-    state =
-      %{state | pending: state.pending ++ [event], next_seq: state.next_seq + 1}
-      |> persist(event)
-
-    state =
-      if length(state.pending) >= @flush_after do
-        send_soon(state, 0)
-      else
-        send_soon(state, @flush_interval_ms)
-      end
-
-    {:noreply, state}
+    {:noreply, append_event(state, type, data)}
   end
 
   @impl true
@@ -133,6 +122,17 @@ defmodule SymphonyElixir.RunOutbox do
     end
   end
 
+  def handle_info(:heartbeat, %{config: %{run_id: run_id}} = state) when is_binary(run_id) do
+    state =
+      state
+      |> append_event("heartbeat", %{run_id: run_id})
+      |> schedule_heartbeat()
+
+    {:noreply, state}
+  end
+
+  def handle_info(:heartbeat, state), do: {:noreply, state}
+
   def handle_info(_message, state), do: {:noreply, state}
 
   defp configure_state(state, opts) do
@@ -140,12 +140,45 @@ defmodule SymphonyElixir.RunOutbox do
       run_id: fetch_opt(opts, :run_id),
       base_url: fetch_opt(opts, :base_url),
       token: fetch_opt(opts, :token),
-      path: outbox_path(fetch_opt(opts, :dir), fetch_opt(opts, :run_id))
+      path: outbox_path(fetch_opt(opts, :dir), fetch_opt(opts, :run_id)),
+      heartbeat_interval_ms: fetch_opt(opts, :heartbeat_interval_ms) || @heartbeat_interval_ms
     }
 
     {pending, next_seq} = load_pending(config.path)
-    %{state | config: config, pending: pending, next_seq: next_seq, retry_ms: @min_retry_ms, timer: nil}
+    cancel_heartbeat(state.heartbeat_timer)
+
+    state
+    |> Map.merge(%{config: config, pending: pending, next_seq: next_seq, retry_ms: @min_retry_ms, timer: nil, heartbeat_timer: nil})
+    |> schedule_heartbeat()
   end
+
+  defp append_event(state, type, data) do
+    event = %{seq: state.next_seq, type: type, data: RunEvents.encode(data)}
+
+    state =
+      %{state | pending: state.pending ++ [event], next_seq: state.next_seq + 1}
+      |> persist(event)
+
+    if length(state.pending) >= @flush_after do
+      send_soon(state, 0)
+    else
+      send_soon(state, @flush_interval_ms)
+    end
+  end
+
+  defp schedule_heartbeat(%{config: %{run_id: run_id, heartbeat_interval_ms: interval_ms}} = state)
+       when is_binary(run_id) and is_integer(interval_ms) and interval_ms > 0 do
+    %{state | heartbeat_timer: Process.send_after(self(), :heartbeat, interval_ms)}
+  end
+
+  defp schedule_heartbeat(state), do: state
+
+  defp cancel_heartbeat(timer) when is_reference(timer) do
+    Process.cancel_timer(timer)
+    :ok
+  end
+
+  defp cancel_heartbeat(_timer), do: :ok
 
   defp fetch_opt(opts, key) when is_list(opts), do: Keyword.get(opts, key)
   defp fetch_opt(opts, key) when is_map(opts), do: Map.get(opts, key) || Map.get(opts, Atom.to_string(key))

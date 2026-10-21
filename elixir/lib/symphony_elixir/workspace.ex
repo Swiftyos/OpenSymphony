@@ -22,13 +22,15 @@ defmodule SymphonyElixir.Workspace do
           {:ok, Path.t()} | {:error, term()}
   def create_for_issue(issue_or_identifier, worker_host \\ nil, opts \\ []) do
     issue_context = issue_context(issue_or_identifier)
+    project_route = Keyword.get(opts, :project_route)
+    workspace_root = Keyword.get(opts, :workspace_root)
 
     try do
       safe_id = safe_identifier(issue_context.issue_identifier)
 
       with {:ok, settings} <- resolve_settings(issue_or_identifier, opts),
-           {:ok, workspace} <- workspace_path_for_issue(issue_context, safe_id, worker_host, settings),
-           :ok <- validate_workspace_path(workspace, worker_host, settings),
+           {:ok, workspace} <- workspace_path_for_issue(issue_context, safe_id, worker_host, settings, workspace_root),
+           :ok <- validate_workspace_path(workspace, worker_host, settings, workspace_root),
            {:ok, workspace, created?} <- ensure_workspace(workspace, worker_host, settings),
            {:ok, created?} <-
              maybe_recreate_incomplete_workspace(
@@ -36,10 +38,21 @@ defmodule SymphonyElixir.Workspace do
                issue_context,
                created?,
                worker_host,
-               settings
+               settings,
+               project_route,
+               workspace_root
              ),
-           :ok <- initialize_new_workspace(workspace, issue_context, created?, worker_host, settings) do
-        sync_reference_repos(workspace, issue_context, worker_host, settings)
+           :ok <-
+             initialize_new_workspace(
+               workspace,
+               issue_context,
+               created?,
+               worker_host,
+               settings,
+               project_route,
+               workspace_root
+             ) do
+        sync_reference_repos(workspace, issue_context, worker_host, settings, project_route, workspace_root)
         {:ok, workspace}
       end
     rescue
@@ -237,11 +250,13 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  @spec ensure_local_repo_cache(map(), Schema.t()) :: {:ok, Path.t()} | {:error, term()}
-  def ensure_local_repo_cache(%{repo: repo} = route, %Schema{} = settings)
+  @spec ensure_local_repo_cache(map(), Schema.t(), keyword()) :: {:ok, Path.t()} | {:error, term()}
+  def ensure_local_repo_cache(route, settings, opts \\ [])
+
+  def ensure_local_repo_cache(%{repo: repo} = route, %Schema{} = settings, opts)
       when is_binary(repo) and repo != "" do
     repo_source = Config.repo_source(repo)
-    workspace_root = Config.workspace_root_for_route(route, settings)
+    workspace_root = Keyword.get(opts, :workspace_root) || Config.workspace_root_for_route(route, settings)
     target_branch = Map.get(route, :default_branch)
     issue_context = route_issue_context(route)
 
@@ -250,7 +265,7 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  def ensure_local_repo_cache(_route, _settings), do: {:error, :missing_project_repo}
+  def ensure_local_repo_cache(_route, _settings, _opts), do: {:error, :missing_project_repo}
 
   @doc """
   Refreshes the cache clone for a project route on the local host.
@@ -320,17 +335,23 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp workspace_path_for_issue(issue_context, safe_id, nil, settings) when is_binary(safe_id) do
+  defp workspace_path_for_issue(issue_context, safe_id, nil, settings, workspace_root) when is_binary(safe_id) do
     issue_context
-    |> Config.workspace_root_for_issue(settings)
+    |> workspace_root_for_issue(settings, workspace_root)
     |> Path.join(safe_id)
     |> PathSafety.canonicalize()
   end
 
-  defp workspace_path_for_issue(issue_context, safe_id, worker_host, settings)
+  defp workspace_path_for_issue(issue_context, safe_id, worker_host, settings, workspace_root)
        when is_binary(safe_id) and is_binary(worker_host) do
-    {:ok, Path.join(Config.workspace_root_for_issue(issue_context, settings), safe_id)}
+    {:ok, Path.join(workspace_root_for_issue(issue_context, settings, workspace_root), safe_id)}
   end
+
+  defp workspace_root_for_issue(_issue_context, _settings, workspace_root) when is_binary(workspace_root),
+    do: workspace_root
+
+  defp workspace_root_for_issue(issue_context, settings, _workspace_root),
+    do: Config.workspace_root_for_issue(issue_context, settings)
 
   defp safe_identifier(identifier) do
     String.replace(identifier || "issue", ~r/[^a-zA-Z0-9._-]/, "_")
@@ -339,8 +360,25 @@ defmodule SymphonyElixir.Workspace do
   # A new workspace that fails to bootstrap must not survive: the next attempt
   # would see an existing directory, skip bootstrap and after_create, and run the
   # agent in an empty or half-installed checkout.
-  defp initialize_new_workspace(workspace, issue_context, created?, worker_host, settings) do
-    with :ok <- maybe_bootstrap_workspace_repo(workspace, issue_context, created?, worker_host, settings),
+  defp initialize_new_workspace(
+         workspace,
+         issue_context,
+         created?,
+         worker_host,
+         settings,
+         project_route,
+         workspace_root
+       ) do
+    with :ok <-
+           maybe_bootstrap_workspace_repo(
+             workspace,
+             issue_context,
+             created?,
+             worker_host,
+             settings,
+             project_route,
+             workspace_root
+           ),
          :ok <- maybe_run_after_create_hook(workspace, issue_context, created?, worker_host, settings) do
       :ok
     else
@@ -354,10 +392,11 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp maybe_recreate_incomplete_workspace(_workspace, _issue_context, true, _worker_host, _settings), do: {:ok, true}
+  defp maybe_recreate_incomplete_workspace(_workspace, _issue_context, true, _worker_host, _settings, _project_route, _workspace_root),
+    do: {:ok, true}
 
-  defp maybe_recreate_incomplete_workspace(workspace, issue_context, false, worker_host, settings) do
-    repo_configured? = match?(%{display: _}, Config.project_repo_source_for_issue(issue_context, settings))
+  defp maybe_recreate_incomplete_workspace(workspace, issue_context, false, worker_host, settings, project_route, _workspace_root) do
+    repo_configured? = match?(%{display: _}, project_repo_source_for_issue(issue_context, settings, project_route))
 
     if repo_configured? and not workspace_git_repo?(workspace, worker_host, settings) do
       Logger.warning("Recreating workspace without a git checkout #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=#{worker_host_for_log(worker_host)}")
@@ -404,11 +443,15 @@ defmodule SymphonyElixir.Workspace do
   # `.symphony/repos/<name>` at their default branch so the agent can read them
   # and describe a change one of them needs. Refreshed on every run (local edits
   # there are discarded); a failure is logged and the run goes on without it.
-  defp sync_reference_repos(workspace, issue_context, worker_host, settings) do
-    home = Config.issue_repo(issue_context, settings)
-    workspace_root = Config.workspace_root_for_issue(issue_context, settings)
+  #
+  # A runner passes the route and workspace root from its run spec, since its
+  # own config may not have the route (routes added through MCP).
+  defp sync_reference_repos(workspace, issue_context, worker_host, settings, project_route, workspace_root_override) do
+    route = project_route || Config.linear_project_route(issue_context, settings)
+    home = Config.issue_repo_for_route(issue_context, route)
+    workspace_root = workspace_root_for_issue(issue_context, settings, workspace_root_override)
 
-    for project_repo <- Config.project_repos(Config.linear_project_route(issue_context, settings)),
+    for project_repo <- Config.project_repos(route),
         home != nil and project_repo.name != home.name do
       sync_reference_repo(workspace, workspace_root, project_repo, issue_context, worker_host, settings)
     end
@@ -471,16 +514,46 @@ defmodule SymphonyElixir.Workspace do
     |> Enum.join("\n")
   end
 
-  defp maybe_bootstrap_workspace_repo(_workspace, _issue_context, false, _worker_host, _settings), do: :ok
+  defp maybe_bootstrap_workspace_repo(_workspace, _issue_context, false, _worker_host, _settings, _project_route, _workspace_root),
+    do: :ok
 
-  defp maybe_bootstrap_workspace_repo(workspace, issue_context, true, worker_host, settings) do
-    case Config.project_repo_source_for_issue(issue_context, settings) do
+  defp maybe_bootstrap_workspace_repo(
+         workspace,
+         issue_context,
+         true,
+         worker_host,
+         settings,
+         project_route,
+         workspace_root
+       ) do
+    case project_repo_source_for_issue(issue_context, settings, project_route) do
       %{display: _display} = repo_source ->
-        bootstrap_workspace_repo(workspace, repo_source, issue_context, worker_host, settings)
+        bootstrap_workspace_repo(
+          workspace,
+          repo_source,
+          issue_context,
+          worker_host,
+          settings,
+          project_route,
+          workspace_root
+        )
 
       _ ->
         :ok
     end
+  end
+
+  # With a route from a run spec, the issue's home repo (its `repo/<name>`
+  # label, else the primary) is found in that route, not in this host's config.
+  defp project_repo_source_for_issue(issue_context, _settings, %{repo: repo} = route)
+       when is_binary(repo) and repo != "" do
+    case Config.issue_repo_for_route(issue_context, route) do
+      %{repo: home_repo} -> Config.repo_source(home_repo)
+    end
+  end
+
+  defp project_repo_source_for_issue(issue_context, settings, _route) do
+    Config.project_repo_source_for_issue(issue_context, settings)
   end
 
   defp maybe_run_after_create_hook(workspace, issue_context, created?, worker_host, settings) do
@@ -644,6 +717,9 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
+  defp validate_workspace_path(workspace, worker_host, settings, _workspace_root),
+    do: validate_workspace_path(workspace, worker_host, settings)
+
   defp validate_workspace_path(workspace, nil, settings) when is_binary(workspace) do
     case Config.validate_workspace_path(workspace, settings) do
       {:ok, _canonical_workspace} ->
@@ -801,11 +877,11 @@ defmodule SymphonyElixir.Workspace do
     |> Enum.uniq()
   end
 
-  defp bootstrap_workspace_repo(workspace, repo_source, issue_context, worker_host, settings) do
-    workspace_root = Config.workspace_root_for_issue(issue_context, settings)
+  defp bootstrap_workspace_repo(workspace, repo_source, issue_context, worker_host, settings, project_route, workspace_root_override) do
+    workspace_root = workspace_root_for_issue(issue_context, settings, workspace_root_override)
     timeout_ms = hooks_timeout_ms(settings)
     branch_name = issue_branch_name(issue_context)
-    target_branch = Config.project_default_branch_for_issue(issue_context, settings)
+    target_branch = project_default_branch_for_issue(issue_context, settings, project_route)
     cache_repo = repo_cache_path(workspace_root, repo_source)
 
     Logger.info(
@@ -1591,6 +1667,16 @@ defmodule SymphonyElixir.Workspace do
         {:error, reason}
     end
   end
+
+  defp project_default_branch_for_issue(issue_context, _settings, %{repo: repo} = route)
+       when is_binary(repo) and repo != "" do
+    case Config.issue_repo_for_route(issue_context, route) do
+      %{default_branch: branch} -> branch
+    end
+  end
+
+  defp project_default_branch_for_issue(issue_context, settings, _project_route),
+    do: Config.project_default_branch_for_issue(issue_context, settings)
 
   defp issue_branch_name(issue_context), do: issue_branch(issue_context.issue_identifier)
 

@@ -7,12 +7,16 @@ defmodule SymphonyElixir.RunRegistry do
   The orchestrator records a run when it dispatches it and deletes it when the
   run leaves `running` (finished, crashed, cancelled or stopped). A run left in
   the document was therefore cut off by a restart: on start the orchestrator
-  stops it if a launcher still reports it alive, schedules its next attempt and
-  deletes it.
+  adopts it if its launcher still reports it alive, otherwise it schedules the
+  next attempt and deletes it.
 
   Epochs are per issue and strictly increasing across restarts, so a run from
   an earlier attempt can be told from the current one; they are kept when the
   run is deleted.
+
+  It also keeps the issue metadata needed to rebuild an adopted run and the
+  last event seq applied for it, so the runner protocol's deduplication
+  survives a controller restart.
 
   Kept in `~/.symphony/runs.json` through `StateStore`; not kept when the path
   is nil (tests).
@@ -20,12 +24,15 @@ defmodule SymphonyElixir.RunRegistry do
 
   require Logger
 
+  alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.RunSpec
   alias SymphonyElixir.StateStore
 
   @format_version 1
-  # The same run metadata the retry queue keeps, so a recovered run retries
-  # with the same fields it started with.
-  @fields ~w(identifier issue_title issue_url project_id project_slug project_name labels backend effort worker_host workspace_path)a
+  # The same run metadata the retry queue keeps, plus the issue itself so an
+  # adopted run can be rebuilt without asking the tracker. `last_seq` lets the
+  # controller keep event deduplication across a restart.
+  @fields ~w(identifier issue_title issue_url project_id project_slug project_name labels backend effort worker_host workspace_path issue)a
 
   @typedoc "A recorded run: its identity, its launcher reference and its metadata."
   @type entry :: %{
@@ -35,7 +42,9 @@ defmodule SymphonyElixir.RunRegistry do
           launcher: module() | String.t() | nil,
           ref: String.t(),
           started_at_unix_ms: integer(),
-          metadata: map()
+          metadata: map(),
+          last_seq: non_neg_integer(),
+          finished: String.t() | nil
         }
 
   @doc """
@@ -67,6 +76,47 @@ defmodule SymphonyElixir.RunRegistry do
       path ->
         {runs, epochs} = read(path)
         save(path, Map.delete(runs, issue_id), epochs)
+    end
+  end
+
+  @doc """
+  Records the last event seq applied for a run, and its finished reason once
+  it has ended. Writes are batched by the runner protocol (one call per event
+  batch), not one per event. A write for an older run is ignored.
+  """
+  @spec advance_progress(String.t(), String.t(), non_neg_integer(), String.t() | nil) :: :ok
+  def advance_progress(issue_id, run_id, last_seq, finished \\ nil)
+
+  def advance_progress(issue_id, run_id, last_seq, finished)
+      when is_binary(issue_id) and is_binary(run_id) and is_integer(last_seq) and last_seq >= 0 do
+    case path() do
+      nil -> :ok
+      path -> advance_progress_at(path, issue_id, run_id, last_seq, finished)
+    end
+  end
+
+  def advance_progress(_issue_id, _run_id, _last_seq, _finished), do: :ok
+
+  defp advance_progress_at(path, issue_id, run_id, last_seq, finished) do
+    {runs, epochs} = read(path)
+
+    case Map.get(runs, issue_id) do
+      %{run_id: ^run_id} = entry -> save_progress(path, runs, epochs, issue_id, entry, last_seq, finished)
+      _ -> :ok
+    end
+  end
+
+  defp save_progress(path, runs, epochs, issue_id, entry, last_seq, finished) do
+    next = %{
+      entry
+      | last_seq: max(entry.last_seq, last_seq),
+        finished: finished || entry.finished
+    }
+
+    if next == entry do
+      :ok
+    else
+      save(path, Map.put(runs, issue_id, next), epochs)
     end
   end
 
@@ -156,7 +206,9 @@ defmodule SymphonyElixir.RunRegistry do
        launcher: launcher_from_string(Map.get(row, "launcher")),
        ref: ref,
        started_at_unix_ms: started_at,
-       metadata: normalize_metadata(Map.get(row, "metadata"))
+       metadata: decode_metadata(Map.get(row, "metadata")),
+       last_seq: normalize_last_seq(Map.get(row, "last_seq")),
+       finished: normalize_finished(Map.get(row, "finished"))
      }}
   end
 
@@ -170,9 +222,17 @@ defmodule SymphonyElixir.RunRegistry do
       launcher: Map.get(entry, :launcher),
       ref: Map.get(entry, :ref),
       started_at_unix_ms: Map.get(entry, :started_at_unix_ms),
-      metadata: normalize_metadata(Map.get(entry, :metadata))
+      metadata: decode_metadata(Map.get(entry, :metadata)),
+      last_seq: normalize_last_seq(Map.get(entry, :last_seq)),
+      finished: normalize_finished(Map.get(entry, :finished))
     }
   end
+
+  defp normalize_last_seq(seq) when is_integer(seq) and seq >= 0, do: seq
+  defp normalize_last_seq(_seq), do: 0
+
+  defp normalize_finished(reason) when is_binary(reason), do: reason
+  defp normalize_finished(_reason), do: nil
 
   defp normalize_attempt(entry) do
     case Map.get(entry, :attempt) do
@@ -202,6 +262,19 @@ defmodule SymphonyElixir.RunRegistry do
     %{metadata | labels: []}
   end
 
+  defp decode_metadata(raw) do
+    metadata = normalize_metadata(raw)
+
+    issue =
+      case metadata.issue do
+        %Issue{} = issue -> issue
+        %{} = issue -> RunSpec.to_issue(%RunSpec{run_id: "", epoch: 1, issue: issue})
+        _ -> nil
+      end
+
+    %{metadata | issue: issue}
+  end
+
   defp encode(entry) do
     %{
       "run_id" => Map.get(entry, :run_id),
@@ -210,14 +283,27 @@ defmodule SymphonyElixir.RunRegistry do
       "launcher" => launcher_to_string(Map.get(entry, :launcher)),
       "ref" => Map.get(entry, :ref),
       "started_at_unix_ms" => Map.get(entry, :started_at_unix_ms),
-      "metadata" => encode_metadata(Map.get(entry, :metadata))
+      "metadata" => encode_metadata(Map.get(entry, :metadata)),
+      "last_seq" => normalize_last_seq(Map.get(entry, :last_seq)),
+      "finished" => normalize_finished(Map.get(entry, :finished))
     }
   end
 
   defp encode_metadata(raw) do
     metadata = normalize_metadata(raw)
-    Map.new(@fields, fn field -> {Atom.to_string(field), Map.get(metadata, field)} end)
+    Map.new(@fields, fn field -> {Atom.to_string(field), encode_metadata_value(Map.get(metadata, field))} end)
   end
+
+  defp encode_metadata_value(%DateTime{} = value), do: DateTime.to_iso8601(value)
+  defp encode_metadata_value(%Date{} = value), do: Date.to_iso8601(value)
+  defp encode_metadata_value(%_{} = value), do: value |> Map.from_struct() |> encode_metadata_value()
+  defp encode_metadata_value(value) when is_list(value), do: Enum.map(value, &encode_metadata_value/1)
+
+  defp encode_metadata_value(%{} = value) do
+    Map.new(value, fn {key, item} -> {to_string(key), encode_metadata_value(item)} end)
+  end
+
+  defp encode_metadata_value(value), do: value
 
   defp launcher_to_string(launcher) when is_atom(launcher) and not is_nil(launcher), do: Atom.to_string(launcher)
   defp launcher_to_string(launcher) when is_binary(launcher), do: launcher

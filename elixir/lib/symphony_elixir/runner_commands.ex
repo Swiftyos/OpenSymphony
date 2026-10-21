@@ -63,6 +63,20 @@ defmodule SymphonyElixir.RunnerCommands do
 
   def apply_events(_run_id, _events, _fun), do: {:error, :unavailable}
 
+  @doc """
+  Restores a run's persisted progress after a controller restart. Never moves
+  the in-memory seq backwards, so a stale registry read cannot replay events.
+  """
+  @spec seed(String.t(), non_neg_integer(), String.t() | nil) :: :ok
+  def seed(run_id, last_seq, finished \\ nil)
+
+  def seed(run_id, last_seq, finished)
+      when is_binary(run_id) and is_integer(last_seq) and last_seq >= 0 do
+    call({:seed, run_id, last_seq, finished}, :ok, :infinity)
+  end
+
+  def seed(_run_id, _last_seq, _finished), do: :ok
+
   @doc "Whether the run's finished event has been applied."
   @spec finished?(String.t()) :: boolean()
   def finished?(run_id) when is_binary(run_id), do: call({:finished?, run_id}, false, :infinity)
@@ -72,6 +86,11 @@ defmodule SymphonyElixir.RunnerCommands do
   @spec last_seq(String.t()) :: non_neg_integer()
   def last_seq(run_id) when is_binary(run_id), do: call({:last_seq, run_id}, 0, :infinity)
   def last_seq(_run_id), do: 0
+
+  @doc "The reason from the run's finished event, or nil while it is running."
+  @spec finished_reason(String.t()) :: String.t() | nil
+  def finished_reason(run_id) when is_binary(run_id), do: call({:finished_reason, run_id}, nil, :infinity)
+  def finished_reason(_run_id), do: nil
 
   @doc "Forgets all commands and run bookkeeping (tests, and a fresh controller boot)."
   @spec reset() :: :ok
@@ -146,8 +165,27 @@ defmodule SymphonyElixir.RunnerCommands do
     end
   end
 
+  def handle_call({:seed, run_id, last_seq, finished}, _from, state) do
+    run = Map.get(state.runs, run_id, %{last_seq: 0, finished: nil})
+
+    run = %{
+      run
+      | last_seq: max(run.last_seq, last_seq),
+        finished: run.finished || finished
+    }
+
+    {:reply, :ok, %{state | runs: Map.put(state.runs, run_id, run)}}
+  end
+
   def handle_call({:finished?, run_id}, _from, state) do
     {:reply, is_binary(Map.get(state.runs, run_id, %{})[:finished]), state}
+  end
+
+  def handle_call({:finished_reason, run_id}, _from, state) do
+    case Map.get(state.runs, run_id, %{}) do
+      %{finished: reason} when is_binary(reason) -> {:reply, reason, state}
+      _ -> {:reply, nil, state}
+    end
   end
 
   def handle_call({:last_seq, run_id}, _from, state) do
@@ -221,7 +259,7 @@ defmodule SymphonyElixir.RunnerCommands do
         {current_seq, finished}
       else
         fun.(event)
-        {event.seq, finished_reason(event)}
+        {event.seq, event_finished_reason(event)}
       end
     end)
   end
@@ -229,9 +267,9 @@ defmodule SymphonyElixir.RunnerCommands do
   defp valid_event?(%{seq: seq, type: type}) when is_integer(seq) and seq >= 0 and is_binary(type), do: true
   defp valid_event?(_event), do: false
 
-  defp finished_reason(%{type: "finished", data: data}) when is_map(data) do
+  defp event_finished_reason(%{type: "finished", data: data}) when is_map(data) do
     Map.get(data, :reason) || Map.get(data, "reason") || "finished"
   end
 
-  defp finished_reason(_event), do: nil
+  defp event_finished_reason(_event), do: nil
 end

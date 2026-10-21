@@ -84,6 +84,7 @@ defmodule SymphonyElixir.Config do
         }
 
   @repo_label_group "repo"
+  @default_runner_command "setsid {symphony} runner {spec} --i-understand-that-this-will-be-running-without-the-usual-guardrails"
 
   @type repo_source_kind :: :local_path | :github_slug | :remote_url
 
@@ -189,6 +190,23 @@ defmodule SymphonyElixir.Config do
 
   @spec agent_backend() :: String.t()
   def agent_backend, do: settings!().agent.backend
+
+  @doc "The default command template for the process run launcher."
+  @spec default_runner_command() :: String.t()
+  def default_runner_command, do: @default_runner_command
+
+  @doc "How agent runs are started: `:local` in-process or `:process` as separate OS processes."
+  @spec agent_launcher() :: :local | :process
+  def agent_launcher do
+    case settings!().agent.launcher do
+      "process" -> :process
+      _ -> :local
+    end
+  end
+
+  @doc "The command template used to start a process run."
+  @spec agent_runner_command() :: String.t()
+  def agent_runner_command, do: settings!().agent.runner_command
 
   @spec agent_stall_timeout_ms(String.t() | nil) :: non_neg_integer()
   def agent_stall_timeout_ms(backend \\ nil) do
@@ -700,7 +718,16 @@ defmodule SymphonyElixir.Config do
   """
   @spec issue_repo(map() | String.t() | nil, Schema.t()) :: project_repo() | nil
   def issue_repo(issue_or_identifier, %Schema{} = settings) do
-    repos = issue_or_identifier |> linear_project_route(settings) |> project_repos()
+    issue_repo_for_route(issue_or_identifier, linear_project_route(issue_or_identifier, settings))
+  end
+
+  @doc """
+  The issue's home repo within an already resolved project route (as a run
+  spec carries it): the repo its `repo/<name>` label names, else the primary.
+  """
+  @spec issue_repo_for_route(map() | String.t() | nil, map() | nil) :: project_repo() | nil
+  def issue_repo_for_route(issue_or_identifier, route) do
+    repos = project_repos(route)
     wanted = issue_repo_label_name(issue_or_identifier)
 
     Enum.find(repos, &(&1.name == wanted)) || List.first(repos)

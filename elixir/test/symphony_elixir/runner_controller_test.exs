@@ -144,6 +144,29 @@ defmodule SymphonyElixirWeb.RunnerControllerTest do
       # An unknown type is ignored but its seq still counts.
       assert %{status: 200, resp_body: %{"applied_through" => 8}} =
                conn(:post, "/runner/v1/runs/#{run_id}/events", token(), %{"events" => [event(8, "mystery", %{})]})
+
+      # The controller persisted the applied seq for the next boot.
+      assert %{last_seq: 8, finished: nil} = SymphonyElixir.RunRegistry.load()["issue-1"]
+    end
+
+    test "a restarted controller seeds the last seq and does not replay applied events" do
+      run!()
+      first = [event(1, "agent_update", %{issue_id: "issue-1", identifier: "MT-C-1", backend: "claude", message: agent_message("first")})]
+
+      assert %{status: 200, resp_body: %{"applied_through" => 1}} =
+               conn(:post, "/runner/v1/runs/run-1/events", token(), %{"events" => first})
+
+      assert length(Transcript.entries("MT-C-1")) == 1
+      assert SymphonyElixir.RunRegistry.load()["issue-1"].last_seq == 1
+
+      # This is what a fresh controller BEAM has after boot.
+      RunnerCommands.reset()
+
+      assert %{status: 200, resp_body: %{"applied_through" => 1}} =
+               conn(:post, "/runner/v1/runs/run-1/events", token(), %{"events" => first})
+
+      assert length(Transcript.entries("MT-C-1")) == 1
+      assert RunnerCommands.last_seq("run-1") == 1
     end
 
     test "finished is forwarded and ends the run for every endpoint" do
@@ -155,6 +178,7 @@ defmodule SymphonyElixirWeb.RunnerControllerTest do
                })
 
       assert_receive {:orchestrator_message, {:run_finished, "issue-1", "run-1", "normal"}}
+      assert %{last_seq: 1, finished: "normal"} = SymphonyElixir.RunRegistry.load()["issue-1"]
 
       assert %{status: 409, resp_body: %{"error" => "finished"}} =
                conn(:get, "/runner/v1/runs/run-1/session")

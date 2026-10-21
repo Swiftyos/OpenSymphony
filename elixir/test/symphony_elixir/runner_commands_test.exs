@@ -103,6 +103,30 @@ defmodule SymphonyElixir.RunnerCommandsTest do
              RunnerCommands.apply_events("run-3", [%{seq: 0, type: "nope", data: %{}}, %{bad: true}], fn _ -> :ok end)
   end
 
+  test "seed restores persisted progress and finished state without moving backwards" do
+    assert :ok = RunnerCommands.seed("run-seed", 5)
+    assert RunnerCommands.last_seq("run-seed") == 5
+    refute RunnerCommands.finished?("run-seed")
+    assert RunnerCommands.finished_reason("run-seed") == nil
+
+    assert :ok = RunnerCommands.seed("run-seed", 3, "normal")
+    assert RunnerCommands.last_seq("run-seed") == 5
+    assert RunnerCommands.finished?("run-seed")
+    assert RunnerCommands.finished_reason("run-seed") == "normal"
+
+    # Events at or below the seeded seq are not applied again.
+    assert {:error, :finished} =
+             RunnerCommands.apply_events("run-seed", [%{seq: 6, type: "agent_update", data: %{}}], fn _ ->
+               flunk("applied")
+             end)
+
+    assert :ok = RunnerCommands.seed("run-seed-2", 2, "failed")
+    assert RunnerCommands.finished_reason("run-seed-2") == "failed"
+    assert :ok = RunnerCommands.seed(nil, 0, nil)
+    assert :ok = RunnerCommands.seed("run-seed", -1, nil)
+    assert RunnerCommands.finished_reason(nil) == nil
+  end
+
   test "the process reports unavailable when it is not registered" do
     pid = Process.whereis(RunnerCommands)
     Process.unregister(RunnerCommands)
@@ -113,6 +137,8 @@ defmodule SymphonyElixir.RunnerCommandsTest do
       assert {:error, :unavailable} = RunnerCommands.apply_events("run-1", [], fn _ -> :ok end)
       refute RunnerCommands.finished?("run-1")
       assert RunnerCommands.last_seq("run-1") == 0
+      assert :ok = RunnerCommands.seed("run-1", 5, "normal")
+      assert RunnerCommands.finished_reason("run-1") == nil
       assert :ok = RunnerCommands.reset()
     after
       Process.register(pid, RunnerCommands)

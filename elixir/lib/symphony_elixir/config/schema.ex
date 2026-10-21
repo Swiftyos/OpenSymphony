@@ -583,6 +583,8 @@ defmodule SymphonyElixir.Config.Schema do
     embedded_schema do
       field(:backend, :string)
       field(:default_effort, :string)
+      field(:launcher, :string, default: "local")
+      field(:runner_command, :string, default: "setsid {symphony} runner {spec} --i-understand-that-this-will-be-running-without-the-usual-guardrails")
       field(:max_concurrent_agents, :integer, default: 10)
       field(:max_turns, :integer, default: 20)
       field(:max_retry_backoff_ms, :integer, default: 300_000)
@@ -599,6 +601,8 @@ defmodule SymphonyElixir.Config.Schema do
         [
           :backend,
           :default_effort,
+          :launcher,
+          :runner_command,
           :max_concurrent_agents,
           :max_turns,
           :max_retry_backoff_ms,
@@ -609,6 +613,8 @@ defmodule SymphonyElixir.Config.Schema do
       )
       |> update_change(:backend, &Schema.normalize_optional_string/1)
       |> update_change(:default_effort, &Schema.normalize_optional_effort/1)
+      |> update_change(:launcher, &Schema.normalize_optional_string/1)
+      |> update_change(:runner_command, &Schema.normalize_optional_string/1)
       |> validate_change(:backend, fn :backend, value ->
         if value in ["codex", "opencode", "claude"] do
           []
@@ -621,6 +627,20 @@ defmodule SymphonyElixir.Config.Schema do
           []
         else
           [default_effort: "must be one of: #{Enum.join(@effort_values, ", ")}"]
+        end
+      end)
+      |> validate_change(:launcher, fn :launcher, value ->
+        if value in ["local", "process"] do
+          []
+        else
+          [launcher: "must be one of: local, process"]
+        end
+      end)
+      |> validate_change(:runner_command, fn :runner_command, value ->
+        if is_binary(value) and Enum.all?(["{symphony}", "{spec}", "{run_id}"], &String.contains?(value, &1)) do
+          []
+        else
+          [runner_command: "must include {symphony}, {spec} and {run_id} placeholders"]
         end
       end)
       |> validate_number(:max_concurrent_agents, greater_than: 0)

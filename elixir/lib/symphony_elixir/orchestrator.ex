@@ -19,6 +19,9 @@ defmodule SymphonyElixir.Orchestrator do
     RetryStore,
     RunLauncher,
     RunRegistry,
+    RunSpec,
+    RunToken,
+    RunWatcher,
     Sandbox,
     SessionHistory,
     StatusDashboard,
@@ -358,10 +361,10 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info({:agent_worker_update, _issue_id, _update}, state), do: {:noreply, state}
 
-  # A remote runner reported that its run ended. Step 4 routes this to the
-  # run's watcher so the existing :DOWN handling takes over; until then the
-  # reason is only logged.
+  # A remote runner reported that its run ended; its watcher exits with that
+  # reason, so the existing :DOWN handling takes over.
   def handle_info({:run_finished, issue_id, run_id, reason}, state) do
+    RunWatcher.finished(run_id, reason || "finished")
     Logger.info("Runner finished issue_id=#{issue_id} run_id=#{run_id} reason=#{inspect(reason)}")
     {:noreply, state}
   end
@@ -788,18 +791,41 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp last_activity_timestamp(running_entry) when is_map(running_entry) do
-    Map.get(running_entry, :last_agent_timestamp) ||
-      Map.get(running_entry, :last_codex_timestamp) ||
-      Map.get(running_entry, :started_at)
+    entry_timestamp =
+      Map.get(running_entry, :last_agent_timestamp) ||
+        Map.get(running_entry, :last_codex_timestamp) ||
+        Map.get(running_entry, :started_at)
+
+    watcher_timestamp =
+      case Map.get(running_entry, :run_id) do
+        run_id when is_binary(run_id) -> RunWatcher.last_seen(run_id)
+        _ -> nil
+      end
+
+    latest_timestamp(entry_timestamp, watcher_timestamp)
   end
 
   defp last_activity_timestamp(_running_entry), do: nil
+
+  defp latest_timestamp(%DateTime{} = left, %DateTime{} = right) do
+    if DateTime.compare(left, right) == :gt, do: left, else: right
+  end
+
+  defp latest_timestamp(%DateTime{} = timestamp, _right), do: timestamp
+  defp latest_timestamp(_left, %DateTime{} = timestamp), do: timestamp
+  defp latest_timestamp(_left, _right), do: nil
 
   defp stall_activity_label(running_entry) when is_map(running_entry) do
     if running_entry_backend(running_entry) == "codex", do: "codex", else: "agent"
   end
 
-  defp stop_running_task(%{launcher: launcher, run_ref: run_ref}) when is_atom(launcher) and is_binary(run_ref) do
+  defp stop_running_task(%{launcher: launcher, run_ref: run_ref} = running_entry)
+       when is_atom(launcher) and is_binary(run_ref) do
+    case Map.get(running_entry, :run_id) do
+      run_id when is_binary(run_id) -> RunWatcher.stop(run_id)
+      _ -> :ok
+    end
+
     if Code.ensure_loaded?(launcher) and function_exported?(launcher, :stop, 1) do
       launcher.stop(run_ref)
     else
@@ -1350,30 +1376,29 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host, route, issue_config, account) do
     launcher = RunLauncher.launcher()
+    run_id = RunRegistry.new_run_id()
+    epoch = RunRegistry.next_epoch(issue.id)
+    spec = run_spec(issue, attempt, worker_host, route, issue_config, account, run_id, epoch)
 
-    case launcher.start(
-           fn ->
-             AgentRunner.run(
-               issue,
-               recipient,
-               attempt: attempt,
-               worker_host: worker_host,
-               route: route,
-               issue_config: issue_config,
-               account: account
-             )
-           end,
-           []
-         ) do
+    fun = fn ->
+      AgentRunner.run(
+        issue,
+        recipient,
+        attempt: attempt,
+        worker_host: worker_host,
+        route: route,
+        issue_config: issue_config,
+        account: account
+      )
+    end
+
+    case RunLauncher.start(launcher, %{fun: fun, spec: spec}, []) do
       {:ok, pid, run_ref} ->
         ref = Process.monitor(pid)
 
         Logger.info(
-          "Dispatching issue to agent: #{issue_context(issue)} backend=#{route.backend} effort=#{route.effort || "default"} pid=#{inspect(pid)} attempt=#{inspect(attempt)} worker_host=#{worker_host || "local"} account=#{account_log_label(account)}"
+          "Dispatching issue to agent: #{issue_context(issue)} backend=#{route.backend} effort=#{route.effort || "default"} pid=#{inspect(pid)} attempt=#{inspect(attempt)} worker_host=#{worker_host || "local"} account=#{account_log_label(account)} run_id=#{run_id}"
         )
-
-        run_id = RunRegistry.new_run_id()
-        epoch = RunRegistry.next_epoch(issue.id)
 
         running_entry =
           new_running_entry(issue, pid, ref, worker_host, attempt, route, account)
@@ -1412,6 +1437,45 @@ defmodule SymphonyElixir.Orchestrator do
         )
     end
   end
+
+  defp run_spec(issue, attempt, worker_host, route, issue_config, account, run_id, epoch) do
+    settings = issue_config.settings
+    project_route = Config.linear_project_route(issue, settings) || issue_config.project_route
+    encoded_route = if is_struct(project_route), do: Map.from_struct(project_route), else: project_route
+
+    workspace_root =
+      case project_route do
+        %{} = resolved -> Config.workspace_root_for_route(resolved, settings)
+        _ -> Config.workspace_root_for_issue(issue, settings)
+      end
+
+    %RunSpec{
+      run_id: run_id,
+      epoch: epoch,
+      attempt: normalize_retry_attempt(attempt),
+      issue: issue,
+      worker_host: worker_host,
+      backend: route.backend,
+      effort: route.effort,
+      project_route: encoded_route,
+      workspace_root: workspace_root,
+      route: %{backend: route.backend, effort: route.effort, warnings: Map.get(route, :warnings, [])},
+      account: account_spec(account),
+      controller_url: RunSpec.controller_url(),
+      token: RunToken.sign(run_id, epoch)
+    }
+  end
+
+  defp account_spec(nil), do: nil
+
+  defp account_spec(account) when is_map(account) do
+    backend = Map.get(account, :backend) || Map.get(account, "backend")
+    id = Map.get(account, :id) || Map.get(account, "id")
+
+    if is_binary(backend) and is_binary(id), do: %{backend: backend, id: id}, else: nil
+  end
+
+  defp account_spec(_account), do: nil
 
   defp new_running_entry(issue, pid, ref, worker_host, attempt, route, account) do
     account_summary = Accounts.account_summary(account)
@@ -1558,36 +1622,120 @@ defmodule SymphonyElixir.Orchestrator do
     %{state | retry_attempts: retry_attempts}
   end
 
-  # Runs left in the registry were cut off by the last stop. A run a launcher
-  # still reports alive is stopped (adoption comes with the process launcher),
-  # and every one is deleted and retried unless a retry was restored already.
+  # Runs left in the registry were cut off by the last stop. A run its
+  # launcher still reports alive is adopted: it keeps its run id and epoch, gets
+  # a watcher and goes back into `running` without a retry. Every other run is
+  # deleted and retried with its next attempt.
   defp recover_runs(%State{} = state) do
-    launcher = RunLauncher.launcher()
+    current_launcher = RunLauncher.launcher()
 
     Enum.reduce(RunRegistry.load(), state, fn {issue_id, entry}, acc ->
-      if launcher.alive?(entry.ref) do
-        Logger.warning("Interrupted run is still alive issue_id=#{issue_id}: adopting live runs is not supported by this launcher yet; stopping it")
+      launcher = entry_launcher(entry.launcher, current_launcher)
 
-        launcher.stop(entry.ref)
-      end
-
-      RunRegistry.delete(issue_id)
-
-      Logger.info("Recovered interrupted run issue_id=#{issue_id} issue_identifier=#{entry.metadata[:identifier] || issue_id} attempt=#{entry.attempt}")
-
-      if Map.has_key?(acc.retry_attempts, issue_id) do
-        acc
+      if launcher_alive?(launcher, entry.ref) do
+        adopt_run(acc, issue_id, entry, launcher)
       else
-        acc
-        |> claim_issue(issue_id)
-        |> schedule_issue_retry(
-          issue_id,
-          entry.attempt + 1,
-          Map.merge(entry.metadata, %{error: "interrupted by a Symphony restart", delay_ms: 1_000})
-        )
+        retry_recovered_run(acc, issue_id, entry)
       end
     end)
   end
+
+  defp adopt_run(%State{} = state, issue_id, entry, launcher) do
+    issue = recovered_issue(issue_id, entry.metadata)
+
+    case RunWatcher.start(%{run_id: entry.run_id, issue_id: issue_id}, entry.ref, launcher: launcher) do
+      {:ok, watcher_pid} ->
+        ref = Process.monitor(watcher_pid)
+        backend = entry.metadata[:backend] || Config.agent_backend()
+        route = %AgentRoute{backend: backend, effort: entry.metadata[:effort], warnings: []}
+
+        running_entry =
+          new_running_entry(issue, watcher_pid, ref, entry.metadata[:worker_host], entry.attempt, route, nil)
+          |> Map.merge(%{
+            run_id: entry.run_id,
+            epoch: entry.epoch,
+            launcher: launcher,
+            run_ref: entry.ref,
+            started_at: recovered_started_at(entry.started_at_unix_ms),
+            workspace_path: entry.metadata[:workspace_path]
+          })
+
+        Logger.info(
+          "Adopted live run issue_id=#{issue_id} issue_identifier=#{entry.metadata[:identifier] || issue_id} attempt=#{entry.attempt} run_id=#{entry.run_id} launcher=#{inspect(launcher)} ref=#{entry.ref}"
+        )
+
+        %{state | running: Map.put(state.running, issue_id, running_entry), claimed: MapSet.put(state.claimed, issue_id)}
+        |> put_retry_attempts(Map.delete(state.retry_attempts, issue_id))
+
+      {:error, reason} ->
+        Logger.error("Unable to adopt live run issue_id=#{issue_id} run_id=#{entry.run_id}: #{inspect(reason)}; stopping it and retrying")
+        launcher_stop(launcher, entry.ref)
+        retry_recovered_run(state, issue_id, entry)
+    end
+  end
+
+  defp retry_recovered_run(%State{} = state, issue_id, entry) do
+    RunRegistry.delete(issue_id)
+
+    Logger.info("Recovered interrupted run issue_id=#{issue_id} issue_identifier=#{entry.metadata[:identifier] || issue_id} attempt=#{entry.attempt}")
+
+    if Map.has_key?(state.retry_attempts, issue_id) do
+      state
+    else
+      state
+      |> claim_issue(issue_id)
+      |> schedule_issue_retry(
+        issue_id,
+        entry.attempt + 1,
+        Map.merge(entry.metadata, %{error: "interrupted by a Symphony restart", delay_ms: 1_000})
+      )
+    end
+  end
+
+  defp entry_launcher(launcher, _current) when is_atom(launcher) and not is_nil(launcher), do: launcher
+  defp entry_launcher(_launcher, current), do: current
+
+  defp launcher_alive?(launcher, ref) do
+    Code.ensure_loaded?(launcher) and function_exported?(launcher, :alive?, 1) and launcher.alive?(ref)
+  rescue
+    _error -> false
+  end
+
+  defp launcher_stop(launcher, ref) do
+    if Code.ensure_loaded?(launcher) and function_exported?(launcher, :stop, 1) do
+      launcher.stop(ref)
+    else
+      :ok
+    end
+  end
+
+  defp recovered_issue(issue_id, metadata) do
+    case Map.get(metadata, :issue) do
+      %Issue{} = issue ->
+        issue
+
+      _ ->
+        %Issue{
+          id: issue_id,
+          identifier: metadata[:identifier] || issue_id,
+          title: metadata[:issue_title],
+          url: metadata[:issue_url],
+          project_id: metadata[:project_id],
+          project_slug: metadata[:project_slug],
+          project_name: metadata[:project_name],
+          labels: metadata[:labels] || []
+        }
+    end
+  end
+
+  defp recovered_started_at(unix_ms) when is_integer(unix_ms) do
+    case DateTime.from_unix(unix_ms, :millisecond) do
+      {:ok, started_at} -> started_at
+      _ -> DateTime.utc_now()
+    end
+  end
+
+  defp recovered_started_at(_unix_ms), do: DateTime.utc_now()
 
   # Re-arms the retries saved before the last stop. Each issue is claimed again,
   # so the first poll doesn't dispatch it ahead of its backoff.
@@ -1835,7 +1983,8 @@ defmodule SymphonyElixir.Orchestrator do
     |> Map.merge(%{
       identifier: identifier,
       worker_host: Map.get(running_entry, :worker_host),
-      workspace_path: Map.get(running_entry, :workspace_path)
+      workspace_path: Map.get(running_entry, :workspace_path),
+      issue: Map.get(running_entry, :issue)
     })
   end
 

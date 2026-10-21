@@ -55,6 +55,10 @@ defmodule SymphonyElixirWeb.RunnerAuth do
 
     cond do
       RunToken.verify(run_id, entry.epoch, token) ->
+        # After a controller restart the in-memory bookkeeping is gone; restore
+        # the run's persisted seq so the runner's outbox replay stays idempotent.
+        RunnerCommands.seed(run_id, entry.last_seq, entry.finished)
+
         if RunnerCommands.finished?(run_id) do
           deny(conn, 409, "finished")
         else

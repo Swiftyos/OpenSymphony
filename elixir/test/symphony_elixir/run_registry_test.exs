@@ -39,6 +39,51 @@ defmodule SymphonyElixir.RunRegistryTest do
     assert loaded.metadata.workspace_path == "/tmp/work"
   end
 
+  test "the issue and event progress survive a reload", %{path: path} do
+    issue = %Issue{
+      id: "issue-1",
+      identifier: "MT-1",
+      title: "Work",
+      state: "In Progress",
+      labels: ["factory/implement"],
+      created_at: ~U[2026-01-01 00:00:00Z]
+    }
+
+    assert :ok = RunRegistry.record("issue-1", entry(%{metadata: %{identifier: "MT-1", issue: issue}, last_seq: 2, finished: "normal"}))
+    assert %{"issue-1" => loaded} = RunRegistry.load()
+    assert %Issue{identifier: "MT-1", created_at: ~U[2026-01-01 00:00:00Z]} = loaded.metadata.issue
+    assert loaded.last_seq == 2
+    assert loaded.finished == "normal"
+
+    # Progress for this run moves forward, never backwards, and keeps the reason.
+    assert :ok = RunRegistry.advance_progress("issue-1", "run-1", 1, nil)
+    assert RunRegistry.load()["issue-1"].last_seq == 2
+    assert :ok = RunRegistry.advance_progress("issue-1", "run-1", 9, "failed")
+    assert :ok = RunRegistry.advance_progress("issue-1", "run-1", 10)
+    loaded = RunRegistry.load()["issue-1"]
+    assert loaded.last_seq == 10
+    assert loaded.finished == "failed"
+
+    # Another run's / invalid progress is ignored.
+    assert :ok = RunRegistry.advance_progress("issue-1", "other-run", 20, "nope")
+    assert RunRegistry.load()["issue-1"].last_seq == 10
+    assert :ok = RunRegistry.advance_progress(nil, nil, -1, nil)
+    assert :ok = RunRegistry.advance_progress("missing", "run-x", 1, nil)
+
+    # A map with string keys still rebuilds an issue.
+    assert :ok = RunRegistry.record("issue-string", entry(%{metadata: %{identifier: "MT-S", issue: %{"id" => "issue-string", "identifier" => "MT-S", "labels" => []}}}))
+    assert %Issue{identifier: "MT-S"} = RunRegistry.load()["issue-string"].metadata.issue
+
+    # A Date in the issue metadata also encodes safely.
+    assert :ok =
+             RunRegistry.record(
+               "issue-date",
+               entry(%{metadata: %{identifier: "MT-D", issue: %Issue{id: "issue-date", identifier: "MT-D", created_at: ~D[2026-01-01]}}})
+             )
+
+    assert File.exists?(path)
+  end
+
   test "delete forgets the run but keeps its epoch", %{path: path} do
     assert :ok = RunRegistry.record("issue-1", entry(%{epoch: 3}))
     assert RunRegistry.next_epoch("issue-1") == 4
@@ -159,11 +204,36 @@ defmodule SymphonyElixir.RunRegistryTest do
     assert capture_log(fn -> assert :ok = RunRegistry.record("issue-failed", entry()) end) =~ "Run registry save failed"
   end
 
+  test "an invalid stored seq and reason normalize to safe values", %{path: path} do
+    File.write!(
+      path,
+      Jason.encode!(%{
+        "runs" => %{
+          "issue-1" => %{
+            "run_id" => "run-1",
+            "attempt" => 1,
+            "epoch" => 1,
+            "ref" => "local:boot:0.1.0",
+            "started_at_unix_ms" => 5,
+            "last_seq" => "nope",
+            "finished" => 7
+          }
+        },
+        "epochs" => %{}
+      })
+    )
+
+    assert %{"issue-1" => entry} = RunRegistry.load()
+    assert entry.last_seq == 0
+    assert entry.finished == nil
+  end
+
   test "nothing is kept without a path" do
     Application.put_env(:symphony_elixir, :runs_path, nil)
 
     assert :ok = RunRegistry.record("issue-1", entry())
     assert :ok = RunRegistry.delete("issue-1")
+    assert :ok = RunRegistry.advance_progress("issue-1", "run-1", 3, "normal")
     assert RunRegistry.load() == %{}
     assert RunRegistry.next_epoch("issue-1") == 1
     assert is_binary(RunRegistry.new_run_id())

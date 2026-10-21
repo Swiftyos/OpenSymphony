@@ -7,6 +7,7 @@ System.put_env("GIT_COMMITTER_NAME", "Test User")
 System.put_env("GIT_COMMITTER_EMAIL", "test@example.com")
 
 exclude = if System.get_env("SYMPHONY_TEST_DATABASE_URL"), do: [], else: [:postgres]
+exclude = if System.get_env("SYMPHONY_E2E_PROCESS") == "1", do: exclude, else: [:e2e_process | exclude]
 ExUnit.start(exclude: exclude)
 Code.require_file("support/snapshot_support.exs", __DIR__)
 Code.require_file("support/test_support.exs", __DIR__)

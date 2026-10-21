@@ -51,6 +51,16 @@ defmodule SymphonyElixir.RunSpecTest do
       worker_host: "build-1",
       backend: "claude",
       effort: "high",
+      project_route: %{
+        slug: "checkout",
+        repo: "acme/widgets",
+        workflow: "WORKFLOW.md",
+        backend: "claude",
+        default_branch: "main",
+        workspace_root: "/tmp/checkout"
+      },
+      workspace_root: "/tmp/checkout",
+      route: %{backend: "claude", effort: "high", warnings: ["a warning"]},
       account: %{backend: "claude", id: "acct-1"},
       environment: %SymphonyElixir.Environment{
         name: "python",
@@ -82,6 +92,11 @@ defmodule SymphonyElixir.RunSpecTest do
     assert loaded.worker_host == "build-1"
     assert loaded.backend == "claude"
     assert loaded.effort == "high"
+    assert loaded.project_route.slug == "checkout"
+    assert loaded.project_route.repo == "acme/widgets"
+    assert loaded.project_route.workspace_root == "/tmp/checkout"
+    assert loaded.workspace_root == "/tmp/checkout"
+    assert loaded.route == %{backend: "claude", effort: "high", warnings: ["a warning"]}
     assert loaded.account == %{backend: "claude", id: "acct-1"}
 
     assert loaded.environment == %{
@@ -128,6 +143,37 @@ defmodule SymphonyElixir.RunSpecTest do
     bad = %RunSpec{run_id: "run-bad-environment", epoch: 1, environment: "not-a-map"}
     assert {:ok, path} = RunSpec.write(bad)
     assert {:ok, %RunSpec{environment: nil}} = RunSpec.read(path)
+  end
+
+  test "project routes may be structs, and odd routes decode to nil", %{root: root} do
+    route = %SymphonyElixir.Config.Schema.TrackerProject{
+      slug: "checkout",
+      repo: "acme/widgets",
+      workflow: "WORKFLOW.md",
+      backend: "codex",
+      workspace_root: "/tmp/checkout"
+    }
+
+    spec = %RunSpec{
+      run_id: "run-struct-route",
+      epoch: 1,
+      issue: %{},
+      project_route: route,
+      route: %SymphonyElixir.AgentRoute{backend: "codex", effort: "high", warnings: []}
+    }
+
+    assert {:ok, path} = RunSpec.write(spec)
+    assert {:ok, loaded} = RunSpec.read(path)
+    assert loaded.project_route.slug == "checkout"
+    assert loaded.project_route.repo == "acme/widgets"
+    assert loaded.route == %{backend: "codex", effort: "high", warnings: []}
+
+    File.mkdir_p!(RunSpec.dir("run-odd-route"))
+    File.write!(RunSpec.path("run-odd-route"), Jason.encode!(%{"run_id" => "run-odd-route", "epoch" => 1, "project_route" => "nope", "route" => 7}))
+    assert {:ok, odd} = RunSpec.read(RunSpec.path("run-odd-route"))
+    assert odd.project_route == nil
+    assert odd.route == nil
+    _ = root
   end
 
   test "read returns errors for a missing or malformed spec" do

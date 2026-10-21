@@ -77,6 +77,8 @@ defmodule SymphonyElixir.Application do
       SymphonyElixir.GitMirror.Limiter,
       SymphonyElixir.RunnerCommands,
       SymphonyElixir.Capacity.Metrics,
+      {Registry, keys: :unique, name: SymphonyElixir.RunWatcher.Registry},
+      {DynamicSupervisor, strategy: :one_for_one, name: SymphonyElixir.RunWatcher.Supervisor},
       SymphonyElixir.Orchestrator,
       SymphonyElixir.Capacity.Sampler,
       SymphonyElixir.HttpServer,

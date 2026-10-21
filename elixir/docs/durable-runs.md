@@ -69,11 +69,12 @@ Kubernetes they move behind a tool gateway.
      - run id, epoch, attempt and worker host
      - the issue
      - the backend and effort
+     - the resolved project route and workspace root
      - the account by id
      - the controller URL
      - the run token
-     The runner re-resolves its issue config and route from the same `symphony.yml` or
-     `WORKFLOW.md`.
+     The runner seeds its issue config from the spec's route and workspace root, so it does not
+     have to re-resolve a route that may only exist in the controller's stored project routes.
    - **Runner mode.** `symphony runner <spec>` boots a reduced application: config store,
      task supervisor and the outbox sender, with no orchestrator, HTTP server or dashboard. It
      then runs `AgentRunner.run/3` with `RunHost.Remote` and exits.
@@ -102,25 +103,42 @@ Kubernetes they move behind a tool gateway.
    and per-run event/finished bookkeeping), `SymphonyElixir.RunnerCommandPoller`,
    `SymphonyElixir.RunOutbox`, `SymphonyElixir.RunHost.Remote`, `SymphonyElixir.Runner` (the
    reduced runner application and `symphony runner <spec.json>`), and the orchestrator's
-   `{:run_finished, ...}` handler (logs until step 4 wires watchers). AgentInbox pushes
+   `{:run_finished, ...}` handler (step 4 forwards it to the run's watcher). AgentInbox pushes
    messages to `RunnerCommands` for runners registered as remote; the local path is unchanged.
 4. **Process launcher and watchers.** This step makes runs real processes:
    - **Launcher.** It is selected with `agent.launcher: local | process`. `process` starts
-     `symphony runner <spec>` with a command template. The default template detaches the runner
-     with `setsid`. On the VM the template is `systemd-run --user
-     --unit=symphony-run-{run_id} --collect {symphony} runner {spec}`, outside
+     `symphony runner <spec>` with the `agent.runner_command` template. Placeholders are
+     `{symphony}` (the escript path, or `SYMPHONY_BIN`), `{spec}` and `{run_id}`. The default
+     template detaches the runner with `setsid`. On the VM the template is `systemd-run --user
+     --unit=symphony-run-{run_id} --collect --property=KillMode=mixed {symphony} runner
+     {spec} --i-understand-that-this-will-be-running-without-the-usual-guardrails`, outside
      `symphony.service`'s cgroup.
    - **Watchers.** Each process run has a watcher process in the controller (under a
      DynamicSupervisor). The orchestrator monitors that watcher, so its existing `:DOWN`
      handling is unchanged.
      - The watcher exits with the reason from the run's `finished` event.
-     - If the runner disappears without one, it exits with `:runner_lost`.
-     - Heartbeat events reset the stall clock.
+     - If the runner disappears without one, it exits with `:runner_lost` after a 10s grace.
+     - Heartbeat events (every 30s) and every other event reset the stall clock; the
+       orchestrator also reads the watcher's last-seen time for process runs.
    - **Adoption.** On start, `recover_runs/1` adopts each registered run whose
-     `launcher.alive?(ref)`: it starts a watcher and puts the run back in `running`.
-   - **Cancellation** stops the systemd unit, or kills the process group.
+     `launcher.alive?(ref)` and whose launcher is still available: it starts a watcher, rebuilds
+     the running entry from the registry metadata, and puts the run back in `running` without
+     bumping the epoch or scheduling a retry. A run that is gone is retried with attempt + 1.
+   - **Event progress.** `RunnerCommands` seeds its per-run `last_seq` from `runs.json` after a
+     restart, and the controller writes the applied batch's `last_seq` (and the finished reason)
+     back to the registry. A crash between a batch being applied and that one write can still
+     replay the batch's transcript entries; it cannot apply a stage result twice because Linear
+     writes are idempotent.
+   - **Cancellation** stops the systemd unit, or kills the process group (`TERM`, then `KILL`
+     after 10s), and stops the watcher.
    - **End-to-end test.** It kills the controller mid-run, restarts it, and checks that the run
-     is adopted and completes once.
+     is adopted and completes once. The opt-in test is tagged `:e2e_process` and runs only with
+     `SYMPHONY_E2E_PROCESS=1`; the always-on integration tests cover the watcher, adoption,
+     event replay and cancellation with a real detached process.
+   Done: `SymphonyElixir.RunLauncher.Process`, `SymphonyElixir.RunWatcher` (and its
+   `Registry`/`DynamicSupervisor`), `SymphonyElixir.RunSpec` route/workspace fields,
+   `SymphonyElixir.RunRegistry` progress and issue metadata, `SymphonyElixir.RunOutbox`
+   heartbeats, and the orchestrator's dispatch, adoption, stall and cancellation wiring.
 5. **Kubernetes launcher** (Phase 3): the runner is a pod's entrypoint.
    - **Repo access.** A runner pod has no repo cache. The controller serves each
      project cache read-only at `/git/<run_id>/<repo-key>` over git smart HTTP,

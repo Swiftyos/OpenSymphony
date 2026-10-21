@@ -92,6 +92,27 @@ defmodule SymphonyElixir.RunOutboxTest do
     assert RunnerCommands.last_seq("run-1") == 62
   end
 
+  test "sends a heartbeat while the run is active", %{root: root, endpoint: endpoint} do
+    Support.record_run!("issue-1", "run-heartbeat", identifier: "MT-O-HB")
+    name = :"outbox-#{System.unique_integer([:positive])}"
+    dir = Path.join(root, "runs/run-heartbeat")
+
+    outbox =
+      start_outbox!(name,
+        run_id: "run-heartbeat",
+        base_url: endpoint.url,
+        token: RunToken.sign("run-heartbeat", 1),
+        dir: dir,
+        heartbeat_interval_ms: 20
+      )
+
+    assert eventually(fn -> RunnerCommands.last_seq("run-heartbeat") >= 1 end)
+    assert :ok = RunOutbox.flush(2_000, outbox)
+
+    assert [%{"type" => "heartbeat"} | _rest] =
+             dir |> Path.join("outbox.jsonl") |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+  end
+
   test "keeps buffering while the controller is unreachable, then replays the file", %{root: root, endpoint: endpoint} do
     Support.record_run!("issue-1", "run-2", identifier: "MT-O-2")
     name = :"outbox-#{System.unique_integer([:positive])}"
@@ -155,6 +176,8 @@ defmodule SymphonyElixir.RunOutboxTest do
 
     assert :ok = RunOutbox.flush(0, outbox)
     assert :ok = RunOutbox.flush(0)
+    send(outbox, :heartbeat)
+    Process.sleep(10)
     assert :ok = RunOutbox.append("heartbeat", %{})
     assert :ok = RunOutbox.flush(0, Path.join(root, "not-a-pid"))
   end
@@ -323,5 +346,19 @@ defmodule SymphonyElixir.RunOutboxTest do
 
     assert Process.alive?(outbox)
     assert File.exists?(Path.join([root, "runs/run-4", "outbox.jsonl"]))
+  end
+
+  defp eventually(fun, attempts \\ 100) do
+    cond do
+      fun.() ->
+        true
+
+      attempts <= 0 ->
+        false
+
+      true ->
+        Process.sleep(20)
+        eventually(fun, attempts - 1)
+    end
   end
 end

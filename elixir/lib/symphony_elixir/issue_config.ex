@@ -33,23 +33,26 @@ defmodule SymphonyElixir.IssueConfig do
   @spec resolve(map(), keyword()) :: {:ok, t()} | {:error, term()}
   def resolve(issue, opts \\ []) when is_map(issue) do
     settings = Keyword.get(opts, :settings, Config.settings!())
+    project_route = Keyword.get(opts, :project_route)
+    workspace_root = Keyword.get(opts, :workspace_root)
 
     case Config.startup_mode() do
       :global ->
-        resolve_global(issue, settings)
+        resolve_global(issue, settings, project_route, workspace_root)
 
       _ ->
-        resolve_legacy(issue, settings)
+        resolve_legacy(issue, settings, project_route)
     end
   end
 
   # A project with a repo-local WORKFLOW.md takes its prompt and agent settings
   # from it; one without takes them from Symphony (symphony.yml and the built-in
   # agent prompt). The project's own `hooks` and `prompt` win either way.
-  defp resolve_global(issue, %Schema{} = settings) do
-    case Config.linear_project_route(issue, settings) do
+  defp resolve_global(issue, %Schema{} = settings, supplied_route, workspace_root) do
+    case supplied_route || Config.linear_project_route(issue, settings) do
       %{workflow: workflow_ref} = project_route when is_binary(workflow_ref) and workflow_ref != "" ->
-        with {:ok, repo_root} <- Workspace.ensure_local_repo_cache(project_route, settings),
+        with {:ok, repo_root} <-
+               Workspace.ensure_local_repo_cache(project_route, settings, workspace_root: workspace_root),
              {:ok, workflow_path} <- Config.resolve_project_workflow_path(repo_root, workflow_ref),
              {:ok, workflow} <- ProjectWorkflow.load(workflow_path),
              {:ok, prompt} <- project_prompt(project_route, prompt_template(workflow.prompt_template)),
@@ -121,8 +124,8 @@ defmodule SymphonyElixir.IssueConfig do
 
   defp merge_project_hooks(settings, _route), do: settings
 
-  defp resolve_legacy(issue, %Schema{} = settings) do
-    project_route = Config.linear_project_route(issue, settings)
+  defp resolve_legacy(issue, %Schema{} = settings, supplied_route) do
+    project_route = supplied_route || Config.linear_project_route(issue, settings)
 
     with {:ok, workflow} <- Workflow.current(),
          {:ok, environment} <- resolve_environment(issue, settings, project_route, nil) do

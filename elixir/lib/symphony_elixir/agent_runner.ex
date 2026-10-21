@@ -66,7 +66,12 @@ defmodule SymphonyElixir.AgentRunner do
     )
 
     with :ok <- Sandbox.validate_run(route.backend, worker_host, issue_config.settings),
-         {:ok, workspace} <- Workspace.create_for_issue(issue, worker_host, settings: issue_config.settings) do
+         {:ok, workspace} <-
+           Workspace.create_for_issue(issue, worker_host,
+             settings: issue_config.settings,
+             project_route: issue_config.project_route,
+             workspace_root: Keyword.get(opts, :workspace_root)
+           ) do
       run_in_workspace(workspace, issue, host, opts, worker_host, route, issue_config)
     end
   end

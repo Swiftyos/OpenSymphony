@@ -29,6 +29,9 @@ defmodule SymphonyElixir.RunSpec do
     :worker_host,
     :backend,
     :effort,
+    :project_route,
+    :workspace_root,
+    :route,
     :account,
     :environment,
     :controller_url,
@@ -57,6 +60,11 @@ defmodule SymphonyElixir.RunSpec do
     :blocked_by
   ]
 
+  @project_route_fields [:slug, :repo, :workflow, :prompt, :hooks, :backend, :default_branch, :workspace_root, :repos, :added_by, :added_at]
+  # A multi-repo project's `repos`: the runner finds the issue's home repo among them.
+  @project_repo_fields [:name, :repo, :default_branch, :description]
+  @route_fields [:backend, :effort, :warnings]
+
   @enforce_keys [:run_id, :epoch]
   defstruct @fields
 
@@ -68,6 +76,9 @@ defmodule SymphonyElixir.RunSpec do
           worker_host: String.t() | nil,
           backend: String.t() | nil,
           effort: String.t() | nil,
+          project_route: map() | nil,
+          workspace_root: Path.t() | nil,
+          route: %{backend: String.t() | nil, effort: String.t() | nil} | nil,
           account: %{backend: String.t(), id: String.t()} | nil,
           environment: map() | nil,
           controller_url: String.t() | nil,
@@ -148,6 +159,8 @@ defmodule SymphonyElixir.RunSpec do
       encoded =
         case field do
           :issue -> encode_issue(value)
+          :project_route -> encode_project_route(value)
+          :route -> encode_route(value)
           :account -> encode_account(value)
           :environment -> encode_environment(value)
           _ -> value
@@ -164,6 +177,8 @@ defmodule SymphonyElixir.RunSpec do
       value =
         case field do
           :issue -> decode_issue(raw)
+          :project_route -> decode_project_route(raw)
+          :route -> decode_route(raw)
           :account -> decode_account(raw)
           :environment -> decode_environment(raw)
           :epoch -> raw
@@ -189,8 +204,17 @@ defmodule SymphonyElixir.RunSpec do
   defp encode_issue(%{} = issue), do: Map.new(issue, fn {key, value} -> {key, encode_value(value)} end)
   defp encode_issue(_issue), do: %{}
 
+  defp encode_project_route(%_{} = route), do: route |> Map.from_struct() |> encode_project_route()
+  defp encode_project_route(%{} = route), do: Map.new(route, fn {key, value} -> {key, encode_value(value)} end)
+  defp encode_project_route(_route), do: nil
+
+  defp encode_route(%_{} = route), do: route |> Map.from_struct() |> encode_route()
+  defp encode_route(%{} = route), do: Map.new(route, fn {key, value} -> {key, encode_value(value)} end)
+  defp encode_route(_route), do: nil
+
   defp encode_value(%DateTime{} = value), do: DateTime.to_iso8601(value)
   defp encode_value(%Date{} = value), do: Date.to_iso8601(value)
+  defp encode_value(%_{} = value), do: value |> Map.from_struct() |> encode_value()
   defp encode_value(value) when is_list(value), do: Enum.map(value, &encode_value/1)
   defp encode_value(%{} = value) when not is_struct(value), do: Map.new(value, fn {key, item} -> {key, encode_value(item)} end)
   defp encode_value(value), do: value
@@ -207,6 +231,23 @@ defmodule SymphonyElixir.RunSpec do
 
   defp decode_issue(_issue), do: %Issue{}
 
+  defp decode_project_route(%{} = route) do
+    route
+    |> decode_field_map(@project_route_fields)
+    |> Map.update(:repos, [], fn repos ->
+      for %{} = repo <- List.wrap(repos), do: decode_field_map(repo, @project_repo_fields)
+    end)
+  end
+
+  defp decode_project_route(_route), do: nil
+
+  defp decode_route(%{} = route), do: decode_field_map(route, @route_fields)
+  defp decode_route(_route), do: nil
+
+  defp decode_field_map(map, fields) do
+    Map.new(map, fn {key, value} -> {safe_atom(key, fields), decode_value(value)} end)
+  end
+
   defp issue_map(%Issue{} = issue), do: issue
 
   defp issue_map(%{} = issue) do
@@ -214,7 +255,7 @@ defmodule SymphonyElixir.RunSpec do
       issue
       |> Map.new(fn {key, value} ->
         key = if is_binary(key), do: safe_atom(key, @issue_fields), else: key
-        {key, value}
+        {key, decode_value(value)}
       end)
       |> Map.put_new(:blocked_by, [])
       |> Map.put_new(:labels, [])

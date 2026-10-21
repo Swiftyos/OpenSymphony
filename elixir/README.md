@@ -275,6 +275,49 @@ Notes:
 - `projects[].workspace_root` is optional. When omitted, Symphony uses
   `workspace.root/<project-slug>/<issue-identifier>` for multi-project workflows so different
   projects do not collide under the shared root.
+
+### Durable runs (process launcher)
+
+By default `agent.launcher` is `local`: each agent run is an in-process task, so restarting
+Symphony also stops its runs. Set the launcher to `process` to make each run a separate OS
+process that survives a controller restart:
+
+```yaml
+agent:
+  launcher: process
+  runner_command: "setsid {symphony} runner {spec} --i-understand-that-this-will-be-running-without-the-usual-guardrails"
+```
+
+`agent.runner_command` is a command template with three required placeholders:
+
+- `{symphony}` — the running escript (`:escript.script_name/0`), or `SYMPHONY_BIN` when Symphony
+  is not an escript.
+- `{spec}` — the run's owner-only `spec.json`.
+- `{run_id}` — the run id, useful for a stable unit name.
+
+The command must return immediately after starting the runner. The default uses `setsid` and
+prints the OS pid; Symphony stores `process:<pid>`. The VM template uses a transient systemd
+unit outside `symphony.service`'s cgroup:
+
+```yaml
+agent:
+  launcher: process
+  runner_command: "systemd-run --user --unit=symphony-run-{run_id} --collect --property=KillMode=mixed {symphony} runner {spec} --i-understand-that-this-will-be-running-without-the-usual-guardrails"
+```
+
+The controller recovers the run in either form (`systemctl --user is-active`/`stop` for the unit,
+or `kill -0` and a process-group `TERM`/`KILL` for the pid). On startup it adopts every registered
+run that is still alive: the run keeps its run id, epoch, workspace, token and session, the
+controller starts a watcher for it and puts it back in `running`, and no retry is scheduled. A
+run that is gone is retried with its next attempt. Heartbeats every 30s (and the watcher's
+last-seen time) keep stall detection honest while the controller is restarted. Applied event
+seqs are persisted in `~/.symphony/runs.json`, so a replayed outbox is deduplicated after a
+restart; a crash in the small window before that write can duplicate transcript entries, which
+is harmless and bounded to one batch.
+
+In short: the controller, dashboard and polling can restart; the runner, its agent process,
+workspace, transcript events and session continue, and the issue is moved exactly once by the
+runner's idempotent Linear writes.
 - `projects[].backend` is optional. When omitted, Symphony falls back to `agent.backend`.
 - In multi-project mode, repo-local `WORKFLOW.md` files (when a project names one) may define
   `hooks.*`, `agent.default_effort`, `agent.max_turns`, and the prompt body only.

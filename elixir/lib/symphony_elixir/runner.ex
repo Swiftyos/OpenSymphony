@@ -13,7 +13,9 @@ defmodule SymphonyElixir.Runner do
   require Logger
 
   alias SymphonyElixir.Accounts
+  alias SymphonyElixir.AgentRoute
   alias SymphonyElixir.AgentRunner
+  alias SymphonyElixir.IssueConfig
   alias SymphonyElixir.RunHost.Remote
   alias SymphonyElixir.RunnerCommandPoller
   alias SymphonyElixir.RunOutbox
@@ -101,29 +103,70 @@ defmodule SymphonyElixir.Runner do
     issue = RunSpec.to_issue(spec)
     account = resolve_account(spec.account)
 
-    # The run gets its own process: the agent CLIs are ports linked to it, and a
-    # port that dies (an agent that exits at once gives :epipe) would otherwise
-    # take the runner down before it could report the run's end.
-    task =
-      Task.Supervisor.async_nolink(SymphonyElixir.TaskSupervisor, fn ->
-        AgentRunner.run(issue, nil, run_host: host, attempt: spec.attempt, worker_host: spec.worker_host, account: account)
-      end)
+    case runner_issue_config(spec, issue) do
+      {:ok, issue_config} ->
+        route = runner_route(spec, issue, issue_config)
 
-    try do
-      case Task.yield(task, :infinity) do
-        {:ok, :ok} ->
-          finish(host, "normal")
-          :ok
+        # The run gets its own process: the agent CLIs are ports linked to it, and
+        # a port that dies (an agent that exits at once gives :epipe) would otherwise
+        # take the runner down before it could report the run's end.
+        task =
+          Task.Supervisor.async_nolink(SymphonyElixir.TaskSupervisor, fn ->
+            AgentRunner.run(issue, nil,
+              run_host: host,
+              attempt: spec.attempt,
+              worker_host: spec.worker_host,
+              account: account,
+              route: route,
+              issue_config: issue_config,
+              workspace_root: spec.workspace_root
+            )
+          end)
 
-        {:exit, reason} ->
-          message = exit_message(reason)
-          finish(host, message)
-          {:error, message}
-      end
-    after
-      RunOutbox.flush(@flush_timeout_ms)
+        try do
+          case Task.yield(task, :infinity) do
+            {:ok, :ok} ->
+              finish(host, "normal")
+              :ok
+
+            {:exit, reason} ->
+              message = exit_message(reason)
+              finish(host, message)
+              {:error, message}
+          end
+        after
+          RunOutbox.flush(@flush_timeout_ms)
+        end
+
+      {:error, reason} ->
+        message = "runner config failed: #{inspect(reason, limit: 10)}"
+        finish(host, message)
+        {:error, message}
     end
   end
+
+  # The spec carries everything the controller resolved at dispatch: the
+  # project route, its workspace root and the backend/effort. The runner uses
+  # those instead of looking the route up again, so a route added through MCP
+  # or a dashboard stage control still works when this process is a fresh BEAM.
+  defp runner_issue_config(%RunSpec{} = spec, issue) do
+    IssueConfig.resolve(issue,
+      project_route: spec.project_route,
+      workspace_root: spec.workspace_root
+    )
+  end
+
+  defp runner_route(%RunSpec{route: %{} = route}, _issue, issue_config) do
+    %AgentRoute{
+      backend: route_value(route, :backend) || issue_config.settings.agent.backend,
+      effort: route_value(route, :effort),
+      warnings: route_value(route, :warnings) || []
+    }
+  end
+
+  defp runner_route(%RunSpec{}, issue, issue_config), do: AgentRoute.resolve(issue, issue_config.settings)
+
+  defp route_value(route, key), do: Map.get(route, key) || Map.get(route, Atom.to_string(key))
 
   defp exit_message({%{__exception__: true} = exception, _stacktrace}), do: Exception.message(exception)
   defp exit_message(reason), do: inspect(reason, limit: 10)
