@@ -7,9 +7,9 @@ defmodule SymphonyElixir.FactoryEditorTest do
   import Phoenix.ConnTest
   import Phoenix.LiveViewTest
 
-  alias SymphonyElixir.{Auth, FactoryControls, IssueStage, SessionHistory, Tracker, UsageLedger, Users}
+  alias SymphonyElixir.{Auth, Config, FactoryControls, IssueStage, SessionHistory, Tracker, UsageLedger, Users}
   alias SymphonyElixir.Factory.{Definition, StagePrompt, Store}
-  alias SymphonyElixir.Linear.Adapter
+  alias SymphonyElixir.Linear.{Adapter, Client}
   alias SymphonyElixirWeb.{FactoryPresenter, Visibility}
 
   @endpoint SymphonyElixirWeb.Endpoint
@@ -208,6 +208,8 @@ defmodule SymphonyElixir.FactoryEditorTest do
       {:ok, _} = Store.put("PAY", %{definition | "stages" => definition["stages"] ++ [qa]}, 0, "mia")
 
       assert "QA" in IssueStage.active_state_names()
+      # The Linear poll fetches them too, not only tracker.active_states.
+      assert "QA" in Client.candidate_states(Config.settings!())
       assert Map.keys(FactoryControls.all("PAY")) |> Enum.sort() == ["implement", "merge", "qa", "rework", "todo"]
       # No team: the organisation default flow.
       assert Map.keys(FactoryControls.all()) |> Enum.sort() == ["implement", "merge", "rework", "todo"]

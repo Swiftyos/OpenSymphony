@@ -5,7 +5,7 @@ defmodule SymphonyElixir.Linear.Client do
 
   require Logger
   alias SymphonyElixir.Capacity.Metrics
-  alias SymphonyElixir.{Config, Linear.Issue}
+  alias SymphonyElixir.{Config, IssueStage, Linear.Issue}
 
   @issue_page_size 50
   @max_error_body_log_bytes 1_000
@@ -137,10 +137,18 @@ defmodule SymphonyElixir.Linear.Client do
 
       true ->
         with {:ok, assignee_filter} <- routing_assignee_filter() do
-          do_fetch_by_states(project_slugs, tracker.active_states, assignee_filter)
+          do_fetch_by_states(project_slugs, candidate_states(settings), assignee_filter)
         end
     end
   end
+
+  @doc """
+  The Linear states candidate issues are fetched in: `tracker.active_states` plus every state a saved
+  flow dispatches from, so a flow stage in a state the config doesn't list (a new or renamed state)
+  is still picked up.
+  """
+  @spec candidate_states(SymphonyElixir.Config.Schema.t()) :: [String.t()]
+  def candidate_states(settings), do: IssueStage.active_state_names(settings)
 
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_states(state_names) when is_list(state_names) do
