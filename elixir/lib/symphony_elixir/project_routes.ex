@@ -148,6 +148,25 @@ defmodule SymphonyElixir.ProjectRoutes do
     backend = string(attrs, "backend", nil)
     environment = string(attrs, "environment", nil)
 
+    with :ok <- validate_route_fields(slug, repo, workflow, branch, backend),
+         :ok <- validate_environment(environment),
+         {:ok, repos} <- validate_repos(Map.get(attrs, "repos"), repo) do
+      {:ok,
+       %{
+         slug: slug,
+         repo: repo,
+         workflow: workflow,
+         default_branch: branch,
+         backend: backend,
+         repos: repos,
+         environment: environment,
+         added_by: added_by,
+         added_at: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+       }}
+    end
+  end
+
+  defp validate_route_fields(slug, repo, workflow, branch, backend) do
     cond do
       not Regex.match?(@slug_pattern, slug) ->
         {:error, "slug must be the Linear project's slug id (the hex part of its URL, e.g. 9e8d7c6b5a40)."}
@@ -164,25 +183,17 @@ defmodule SymphonyElixir.ProjectRoutes do
       backend not in [nil | @backends] ->
         {:error, "backend must be one of #{Enum.join(@backends, ", ")}, or left out for the default."}
 
-      not (is_nil(environment) or Regex.match?(@environment_pattern, environment)) ->
-        {:error, "environment must be a catalog environment name (lowercase letters, digits, dots, underscores, or dashes)."}
-
       true ->
-        with {:ok, repos} <- validate_repos(Map.get(attrs, "repos"), repo) do
-          {:ok,
-           %{
-             slug: slug,
-             repo: repo,
-             workflow: workflow,
-             default_branch: branch,
-             backend: backend,
-             repos: repos,
-             environment: environment,
-             added_by: added_by,
-             added_at: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
-           }}
-        end
+        :ok
     end
+  end
+
+  defp validate_environment(nil), do: :ok
+
+  defp validate_environment(environment) do
+    if Regex.match?(@environment_pattern, environment),
+      do: :ok,
+      else: {:error, "environment must be a catalog environment name (lowercase letters, digits, dots, underscores, or dashes)."}
   end
 
   # The project's other repos, held to the same rules as the primary one.
