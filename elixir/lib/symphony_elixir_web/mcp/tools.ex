@@ -42,7 +42,7 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
       name: "get_manual",
       scope: "read",
       description:
-        "Symphony's manual: what Symphony is, its concepts (projects, flows, stages, transitions), an issue's life, where people step in, every tool here, and recipes. Call it first when asked what this is or how it works.",
+        "Symphony's manual: what Symphony is, its concepts (projects, flows, stages, transitions), an issue's life, what agents are told and where that is configured, projects with several repos and blocking between them, where people step in, every tool here, and recipes. Call it first when asked what this is or how it works.",
       properties: %{
         section: %{
           type: "string",
