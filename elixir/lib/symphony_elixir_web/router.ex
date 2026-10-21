@@ -76,6 +76,7 @@ defmodule SymphonyElixirWeb.Router do
     pipe_through([:browser, :signed_in])
 
     get("/account", AuthController, :account)
+    get("/account/mcp", AuthController, :mcp_tokens)
     post("/account/password", AuthController, :update_password)
     post("/account/mcp-tokens", AuthController, :create_mcp_token)
     post("/account/mcp-tokens/:id/revoke", AuthController, :revoke_mcp_token)

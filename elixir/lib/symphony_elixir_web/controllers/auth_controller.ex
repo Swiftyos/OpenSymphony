@@ -129,7 +129,21 @@ defmodule SymphonyElixirWeb.AuthController do
   def account(conn, _params) do
     # The signed-in pipeline guarantees a user here.
     user = conn.assigns.current_user
-    if show_account?(user), do: render_page(conn, :account, %{user: user}), else: redirect(conn, to: "/")
+
+    cond do
+      not user.local -> render_page(conn, :account, %{user: user})
+      mcp_enabled?() -> redirect(conn, to: "/account/mcp")
+      true -> redirect(conn, to: "/")
+    end
+  end
+
+  @spec mcp_tokens(Plug.Conn.t(), map()) :: Plug.Conn.t()
+  def mcp_tokens(conn, _params) do
+    if mcp_enabled?() do
+      render_page(conn, :mcp_tokens, %{user: conn.assigns.current_user})
+    else
+      redirect(conn, to: "/")
+    end
   end
 
   @doc """
@@ -150,10 +164,10 @@ defmodule SymphonyElixirWeb.AuthController do
         redirect(conn, to: "/")
 
       McpTokens.revoke(token_owner(user), id) == :ok ->
-        render_page(conn, :account, %{user: user, token_notice: "Token revoked. Agents using it are cut off now."})
+        render_page(conn, :mcp_tokens, %{user: user, token_notice: "Token revoked. Agents using it are cut off now."})
 
       true ->
-        conn |> put_status(404) |> render_page(:account, %{user: user, token_error: error(:not_found)})
+        conn |> put_status(404) |> render_page(:mcp_tokens, %{user: user, token_error: error(:not_found)})
     end
   end
 
@@ -165,9 +179,9 @@ defmodule SymphonyElixirWeb.AuthController do
 
     with true <- Enum.all?(resources, &Auth.token_resource_allowed?(user, &1)) || {:error, :resource_not_allowed},
          {:ok, secret, token} <- McpTokens.create(token_owner(user), params["name"] || "", scopes, parse_days(params["days"]), resources) do
-      render_page(conn, :account, %{user: user, new_token: %{secret: secret, token: token}})
+      render_page(conn, :mcp_tokens, %{user: user, new_token: %{secret: secret, token: token}})
     else
-      {:error, reason} -> conn |> put_status(422) |> render_page(:account, %{user: user, token_error: error(reason)})
+      {:error, reason} -> conn |> put_status(422) |> render_page(:mcp_tokens, %{user: user, token_error: error(reason)})
     end
   end
 
@@ -192,10 +206,6 @@ defmodule SymphonyElixirWeb.AuthController do
   defp resource_label("*"), do: "Everything (admin)"
   defp resource_label("project:" <> slug), do: "Project #{get_in(UsageLedger.projects(), [slug, :name]) || slug}"
   defp resource_label(team), do: "Team #{team}"
-
-  # The local operator has no account, so only the token section shows.
-  defp show_account?(%Auth.User{local: true}), do: mcp_enabled?()
-  defp show_account?(%Auth.User{}), do: true
 
   defp token_owner(%Auth.User{local: true}), do: "local"
   defp token_owner(%Auth.User{id: id}), do: id
@@ -295,9 +305,9 @@ defmodule SymphonyElixirWeb.AuthController do
           token_notice: nil,
           mcp?: mcp_enabled?(),
           mcp_url: mcp_url(conn),
-          tokens: if(page == :account, do: tokens_for(extra.user), else: []),
-          lifetimes: if(mcp_enabled?(), do: lifetime_choices(), else: []),
-          resource_choices: if(page == :account and mcp_enabled?(), do: resource_choices(extra.user), else: []),
+          tokens: if(page == :mcp_tokens, do: tokens_for(extra.user), else: []),
+          lifetimes: if(page == :mcp_tokens and mcp_enabled?(), do: lifetime_choices(), else: []),
+          resource_choices: if(page == :mcp_tokens and mcp_enabled?(), do: resource_choices(extra.user), else: []),
           csrf_token: CSRFProtection.get_csrf_token(),
           instance: Config.instance_name() || "Symphony"
         },
@@ -321,7 +331,7 @@ defmodule SymphonyElixirWeb.AuthController do
       </head>
       <body>
         <main class="login-shell">
-          <div class="login-card">
+          <div class={["login-card", @page == :mcp_tokens && "is-wide"]}>
             <img :if={is_binary(SymphonyElixir.Config.instance_logo())} class="brand-logo login-logo" src="/branding/logo" alt="" />
             <svg :if={!is_binary(SymphonyElixir.Config.instance_logo())} class="brand-mark login-mark" viewBox="0 0 32 32" aria-hidden="true">
               <path d="M6 22 L13 10 L19 18 L26 8" />
@@ -422,57 +432,61 @@ defmodule SymphonyElixirWeb.AuthController do
                   <p :if={@error} class="login-error" role="alert">{@error}</p>
                   <button class="login-button" type="submit">Change password</button>
                 </form>
-                <section :if={@mcp?} class="login-form mcp-tokens" aria-labelledby="mcp-tokens-title">
-                  <h2 id="mcp-tokens-title" class="login-label">MCP tokens for agents</h2>
-                  <p class="login-help">
-                    Agents use these to watch and steer Symphony at <code>{@mcp_url}</code>. A token can do what you can do, never more,
-                    and stops working if your account is disabled.
-                  </p>
-                  <div :if={@new_token} class="login-notice" role="status">
-                    <p>Copy this token now. It won't be shown again.</p>
-                    <input class="login-input" readonly value={@new_token.secret} onclick="this.select()" aria-label="New token" />
-                    <p class="login-help">For Claude Code:</p>
-                    <pre class="mcp-snippet">claude mcp add --transport http symphony {@mcp_url} --header "Authorization: Bearer {@new_token.secret}"</pre>
-                  </div>
-                  <p :if={@token_notice} class="login-notice" role="status">{@token_notice}</p>
-                  <p :if={@token_error} class="login-error" role="alert">{@token_error}</p>
-                  <ul :if={@tokens != []} class="mcp-token-list">
-                    <li :for={token <- @tokens}>
-                      <strong>{token.name}</strong>
-                      · {Enum.join(token.scopes, " + ")} on {Enum.map_join(token.resources, ", ", &resource_label/1)}
-                      · <code>{token.hint}</code>
-                      · expires {String.slice(token.expires_at || "", 0, 10)}
-                      · {if token.last_used_at, do: "last used #{String.slice(token.last_used_at, 0, 10)}", else: "never used"}
-                      <form method="post" action={"/account/mcp-tokens/#{token.id}/revoke"} style="display:inline">
-                        <input type="hidden" name="_csrf_token" value={@csrf_token} />
-                        <button class="login-link-button" type="submit">Revoke</button>
-                      </form>
-                    </li>
-                  </ul>
-                  <form class="login-form" method="post" action="/account/mcp-tokens">
-                    <input type="hidden" name="_csrf_token" value={@csrf_token} />
-                    <label class="login-label" for="token_name">Name</label>
-                    <input id="token_name" class="login-input" name="name" maxlength="60" placeholder="e.g. ops agent" required />
-                    <label class="login-label" for="token_access">Access</label>
-                    <select id="token_access" class="login-input" name="access">
-                      <option value="read">Read only: status, flows, issues, transcripts</option>
-                      <option value="write">Read and write: also edit flows, move issues, message agents</option>
-                    </select>
-                    <fieldset class="mcp-resources">
-                      <legend class="login-label">Can reach</legend>
-                      <label :for={resource <- @resource_choices} class="login-help">
-                        <input type="checkbox" name="resources[]" value={resource} /> {resource_label(resource)}
-                      </label>
-                      <p :if={@resource_choices == []} class="login-help">You aren't in any Linear team yet, so there's nothing a token could reach.</p>
-                    </fieldset>
-                    <label class="login-label" for="token_days">Expires after</label>
-                    <select id="token_days" class="login-input" name="days">
-                      <option :for={days <- @lifetimes} value={days} selected={days == 30}>{days} days</option>
-                    </select>
-                    <button class="login-button" type="submit">Create token</button>
-                  </form>
-                </section>
+                <p :if={@mcp?} class="login-help">Agents and tools connect with <a href="/account/mcp">MCP tokens</a>.</p>
                 <p class="login-help"><a href="/">Back to the dashboard</a></p>
+              <% :mcp_tokens -> %>
+                <h1 class="login-title">MCP tokens</h1>
+                <p class="login-help">
+                  Agents use these to watch and steer Symphony at <code>{@mcp_url}</code>. A token can do what you can do, never more,
+                  and stops working if your account is disabled.
+                </p>
+                <div :if={@new_token} class="login-notice" role="status">
+                  <p>Copy this token now. It won't be shown again.</p>
+                  <input class="login-input" readonly value={@new_token.secret} onclick="this.select()" aria-label="New token" />
+                  <p class="login-help">For Claude Code:</p>
+                  <pre class="mcp-snippet">claude mcp add --transport http symphony {@mcp_url} --header "Authorization: Bearer {@new_token.secret}"</pre>
+                </div>
+                <p :if={@token_notice} class="login-notice" role="status">{@token_notice}</p>
+                <p :if={@token_error} class="login-error" role="alert">{@token_error}</p>
+                <ul :if={@tokens != []} class="mcp-token-list">
+                  <li :for={token <- @tokens}>
+                    <strong>{token.name}</strong>
+                    · {Enum.join(token.scopes, " + ")} on {Enum.map_join(token.resources, ", ", &resource_label/1)}
+                    · <code>{token.hint}</code>
+                    · expires {String.slice(token.expires_at || "", 0, 10)}
+                    · {if token.last_used_at, do: "last used #{String.slice(token.last_used_at, 0, 10)}", else: "never used"}
+                    <form method="post" action={"/account/mcp-tokens/#{token.id}/revoke"} style="display:inline">
+                      <input type="hidden" name="_csrf_token" value={@csrf_token} />
+                      <button class="login-link-button" type="submit">Revoke</button>
+                    </form>
+                  </li>
+                </ul>
+                <form class="login-form" method="post" action="/account/mcp-tokens">
+                  <input type="hidden" name="_csrf_token" value={@csrf_token} />
+                  <label class="login-label" for="token_name">Name</label>
+                  <input id="token_name" class="login-input" name="name" maxlength="60" placeholder="e.g. ops agent" required />
+                  <label class="login-label" for="token_access">Access</label>
+                  <select id="token_access" class="login-input" name="access">
+                    <option value="read">Read only: status, flows, issues, transcripts</option>
+                    <option value="write">Read and write: also edit flows, move issues, message agents</option>
+                  </select>
+                  <fieldset class="mcp-resources">
+                    <legend class="login-label">Can reach</legend>
+                    <label :for={resource <- @resource_choices} class="login-help">
+                      <input type="checkbox" name="resources[]" value={resource} /> {resource_label(resource)}
+                    </label>
+                    <p :if={@resource_choices == []} class="login-help">You aren't in any Linear team yet, so there's nothing a token could reach.</p>
+                  </fieldset>
+                  <label class="login-label" for="token_days">Expires after</label>
+                  <select id="token_days" class="login-input" name="days">
+                    <option :for={days <- @lifetimes} value={days} selected={days == 30}>{days} days</option>
+                  </select>
+                  <button class="login-button" type="submit">Create token</button>
+                </form>
+                <p class="login-help">
+                  <a href="/">Back to the dashboard</a>
+                  <span :if={!@user.local}> · <a href="/account">Account &amp; password</a></span>
+                </p>
               <% :reset -> %>
                 <h1 class="login-title">Set a new password</h1>
                 <p :if={@username} class="login-copy">For <strong>@{@username}</strong>.</p>
@@ -516,6 +530,7 @@ defmodule SymphonyElixirWeb.AuthController do
   defp page_title(:signup), do: "Create account"
   defp page_title(:pending), do: "Request sent"
   defp page_title(:account), do: "Your account"
+  defp page_title(:mcp_tokens), do: "MCP tokens"
   defp page_title(:reset), do: "Set a new password"
   defp page_title(:message), do: "Symphony"
 end

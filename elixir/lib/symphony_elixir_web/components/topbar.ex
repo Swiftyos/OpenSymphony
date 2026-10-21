@@ -73,6 +73,7 @@ defmodule SymphonyElixirWeb.Topbar do
               <span>{role(@current_user)}</span>
             </p>
             <a href="/account">Account &amp; password</a>
+            <a :if={mcp_enabled?()} href="/account/mcp">MCP tokens</a>
             <a href="/api/v1/state">State API</a>
             <a href="/metrics">Prometheus metrics</a>
             <a :if={Auth.can_manage_access?(@current_user)} href="/admin/users">Users</a>
@@ -105,6 +106,8 @@ defmodule SymphonyElixirWeb.Topbar do
   end
 
   defp logo?, do: is_binary(SymphonyElixir.Config.instance_logo())
+
+  defp mcp_enabled?, do: SymphonyElixir.Config.settings!().server.mcp.enabled == true
 
   defp role(user) do
     teams = Enum.map_join(user.teams, ", ", & &1.key)

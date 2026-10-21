@@ -360,10 +360,10 @@ defmodule SymphonyElixir.McpToolsTest do
 
   describe "scoping tokens to teams and projects" do
     test "members pick only their teams; only admins can give everything", %{mia: mia, admin: admin} do
-      page = session_for(mia) |> get("/account") |> html_response(200)
+      page = session_for(mia) |> get("/account/mcp") |> html_response(200)
       assert page =~ "Team PAY"
       refute page =~ "Everything (admin)"
-      assert session_for(admin) |> get("/account") |> html_response(200) =~ "Everything (admin)"
+      assert session_for(admin) |> get("/account/mcp") |> html_response(200) =~ "Everything (admin)"
 
       for resources <- [["*"], ["WEB"], ["PAY", "project:elsewhere"]] do
         denied = session_for(mia) |> post("/account/mcp-tokens", %{"name" => "x", "days" => "7", "resources" => resources})
@@ -423,6 +423,14 @@ defmodule SymphonyElixir.McpToolsTest do
   end
 
   describe "account page" do
+    test "links to the token page and no longer shows the token form", %{mia: mia} do
+      page = session_for(mia) |> get("/account") |> html_response(200)
+      assert page =~ ~s(href="/account/mcp")
+      assert page =~ "Agents and tools connect with"
+      refute page =~ "Create token"
+      refute page =~ "MCP tokens for agents"
+    end
+
     test "explains errors and hides itself when MCP is off", %{mia: mia} do
       bad = session_for(mia) |> post("/account/mcp-tokens", %{"name" => "", "access" => "read", "days" => "abc"})
       assert html_response(bad, 422) =~ "Give the token a name"
@@ -431,13 +439,25 @@ defmodule SymphonyElixir.McpToolsTest do
 
       write_config!(nil)
       refute session_for(mia) |> get("/account") |> html_response(200) =~ "MCP tokens"
+      assert session_for(mia) |> get("/account/mcp") |> redirected_to() == "/"
       assert session_for(mia) |> post("/account/mcp-tokens", %{"name" => "x"}) |> redirected_to() == "/"
       assert session_for(mia) |> post("/account/mcp-tokens/tok_x/revoke") |> redirected_to() == "/"
     end
 
+    test "the token page shows tokens and the create form", %{mia: mia} do
+      {:ok, _secret, token} = McpTokens.create(mia.id, "existing bot", ["read"], 7, ["PAY"])
+      page = session_for(mia) |> get("/account/mcp") |> html_response(200)
+      assert page =~ "MCP tokens"
+      assert page =~ "existing bot"
+      assert page =~ token.hint
+      assert page =~ "Create token"
+      assert page =~ ~s(href="/account")
+    end
+
     test "the local operator gets a token page when MCP is on" do
       write_config!("    enabled: true", server_host: "127.0.0.1")
-      assert build_conn() |> get("/account") |> html_response(200) =~ "Agent access"
+      assert build_conn() |> get("/account") |> redirected_to() == "/account/mcp"
+      assert build_conn() |> get("/account/mcp") |> html_response(200) =~ "MCP tokens"
 
       created = build_conn() |> post("/account/mcp-tokens", %{"name" => "ops", "days" => "7", "resources" => ["*"]}) |> html_response(200)
       assert created =~ "shown again"
@@ -445,6 +465,7 @@ defmodule SymphonyElixir.McpToolsTest do
 
       write_config!(nil, server_host: "127.0.0.1")
       assert build_conn() |> get("/account") |> redirected_to() == "/"
+      assert build_conn() |> get("/account/mcp") |> redirected_to() == "/"
     end
   end
 

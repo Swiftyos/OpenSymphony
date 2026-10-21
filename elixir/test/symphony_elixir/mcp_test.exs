@@ -256,9 +256,9 @@ defmodule SymphonyElixir.McpTest do
       assert {:error, :too_many_tokens} = McpTokens.create(mia.id, "t21", ["read"], 7, ["PAY"])
     end
 
-    test "are created and revoked from the account page", %{mia: mia} do
-      page = session_for(mia) |> get("/account") |> html_response(200)
-      assert page =~ "MCP tokens for agents"
+    test "are created and revoked from the token page", %{mia: mia} do
+      page = session_for(mia) |> get("/account/mcp") |> html_response(200)
+      assert page =~ "MCP tokens"
 
       created =
         session_for(mia)

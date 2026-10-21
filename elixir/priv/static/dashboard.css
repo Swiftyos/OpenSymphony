@@ -1798,6 +1798,7 @@ pre {
 
 .login-card {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
   width: min(420px, 100%);
   padding: 28px;
@@ -1805,6 +1806,10 @@ pre {
   border-radius: 18px;
   background: var(--surface);
   box-shadow: var(--shadow-pop);
+}
+
+.login-card.is-wide {
+  width: min(640px, 100%);
 }
 
 .login-mark {
@@ -1844,6 +1849,9 @@ pre {
 }
 
 .login-input {
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
   padding: 10px 12px;
   border: 1px solid var(--line-strong);
   border-radius: 10px;
@@ -1887,6 +1895,7 @@ pre {
 
 .login-form {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
 }
 
@@ -4425,13 +4434,7 @@ a.brand:hover {
   overflow-y: auto;
 }
 
-/* MCP tokens on the account page */
-.mcp-tokens {
-  margin-top: 18px;
-  padding-top: 14px;
-  border-top: 1px solid var(--line, rgba(0, 0, 0, 0.1));
-}
-
+/* MCP tokens on the token page */
 .mcp-tokens code,
 .mcp-snippet {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -4446,6 +4449,11 @@ a.brand:hover {
   word-break: break-all;
   border-radius: 9px;
   background: var(--paper-2, rgba(0, 0, 0, 0.05));
+}
+
+.mcp-token-list li,
+.mcp-tokens code {
+  overflow-wrap: anywhere;
 }
 
 .mcp-token-list {

@@ -853,7 +853,8 @@ server:
     # token_max_days: 90                # longest token lifetime; every token expires
 ```
 
-**Tokens.** Each person creates their own on their **Account** page (`/account`). A token has a name,
+**Tokens.** Each person creates their own on the **MCP tokens** page (`/account/mcp`, also in the
+top-right menu). A token has a name,
 read-only or read-and-write access, what it can reach, and a lifetime. It can reach either specific
 teams and projects, or **everything**, which is for admins only. Members can pick only the teams they
 belong to and the projects they work in. A token limited to teams or projects never has admin
@@ -862,7 +863,7 @@ An "everything" token stops working if its owner stops being an admin. The token
 `~/.symphony/mcp_tokens.json` (0600). A token acts as its owner and can never do more than they
 can. Every request re-checks the account, so disabling someone, or them losing a Linear team or
 admin rights, applies to their tokens at once. Revoke a token from the same page. Without sign-in
-(`local` mode), the local operator gets the same page at `/account`. Their tokens act as the local
+(`local` mode), the local operator gets the same page at `/account/mcp`. Their tokens act as the local
 operator and stop working if Symphony switches to accounts.
 
 Connect Claude Code:
