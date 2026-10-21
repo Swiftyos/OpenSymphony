@@ -1,6 +1,9 @@
 defmodule SymphonyElixir.AccountsCoverageProviderTest do
   use SymphonyElixir.TestSupport
 
+  # Real git/process/HTTP integration; excluded by `make test-fast`.
+  @moduletag :slow
+
   import ExUnit.CaptureIO
 
   alias SymphonyElixir.Accounts

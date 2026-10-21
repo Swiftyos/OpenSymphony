@@ -20,7 +20,9 @@ end
 
 config :symphony_elixir,
   startup_mode: :legacy,
-  workflow_file_path: bootstrap_workflow
+  workflow_file_path: bootstrap_workflow,
+  # Keep test logs out of the checkout and under the per-partition TMPDIR.
+  log_file: Path.join(System.tmp_dir!(), "symphony-elixir-test.log")
 
 # Keep the usage ledger in memory during tests; never touch ~/.symphony.
 config :symphony_elixir,
@@ -47,4 +49,8 @@ config :symphony_elixir,
   # Tests sync labels explicitly.
   label_sync_on_boot: false,
   # Tests start the repo cache refresher explicitly when they need it.
-  repo_cache_refresher_enabled: false
+  repo_cache_refresher_enabled: false,
+  # Keep retry/backoff sleeps short; the tests still exercise the retry paths.
+  run_host_remote_retry_sleep_ms: 5,
+  runner_command_error_backoff_ms: 50,
+  workflow_store_poll_interval_ms: 50

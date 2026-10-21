@@ -1,6 +1,9 @@
 defmodule SymphonyElixir.FactoryAssistantTest do
   use SymphonyElixir.TestSupport
 
+  # Real git/process/HTTP integration; excluded by `make test-fast`.
+  @moduletag :slow
+
   alias SymphonyElixir.Factory.{Assistant, Definition}
 
   test "parses claude's JSON wrapper, fenced JSON, and prose around the object" do

@@ -1,6 +1,9 @@
 defmodule SymphonyElixir.RunOutboxTest do
   use SymphonyElixir.TestSupport
 
+  # Real git/process/HTTP integration; excluded by `make test-fast`.
+  @moduletag :slow
+
   import ExUnit.CaptureLog
 
   alias SymphonyElixir.RunnerCommands
@@ -288,7 +291,12 @@ defmodule SymphonyElixir.RunOutboxTest do
 
     try do
       RunOutbox.append(outbox, "heartbeat", %{})
-      Process.sleep(500)
+
+      SymphonyElixir.TestSupport.wait_until(
+        fn -> RunnerCommands.last_seq("run-fresh") == 1 end,
+        2_000
+      )
+
       assert RunnerCommands.last_seq("run-fresh") == 1
       assert :ok = RunOutbox.flush(0, outbox)
     after

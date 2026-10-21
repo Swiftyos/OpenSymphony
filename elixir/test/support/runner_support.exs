@@ -46,7 +46,7 @@ defmodule SymphonyElixir.RunnerTestSupport do
       previous
       |> Keyword.merge(
         server: true,
-        http: [ip: {127, 0, 0, 1}, port: 0],
+        http: [ip: {127, 0, 0, 1}, port: 0, thousand_island_options: [shutdown_timeout: 100]],
         secret_key_base: secret,
         orchestrator: name,
         snapshot_timeout_ms: 200,

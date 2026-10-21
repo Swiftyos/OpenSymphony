@@ -1,6 +1,9 @@
 defmodule SymphonyElixir.SSHTest do
   use ExUnit.Case, async: false
 
+  # Real git/process/HTTP integration; excluded by `make test-fast`.
+  @moduletag :slow
+
   alias SymphonyElixir.SSH
 
   test "run/3 keeps bracketed IPv6 host:port targets intact" do
@@ -182,7 +185,7 @@ defmodule SymphonyElixir.SSHTest do
     System.put_env("PATH", fake_bin_dir <> ":" <> (System.get_env("PATH") || ""))
   end
 
-  defp wait_for_trace!(trace_file, attempts \\ 20)
+  defp wait_for_trace!(trace_file, attempts \\ 200)
   defp wait_for_trace!(trace_file, 0), do: flunk("timed out waiting for fake ssh trace at #{trace_file}")
 
   defp wait_for_trace!(trace_file, attempts) do

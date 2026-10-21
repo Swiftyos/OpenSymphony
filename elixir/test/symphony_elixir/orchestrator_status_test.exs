@@ -2268,6 +2268,9 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   test "application stop renders offline status" do
+    # Call the application callback directly: stopping the real application
+    # would tear down the shared test VM and make every later test depend on
+    # test order. The callback is the behavior under test here.
     rendered =
       ExUnit.CaptureIO.capture_io(fn ->
         assert :ok = SymphonyElixir.Application.stop(:normal)

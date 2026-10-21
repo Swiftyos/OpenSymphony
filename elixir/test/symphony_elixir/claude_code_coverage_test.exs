@@ -1,6 +1,9 @@
 defmodule SymphonyElixir.ClaudeCodeCoverageTest do
   use SymphonyElixir.TestSupport
 
+  # Real git/process/HTTP integration; excluded by `make test-fast`.
+  @moduletag :slow
+
   import ExUnit.CaptureLog
 
   alias SymphonyElixir.ClaudeCode.AppServer, as: ClaudeAppServer
@@ -525,7 +528,7 @@ defmodule SymphonyElixir.ClaudeCodeCoverageTest do
     wait_until!(fn -> File.exists?(path) and File.read!(path) != "" end)
   end
 
-  defp wait_until!(fun, attempts \\ 200)
+  defp wait_until!(fun, attempts \\ 500)
   defp wait_until!(_fun, 0), do: flunk("timed out waiting for condition")
 
   defp wait_until!(fun, attempts) do

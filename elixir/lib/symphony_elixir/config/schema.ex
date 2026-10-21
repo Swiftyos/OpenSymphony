@@ -251,7 +251,9 @@ defmodule SymphonyElixir.Config.Schema do
 
     @primary_key false
     embedded_schema do
-      field(:root, :string, default: Path.join(System.tmp_dir!(), "symphony_workspaces"))
+      # Resolved at parse time, not compile time, so a test run or a long-lived
+      # build's TMPDIR is honored.
+      field(:root, :string)
       embeds_one(:repo_cache, RepoCache, on_replace: :update, defaults_to_struct: true)
     end
 
@@ -1366,6 +1368,8 @@ defmodule SymphonyElixir.Config.Schema do
       resolved -> resolved
     end
   end
+
+  defp resolve_path_value(nil, default, _base_dir), do: default
 
   defp resolve_path_value(value, default, base_dir) when is_binary(value) do
     case normalize_path_token(value) do

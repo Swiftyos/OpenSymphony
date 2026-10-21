@@ -1,6 +1,9 @@
 defmodule Mix.Tasks.Workspace.BeforeRemoveTest do
   use ExUnit.Case, async: false
 
+  # Real git/process/HTTP integration; excluded by `make test-fast`.
+  @moduletag :slow
+
   alias Mix.Tasks.Workspace.BeforeRemove
 
   import ExUnit.CaptureIO

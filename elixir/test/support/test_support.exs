@@ -37,6 +37,9 @@ defmodule SymphonyElixir.TestSupport do
         ]
 
       setup do
+        Application.delete_env(:symphony_elixir, :app_mode)
+        SymphonyElixir.TestSupport.ensure_default_app!()
+
         workflow_root =
           Path.join(
             System.tmp_dir!(),
@@ -50,6 +53,7 @@ defmodule SymphonyElixir.TestSupport do
         if Process.whereis(SymphonyElixir.WorkflowStore), do: SymphonyElixir.WorkflowStore.force_reload()
         stop_default_orchestrator()
         stop_default_http_server()
+        SymphonyElixir.TestSupport.ensure_default_app!()
 
         on_exit(fn ->
           Application.delete_env(:symphony_elixir, :workflow_file_path)
@@ -59,6 +63,7 @@ defmodule SymphonyElixir.TestSupport do
           Application.delete_env(:symphony_elixir, :memory_tracker_issues)
           Application.delete_env(:symphony_elixir, :memory_tracker_comment_ids)
           Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
+          Application.delete_env(:symphony_elixir, :app_mode)
           File.rm_rf(workflow_root)
         end)
 
@@ -103,44 +108,118 @@ defmodule SymphonyElixir.TestSupport do
     :ok
   end
 
+  # Polls instead of sleeping a fixed amount, so a loaded machine does not make
+  # a test race the code it is waiting for.
+  def wait_until(fun, timeout_ms \\ 1_000) when is_function(fun, 0) do
+    deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
+    do_wait_until(fun, deadline_ms)
+  end
+
+  defp do_wait_until(fun, deadline_ms) do
+    if fun.() do
+      :ok
+    else
+      if System.monotonic_time(:millisecond) >= deadline_ms do
+        raise "timed out waiting for condition"
+      else
+        Process.sleep(5)
+        do_wait_until(fun, deadline_ms)
+      end
+    end
+  end
+
+  # Tests share one VM, and a few deliberately stop application children (or
+  # used to stop the whole application). Make every test start from the same
+  # baseline instead of inheriting whichever child a previous test left down.
+  def ensure_default_app! do
+    ensure_default_app!(200)
+  end
+
+  defp ensure_default_app!(0), do: raise("the Symphony application could not be started")
+
+  defp ensure_default_app!(attempts) do
+    supervisor = Process.whereis(SymphonyElixir.Supervisor)
+    workflow_store = Process.whereis(SymphonyElixir.WorkflowStore)
+
+    if is_pid(supervisor) and is_pid(workflow_store) do
+      :ok
+    else
+      _ = Application.ensure_all_started(:symphony_elixir)
+
+      if supervisor = Process.whereis(SymphonyElixir.Supervisor) do
+        # A previous test may have left the supervisor's child spec running but
+        # pointed at a process it started itself and then stopped, or it may be
+        # shutting down. Terminating first clears stale state; ignore a
+        # supervisor that is already going away and retry below.
+        try do
+          if is_nil(Process.whereis(SymphonyElixir.WorkflowStore)) do
+            _ = Supervisor.terminate_child(supervisor, SymphonyElixir.WorkflowStore)
+            _ = Supervisor.restart_child(supervisor, SymphonyElixir.WorkflowStore)
+          end
+        catch
+          :exit, _reason -> :ok
+        end
+      end
+
+      Process.sleep(10)
+      ensure_default_app!(attempts - 1)
+    end
+  end
+
   def restore_env(key, nil), do: System.delete_env(key)
   def restore_env(key, value), do: System.put_env(key, value)
 
   def stop_default_http_server do
-    case Enum.find(Supervisor.which_children(SymphonyElixir.Supervisor), fn
-           {SymphonyElixir.HttpServer, _pid, _type, _modules} -> true
-           _child -> false
-         end) do
-      {SymphonyElixir.HttpServer, pid, _type, _modules} when is_pid(pid) ->
-        :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.HttpServer)
+    if Process.whereis(SymphonyElixir.Supervisor) do
+      try do
+        case Enum.find(Supervisor.which_children(SymphonyElixir.Supervisor), fn
+               {SymphonyElixir.HttpServer, _pid, _type, _modules} -> true
+               _child -> false
+             end) do
+          {SymphonyElixir.HttpServer, pid, _type, _modules} when is_pid(pid) ->
+            :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.HttpServer)
 
-        if Process.alive?(pid) do
-          Process.exit(pid, :normal)
+            if Process.alive?(pid) do
+              Process.exit(pid, :normal)
+            end
+
+            :ok
+
+          _ ->
+            :ok
         end
-
-        :ok
-
-      _ ->
-        :ok
+      catch
+        :exit, _reason -> :ok
+      end
+    else
+      :ok
     end
   end
 
   def stop_default_orchestrator do
-    case Enum.find(Supervisor.which_children(SymphonyElixir.Supervisor), fn
-           {SymphonyElixir.Orchestrator, _pid, _type, _modules} -> true
-           _child -> false
-         end) do
-      {SymphonyElixir.Orchestrator, pid, _type, _modules} when is_pid(pid) ->
-        :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.Orchestrator)
+    if Process.whereis(SymphonyElixir.Supervisor) do
+      try do
+        case Enum.find(Supervisor.which_children(SymphonyElixir.Supervisor), fn
+               {SymphonyElixir.Orchestrator, _pid, _type, _modules} -> true
+               _child -> false
+             end) do
+          {SymphonyElixir.Orchestrator, pid, _type, _modules} when is_pid(pid) ->
+            :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.Orchestrator)
 
-        if Process.alive?(pid) do
-          Process.exit(pid, :normal)
+            if Process.alive?(pid) do
+              Process.exit(pid, :normal)
+            end
+
+            :ok
+
+          _ ->
+            :ok
         end
-
-        :ok
-
-      _ ->
-        :ok
+      catch
+        :exit, _reason -> :ok
+      end
+    else
+      :ok
     end
   end
 

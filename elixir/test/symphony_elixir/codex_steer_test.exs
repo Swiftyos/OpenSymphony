@@ -1,6 +1,9 @@
 defmodule SymphonyElixir.CodexSteerTest do
   use SymphonyElixir.TestSupport
 
+  # Real git/process/HTTP integration; excluded by `make test-fast`.
+  @moduletag :slow
+
   alias SymphonyElixir.{AgentInbox, Transcript}
   alias SymphonyElixir.Codex.AppServer, as: CodexAppServer
 

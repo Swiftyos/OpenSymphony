@@ -1,6 +1,9 @@
 defmodule SymphonyElixir.ClaudeCodeAppServerTest do
   use SymphonyElixir.TestSupport
 
+  # Real git/process/HTTP integration; excluded by `make test-fast`.
+  @moduletag :slow
+
   alias SymphonyElixir.ClaudeCode.Tooling
 
   test "claude backend streams assistant updates and completes a turn" do
@@ -260,8 +263,11 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
         agent_backend: "claude",
         workspace_root: workspace_root,
         claude_command: launcher,
-        claude_turn_timeout_ms: 1_000,
-        claude_read_timeout_ms: 2_000,
+        # Generous start/turn limits so the only reason this turn ends is the
+        # stall: on a loaded machine process startup can take longer than the
+        # stall timeout, and a short turn limit would race it.
+        claude_turn_timeout_ms: 10_000,
+        claude_read_timeout_ms: 10_000,
         claude_stall_timeout_ms: 50
       )
 

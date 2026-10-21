@@ -1,6 +1,9 @@
 defmodule SymphonyElixir.RunHost.RemoteTest do
   use SymphonyElixir.TestSupport
 
+  # Real git/process/HTTP integration; excluded by `make test-fast`.
+  @moduletag :slow
+
   alias SymphonyElixir.{AgentInbox, RunOutbox, RunToken, Transcript}
   alias SymphonyElixir.RunHost
   alias SymphonyElixir.RunHost.Remote
@@ -128,7 +131,7 @@ defmodule SymphonyElixir.RunHost.RemoteTest do
     issue = Support.issue_fixture("issue-1", "MT-R-1")
 
     assert :ok = RunHost.inbox_register(host, issue, "codex")
-    Process.sleep(1_500)
+    Process.sleep(150)
     assert :ok = RunHost.inbox_unregister(host, "MT-R-1")
     SymphonyElixir.RunnerCommands.reset()
 

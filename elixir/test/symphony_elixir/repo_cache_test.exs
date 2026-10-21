@@ -1,6 +1,9 @@
 defmodule SymphonyElixir.RepoCacheTest do
   use SymphonyElixir.TestSupport
 
+  # Real git/process/HTTP integration; excluded by `make test-fast`.
+  @moduletag :slow
+
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.{RepoCacheLock, RepoCacheRefresher}
   alias SymphonyElixirWeb.PrometheusMetrics
@@ -697,8 +700,6 @@ defmodule SymphonyElixir.RepoCacheTest do
     File.mkdir_p!(agent_repo)
     File.write!(Path.join(agent_repo, "README.md"), readme_contents)
     System.cmd("git", ["-C", agent_repo, "init", "-q", "-b", "main"])
-    System.cmd("git", ["-C", agent_repo, "config", "user.name", "Test User"])
-    System.cmd("git", ["-C", agent_repo, "config", "user.email", "test@example.com"])
     System.cmd("git", ["-C", agent_repo, "add", "README.md"])
     System.cmd("git", ["-C", agent_repo, "commit", "-q", "-m", "initial"])
     System.cmd("git", ["-C", agent_repo, "remote", "add", "origin", origin])
@@ -745,8 +746,6 @@ defmodule SymphonyElixir.RepoCacheTest do
     File.mkdir_p!(path)
     File.write!(Path.join(path, "README.md"), readme_contents)
     System.cmd("git", ["-C", path, "init", "-b", "main"])
-    System.cmd("git", ["-C", path, "config", "user.name", "Test User"])
-    System.cmd("git", ["-C", path, "config", "user.email", "test@example.com"])
     System.cmd("git", ["-C", path, "add", "README.md"])
     System.cmd("git", ["-C", path, "commit", "-q", "-m", "initial"])
   end

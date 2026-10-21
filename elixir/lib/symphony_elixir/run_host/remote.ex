@@ -22,6 +22,7 @@ defmodule SymphonyElixir.RunHost.Remote do
 
   @request_timeout_ms 5_000
   @retries 3
+  @retry_sleep_ms 100
 
   defstruct [:base_url, :run_id, :token, :outbox]
 
@@ -223,7 +224,7 @@ defmodule SymphonyElixir.RunHost.Remote do
 
       {:ok, %Req.Response{status: status}} ->
         if attempts_left > 1 do
-          Process.sleep(100)
+          Process.sleep(retry_sleep_ms())
           attempt(request, attempts_left - 1)
         else
           {:error, {:status, status}}
@@ -231,11 +232,15 @@ defmodule SymphonyElixir.RunHost.Remote do
 
       {:error, reason} ->
         if attempts_left > 1 do
-          Process.sleep(100)
+          Process.sleep(retry_sleep_ms())
           attempt(request, attempts_left - 1)
         else
           {:error, reason}
         end
     end
+  end
+
+  defp retry_sleep_ms do
+    Application.get_env(:symphony_elixir, :run_host_remote_retry_sleep_ms, @retry_sleep_ms)
   end
 end

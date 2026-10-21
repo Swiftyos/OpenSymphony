@@ -1080,9 +1080,29 @@ Without `pricing`, the dashboard still shows tokens and marks cost as unpriced.
 
 ## Testing
 
+The suite runs in parallel OS processes, one ExUnit partition each. Every partition gets its own
+`TMPDIR`, so workflow bootstrap files, workspaces and repo caches cannot collide.
+
 ```bash
-make all
+make test-fast   # unit-focused tier: excludes tests tagged :slow (real git/process/HTTP)
+make test        # full suite (parallel)
+make coverage    # full suite with per-partition coverage, merged and threshold-checked
+make all         # format, lint, coverage and dialyzer
 ```
+
+`PARTITIONS=4 make test` overrides the default (CPU count, capped at 8). To isolate a single test
+file, use Mix directly (it stays single-process):
+
+```bash
+cd elixir
+TMPDIR=$(mktemp -d) mix test test/symphony_elixir/core_test.exs
+TMPDIR=$(mktemp -d) mix test test/symphony_elixir/core_test.exs:42
+```
+
+Tests tagged `:slow` need real git repositories, spawned processes or live HTTP servers; the fast
+tier excludes them. Postgres tests are tagged `:postgres` and run when
+`SYMPHONY_TEST_DATABASE_URL` is set. The parallel runner creates a derived database per partition
+(`symphony_test_p1`, `symphony_test_p2`, ...) on the same server.
 
 Run the real external end-to-end test only when you want Symphony to create disposable Linear
 resources and launch a real `opencode serve --hostname 127.0.0.1 --port 0` session:

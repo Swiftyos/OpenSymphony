@@ -88,7 +88,7 @@ defmodule SymphonyElixir.RunnerCommandPoller do
 
     case commands do
       [] ->
-        Process.sleep(@error_backoff_ms)
+        Process.sleep(error_backoff_ms())
         loop(host, identifier, owner, after_seq)
 
       commands ->
@@ -112,5 +112,9 @@ defmodule SymphonyElixir.RunnerCommandPoller do
 
   defp max_seq(commands, after_seq) do
     Enum.reduce(commands, after_seq, fn %{"seq" => seq}, acc -> max(acc, seq) end)
+  end
+
+  defp error_backoff_ms do
+    Application.get_env(:symphony_elixir, :runner_command_error_backoff_ms, @error_backoff_ms)
   end
 end

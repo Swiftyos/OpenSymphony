@@ -36,8 +36,16 @@ This directory contains the Elixir agent orchestration service that polls Linear
 Run targeted tests while iterating, then run full gates before handoff.
 
 ```bash
-make all
+make test-fast   # parallel, excludes @moduletag :slow (real git/process/HTTP integration)
+make test        # parallel full suite
+make coverage    # parallel full suite, merged coverage with the 100% threshold
+make all         # format check, lint, coverage, dialyzer
 ```
+
+`PARTITIONS=N` overrides the default (CPU count, capped at 8). The runner
+(`scripts/test-parallel.sh`) gives each partition its own `TMPDIR` and Postgres database, so
+always use it for the full suite. `mix test` still runs a single file/line in one process; keep
+using an isolated `TMPDIR` outside the checkout for that.
 
 ## Required Rules
 

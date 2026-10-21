@@ -448,7 +448,18 @@ defmodule SymphonyElixir.OrchestratorAsyncTest do
         {pid, _name} = start_orchestrator()
 
         assert_receive {:states_fetched, _task_pid, ["issue-a"]}, 2_000
-        wait_until(fn -> :sys.get_state(pid).revalidation_tasks == %{} end, 100)
+
+        # The timeout is handled by the orchestrator after the task disappears,
+        # so wait for the whole release, not just the task map.
+        wait_until(
+          fn ->
+            state = :sys.get_state(pid)
+
+            state.revalidation_tasks == %{} and state.pending_dispatches == %{} and
+              not MapSet.member?(state.claimed, issue.id)
+          end,
+          1_000
+        )
 
         state = :sys.get_state(pid)
         assert state.pending_dispatches == %{}

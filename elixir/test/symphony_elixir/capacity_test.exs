@@ -1,6 +1,9 @@
 defmodule SymphonyElixir.CapacityTest do
   use SymphonyElixir.TestSupport
 
+  # Real git/process/HTTP integration; excluded by `make test-fast`.
+  @moduletag :slow
+
   alias SymphonyElixir.Capacity.{Metrics, Prometheus, Sampler}
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Linear.Client
@@ -222,8 +225,6 @@ defmodule SymphonyElixir.CapacityTest do
         File.mkdir_p!(source)
         File.write!(Path.join(source, "README.md"), "capacity git\n")
         System.cmd("git", ["-C", source, "init", "-b", "main"])
-        System.cmd("git", ["-C", source, "config", "user.name", "Test User"])
-        System.cmd("git", ["-C", source, "config", "user.email", "test@example.com"])
         System.cmd("git", ["-C", source, "add", "README.md"])
         System.cmd("git", ["-C", source, "commit", "-m", "initial"])
 
@@ -826,7 +827,7 @@ defmodule SymphonyElixir.CapacityTest do
                  Sampler.sample(
                    settings: docker_settings(script),
                    snapshot_fun: fn -> %{running: [%{identifier: "PAY-1", workspace_path: "/tmp/capacity-hang"}]} end,
-                   command_timeout_ms: 1_000
+                   command_timeout_ms: 2_000
                  )
 
         assert System.monotonic_time(:millisecond) - started_at < 5_000

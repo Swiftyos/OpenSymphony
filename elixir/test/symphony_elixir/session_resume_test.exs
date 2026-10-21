@@ -1,6 +1,9 @@
 defmodule SymphonyElixir.SessionResumeTest do
   use SymphonyElixir.TestSupport
 
+  # Real git/process/HTTP integration; excluded by `make test-fast`.
+  @moduletag :slow
+
   alias SymphonyElixir.ClaudeCode.AppServer, as: ClaudeAppServer
   alias SymphonyElixir.Codex.AppServer, as: CodexAppServer
   alias SymphonyElixir.SessionStore
@@ -131,7 +134,7 @@ defmodule SymphonyElixir.SessionResumeTest do
       {workspace, trace}
     end
 
-    defp wait_for_file(path, tries \\ 50) do
+    defp wait_for_file(path, tries \\ 250) do
       cond do
         File.exists?(path) -> File.read!(path)
         tries == 0 -> flunk("#{path} was never written")

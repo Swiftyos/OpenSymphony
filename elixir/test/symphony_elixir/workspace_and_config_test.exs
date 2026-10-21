@@ -1,5 +1,8 @@
 defmodule SymphonyElixir.WorkspaceAndConfigTest do
   use SymphonyElixir.TestSupport
+
+  # Real git/process/HTTP integration; excluded by `make test-fast`.
+  @moduletag :slow
   alias Ecto.Changeset
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Config.Schema.StringOrMap
@@ -21,8 +24,6 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       File.write!(Path.join([template_repo, "keep", "file.txt"]), "keep me")
       File.write!(Path.join(template_repo, "README.md"), "hook clone\n")
       System.cmd("git", ["-C", template_repo, "init", "-b", "main"])
-      System.cmd("git", ["-C", template_repo, "config", "user.name", "Test User"])
-      System.cmd("git", ["-C", template_repo, "config", "user.email", "test@example.com"])
       System.cmd("git", ["-C", template_repo, "add", "README.md", "keep/file.txt"])
       System.cmd("git", ["-C", template_repo, "commit", "-m", "initial"])
 
@@ -1024,18 +1025,6 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   end
 
   test "workspace remove continues when before_remove hook times out" do
-    previous_timeout = Application.get_env(:symphony_elixir, :workspace_hook_timeout_ms)
-
-    on_exit(fn ->
-      if is_nil(previous_timeout) do
-        Application.delete_env(:symphony_elixir, :workspace_hook_timeout_ms)
-      else
-        Application.put_env(:symphony_elixir, :workspace_hook_timeout_ms, previous_timeout)
-      end
-    end)
-
-    Application.put_env(:symphony_elixir, :workspace_hook_timeout_ms, 10)
-
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -1049,7 +1038,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        hook_before_remove: "sleep 1"
+        hook_before_remove: "sleep 1",
+        # Also the removal command's deadline, so leave it room to finish after
+        # the hook itself times out.
+        hook_timeout_ms: 500
       )
 
       assert {:ok, workspace} = Workspace.create_for_issue("MT-HOOKS-TIMEOUT")
@@ -2142,8 +2134,6 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     File.mkdir_p!(path)
     File.write!(Path.join(path, "README.md"), readme_contents)
     System.cmd("git", ["-C", path, "init", "-b", "main"])
-    System.cmd("git", ["-C", path, "config", "user.name", "Test User"])
-    System.cmd("git", ["-C", path, "config", "user.email", "test@example.com"])
     System.cmd("git", ["-C", path, "add", "README.md"])
     System.cmd("git", ["-C", path, "commit", "-m", "initial"])
   end

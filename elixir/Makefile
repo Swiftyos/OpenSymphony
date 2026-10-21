@@ -1,11 +1,11 @@
-.PHONY: help all setup deps build fmt fmt-check lint test coverage ci dialyzer e2e secrets images
+.PHONY: help all setup deps build fmt fmt-check lint test test-fast coverage ci dialyzer e2e secrets images
 
 MIX ?= mix
 CONTAINER_ENGINE ?= $(shell command -v podman >/dev/null 2>&1 && echo podman || echo docker)
 IMAGE_REVISION ?= $(shell git -C .. rev-parse --short HEAD 2>/dev/null || echo unknown)
 
 help:
-	@echo "Targets: setup, deps, fmt, fmt-check, lint, test, coverage, dialyzer, e2e, secrets, images, ci"
+	@echo "Targets: setup, deps, fmt, fmt-check, lint, test, test-fast, coverage, dialyzer, e2e, secrets, images, ci"
 
 setup:
 	$(MIX) setup
@@ -26,10 +26,13 @@ lint:
 	$(MIX) lint
 
 coverage:
-	$(MIX) test --cover
+	./scripts/test-parallel.sh coverage
 
 test:
-	$(MIX) test
+	./scripts/test-parallel.sh
+
+test-fast:
+	./scripts/test-parallel.sh fast
 
 dialyzer:
 	$(MIX) deps.get

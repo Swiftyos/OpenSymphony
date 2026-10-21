@@ -1,6 +1,9 @@
 defmodule SymphonyElixir.CodexAppServerTest do
   use SymphonyElixir.TestSupport
 
+  # Real git/process/HTTP integration; excluded by `make test-fast`.
+  @moduletag :slow
+
   test "codex backend rejects the workspace root and paths outside workspace root" do
     test_root = temp_root!("cwd-guard")
 
@@ -522,6 +525,7 @@ defmodule SymphonyElixir.CodexAppServerTest do
         agent_backend: "codex",
         workspace_root: workspace_root,
         codex_command: "#{codex_binary} app-server",
+        codex_read_timeout_ms: 15_000,
         telemetry_enabled: true,
         telemetry_otlp_endpoint: "http://localhost:11338",
         telemetry_log_tool_details: true

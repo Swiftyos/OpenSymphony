@@ -8,11 +8,8 @@ defmodule SymphonyElixir.MixProject do
       elixir: "~> 1.19",
       compilers: [:phoenix_live_view] ++ Mix.compilers(),
       start_permanent: Mix.env() == :prod,
-      test_coverage: [
-        summary: [
-          threshold: 100
-        ],
-        ignore_modules: [
+      test_coverage:
+        test_coverage([
           SymphonyElixir.ClaudeCode.RateLimitPoller,
           SymphonyElixir.ClaudeCode.RateLimitProbe,
           SymphonyElixir.Config,
@@ -45,9 +42,9 @@ defmodule SymphonyElixir.MixProject do
           SymphonyElixirWeb.StaticAssets,
           SymphonyElixirWeb.Router,
           SymphonyElixirWeb.Router.Helpers
-        ]
-      ],
+        ]),
       test_ignore_filters: [
+        "test/support/runner_support.exs",
         "test/support/snapshot_support.exs",
         "test/support/test_support.exs"
       ],
@@ -57,6 +54,18 @@ defmodule SymphonyElixir.MixProject do
       escript: escript(),
       aliases: aliases(),
       deps: deps()
+    ]
+  end
+
+  # Parallel coverage runs export partial results, so their per-partition
+  # summaries must not enforce the total threshold. `mix test.coverage` merges
+  # the exports and applies it.
+  defp test_coverage(ignore_modules) do
+    summary = if System.get_env("SYMPHONY_COVERAGE_PARTITION"), do: false, else: [threshold: 100]
+
+    [
+      summary: summary,
+      ignore_modules: ignore_modules
     ]
   end
 

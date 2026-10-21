@@ -1,6 +1,9 @@
 defmodule SymphonyElixir.AppServerTest do
   use SymphonyElixir.TestSupport
 
+  # Real git/process/HTTP integration; excluded by `make test-fast`.
+  @moduletag :slow
+
   import Plug.Conn
 
   defmodule FakeOpenCodeState do
@@ -237,7 +240,9 @@ defmodule SymphonyElixir.AppServerTest do
           json(conn, 200, %{"info" => %{"id" => "assistant-message-5", "sessionID" => session_id}})
 
         :message_post_timeout ->
-          Enum.each(1..10, fn step ->
+          # Keep the turn active while the POST response deliberately outlasts
+          # the request timeout, so startup and the POST are not confused.
+          Enum.each(1..35, fn step ->
             FakeOpenCodeState.broadcast(state, "message.part.delta", %{
               "part" => %{
                 "sessionID" => session_id,
@@ -648,7 +653,7 @@ defmodule SymphonyElixir.AppServerTest do
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
         opencode_command: launcher,
-        opencode_read_timeout_ms: 2_000
+        opencode_read_timeout_ms: 5_000
       )
 
       assert {:error, {:turn_input_required, %{"id" => "question-1"}}} =
@@ -679,7 +684,9 @@ defmodule SymphonyElixir.AppServerTest do
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
         opencode_command: launcher,
-        opencode_read_timeout_ms: 500,
+        # Generous enough that process startup (which shares this timeout) is
+        # not mistaken for the POST timing out on a loaded machine.
+        opencode_read_timeout_ms: 3_000,
         opencode_stall_timeout_ms: 5_000
       )
 
@@ -688,7 +695,7 @@ defmodule SymphonyElixir.AppServerTest do
                 kind: :message_post_timeout,
                 phase: :post_turn_message,
                 session_id: "session-test",
-                read_timeout_ms: 500,
+                read_timeout_ms: 3_000,
                 method: "POST",
                 path: "/session/session-test/message",
                 message: message,
@@ -736,8 +743,10 @@ defmodule SymphonyElixir.AppServerTest do
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
         opencode_command: launcher,
-        opencode_turn_timeout_ms: 1_000,
-        opencode_read_timeout_ms: 2_000,
+        # As with the Claude stall test, leave startup and the turn plenty of
+        # room so only the stall can end this turn.
+        opencode_turn_timeout_ms: 10_000,
+        opencode_read_timeout_ms: 10_000,
         opencode_stall_timeout_ms: 50
       )
 
@@ -764,7 +773,17 @@ defmodule SymphonyElixir.AppServerTest do
 
   defp start_fake_opencode_server!(scenario) do
     {:ok, state} = start_supervised({FakeOpenCodeState, test_pid: self(), scenario: scenario})
-    bandit = start_supervised!({Bandit, plug: {FakeOpenCodePlug, state: state}, port: 0})
+
+    bandit =
+      start_supervised!(
+        {Bandit,
+         [
+           plug: {FakeOpenCodePlug, state: state},
+           port: 0,
+           thousand_island_options: [shutdown_timeout: 100]
+         ]}
+      )
+
     {:ok, {_ip, port}} = ThousandIsland.listener_info(bandit)
 
     %{state: state, bandit: bandit, base_url: "http://127.0.0.1:#{port}"}

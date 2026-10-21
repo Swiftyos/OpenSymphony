@@ -1,6 +1,9 @@
 defmodule SymphonyElixir.CoreTest do
   use SymphonyElixir.TestSupport
 
+  # Real git/process/HTTP integration; excluded by `make test-fast`.
+  @moduletag :slow
+
   alias SymphonyElixir.Factory.StagePrompt
 
   test "config defaults and validation checks" do
@@ -565,9 +568,18 @@ defmodule SymphonyElixir.CoreTest do
       end)
 
       send(pid, :tick)
-      Process.sleep(100)
-      state = :sys.get_state(pid)
 
+      SymphonyElixir.TestSupport.wait_until(
+        fn ->
+          state = :sys.get_state(pid)
+
+          not Map.has_key?(state.running, issue_id) and
+            not MapSet.member?(state.claimed, issue_id)
+        end,
+        2_000
+      )
+
+      state = :sys.get_state(pid)
       refute Map.has_key?(state.running, issue_id)
       refute MapSet.member?(state.claimed, issue_id)
       refute Process.alive?(agent_pid)
@@ -1580,7 +1592,17 @@ defmodule SymphonyElixir.CoreTest do
 
   defp start_fake_opencode_server! do
     {:ok, state} = start_supervised({__MODULE__.FakeOpenCodeState, test_pid: self()})
-    bandit = start_supervised!({Bandit, plug: {__MODULE__.FakeOpenCodePlug, state: state}, port: 0})
+
+    bandit =
+      start_supervised!(
+        {Bandit,
+         [
+           plug: {__MODULE__.FakeOpenCodePlug, state: state},
+           port: 0,
+           thousand_island_options: [shutdown_timeout: 100]
+         ]}
+      )
+
     {:ok, {_ip, port}} = ThousandIsland.listener_info(bandit)
 
     %{state: state, base_url: "http://127.0.0.1:#{port}"}

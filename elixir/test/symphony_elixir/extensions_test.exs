@@ -1,6 +1,9 @@
 defmodule SymphonyElixir.ExtensionsTest do
   use SymphonyElixir.TestSupport
 
+  # Real git/process/HTTP integration; excluded by `make test-fast`.
+  @moduletag :slow
+
   import Phoenix.ConnTest
   import Phoenix.LiveViewTest
 
@@ -171,13 +174,13 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert removed_state.workflow.prompt == "Manual workflow prompt"
     assert_receive :poll, 1_100
 
-    Process.exit(manual_pid, :normal)
-    restart_result = Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
-
-    assert match?({:ok, _pid}, restart_result) or
-             match?({:error, {:already_started, _pid}}, restart_result)
+    manual_monitor = Process.monitor(manual_pid)
+    Process.unlink(manual_pid)
+    Process.exit(manual_pid, :kill)
+    assert_receive {:DOWN, ^manual_monitor, :process, ^manual_pid, :killed}, 1_000
 
     Workflow.set_workflow_file_path(existing_path)
+    assert {:ok, _pid} = Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
     WorkflowStore.force_reload()
   end
 

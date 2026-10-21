@@ -1,6 +1,9 @@
 defmodule SymphonyElixir.AccountsTest do
   use SymphonyElixir.TestSupport
 
+  # Real git/process/HTTP integration; excluded by `make test-fast`.
+  @moduletag :slow
+
   alias SymphonyElixir.Accounts
 
   test "usage-aware selector rotates fairly after filtering unavailable accounts" do

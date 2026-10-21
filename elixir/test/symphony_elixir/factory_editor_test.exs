@@ -1,6 +1,9 @@
 defmodule SymphonyElixir.FactoryEditorTest do
   use SymphonyElixir.TestSupport
 
+  # Real git/process/HTTP integration; excluded by `make test-fast`.
+  @moduletag :slow
+
   import Phoenix.ConnTest
   import Phoenix.LiveViewTest
 
