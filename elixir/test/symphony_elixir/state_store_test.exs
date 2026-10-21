@@ -173,6 +173,30 @@ defmodule SymphonyElixir.StateStoreTest do
       GenServer.stop(second)
     end
 
+    test "the run registry keeps one row per issue and migrates a legacy runs.json" do
+      runs_path = Path.join(StateStore.root(), "runs.json")
+      previous = Application.get_env(:symphony_elixir, :runs_path)
+      Application.put_env(:symphony_elixir, :runs_path, runs_path)
+
+      on_exit(fn ->
+        SymphonyElixir.RunRegistry.reload()
+        Application.put_env(:symphony_elixir, :runs_path, previous)
+      end)
+
+      legacy = %{"run_id" => "run-legacy", "attempt" => 0, "epoch" => 3, "ref" => "local:boot:0.1.0", "started_at_unix_ms" => 1}
+      :ok = StateStore.write(runs_path, Jason.encode!(%{"version" => 1, "runs" => %{"issue-legacy" => legacy}, "epochs" => %{}}))
+
+      capture_log(fn -> assert %{"issue-legacy" => %{run_id: "run-legacy"}} = SymphonyElixir.RunRegistry.load() end)
+      :ok = SymphonyElixir.RunRegistry.record("issue-2", %{run_id: "run-2", attempt: 0, epoch: 1, ref: "local:boot:0.2.0", started_at_unix_ms: 2})
+
+      %{rows: rows} = Repo.query!("SELECT key FROM state_documents WHERE starts_with(key, 'run_registry/') ORDER BY key")
+      assert length(rows) == 2
+
+      :ok = SymphonyElixir.RunRegistry.reload()
+      assert {"issue-2", %{run_id: "run-2"}} = SymphonyElixir.RunRegistry.find_run("run-2")
+      assert SymphonyElixir.RunRegistry.next_epoch("issue-legacy") == 4
+    end
+
     test "database errors are returned, not raised" do
       Repo.query!("ALTER TABLE state_documents RENAME TO state_documents_away")
 

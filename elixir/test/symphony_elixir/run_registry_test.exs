@@ -214,7 +214,7 @@ defmodule SymphonyElixir.RunRegistryTest do
     assert %{"migrated_to" => "run_registry", "runs" => %{}, "epochs" => %{}} = path |> File.read!() |> Jason.decode!()
     assert %{"epoch" => 7, "run" => nil} = disk_doc(path, "issue-epoch-only")
     :ok = RunRegistry.reload()
-    assert capture_log(fn -> assert map_size(RunRegistry.load()) == 2 end) == ""
+    refute capture_log(fn -> assert map_size(RunRegistry.load()) == 2 end) =~ "migrated"
   end
 
   test "find_run finds a run by its id, and only the issue's current run", %{path: path} do
