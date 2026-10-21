@@ -153,20 +153,48 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
-  defmodule Workspace do
+  defmodule RepoCache do
     @moduledoc false
     use Ecto.Schema
     import Ecto.Changeset
 
     @primary_key false
+
+    embedded_schema do
+      # How old the last successful fetch may get before a workspace start
+      # fetches from the remote again. 0 = fetch on every start.
+      field(:max_age_ms, :integer, default: 60_000)
+      # How often the background refresher warms each project cache. 0 = off.
+      field(:refresh_interval_ms, :integer, default: 60_000)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:max_age_ms, :refresh_interval_ms], empty_values: [])
+      |> validate_number(:max_age_ms, greater_than_or_equal_to: 0)
+      |> validate_number(:refresh_interval_ms, greater_than_or_equal_to: 0)
+    end
+  end
+
+  defmodule Workspace do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    alias SymphonyElixir.Config.Schema.RepoCache
+
+    @primary_key false
     embedded_schema do
       field(:root, :string, default: Path.join(System.tmp_dir!(), "symphony_workspaces"))
+      embeds_one(:repo_cache, RepoCache, on_replace: :update, defaults_to_struct: true)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
       |> cast(attrs, [:root], empty_values: [])
+      |> cast_embed(:repo_cache, with: &RepoCache.changeset/2)
     end
   end
 

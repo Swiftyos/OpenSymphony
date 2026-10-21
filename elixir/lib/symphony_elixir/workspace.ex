@@ -4,13 +4,15 @@ defmodule SymphonyElixir.Workspace do
   """
 
   require Logger
-  alias SymphonyElixir.{Config, IssueConfig, PathSafety, ProjectWorkflow, Sandbox, SSH}
+  alias SymphonyElixir.{Config, IssueConfig, PathSafety, ProjectWorkflow, RepoCacheLock, Sandbox, SSH}
   alias SymphonyElixir.Config.Schema
+  alias SymphonyElixirWeb.PrometheusMetrics
 
   @remote_workspace_marker "__SYMPHONY_WORKSPACE__"
   @repo_cache_dir ".symphony-cache"
+  @repo_cache_fetched_at_file "symphony-fetched-at"
+  @repo_cache_sync_marker "__SYMPHONY_REPO_CACHE__"
   @repo_branch_prefix "symphony/"
-  @repo_cache_sync_ttl_ms 5_000
 
   @type worker_host :: String.t() | nil
 
@@ -244,6 +246,34 @@ defmodule SymphonyElixir.Workspace do
   end
 
   def ensure_local_repo_cache(_route, _settings), do: {:error, :missing_project_repo}
+
+  @doc """
+  Refreshes the cache clone for a project route on the local host.
+
+  `SymphonyElixir.RepoCacheRefresher` calls this in the background so a workspace
+  start usually finds the cache inside its freshness window and skips the remote
+  fetch. Uses the same per-cache lock as the workspace flow, and honors
+  `workspace.repo_cache.max_age_ms`.
+  """
+  @spec refresh_repo_cache(map(), Schema.t()) :: :ok | {:error, term()}
+  def refresh_repo_cache(%{repo: repo} = route, %Schema{} = settings) when is_binary(repo) and repo != "" do
+    repo_source = Config.repo_source(repo)
+    workspace_root = Config.workspace_root_for_route(route, settings)
+    target_branch = Map.get(route, :default_branch)
+    issue_context = route_issue_context(route)
+
+    ensure_repo_cache(
+      workspace_root,
+      repo_source,
+      target_branch,
+      issue_context,
+      nil,
+      settings,
+      metric_reason: :refresher
+    )
+  end
+
+  def refresh_repo_cache(_route, %Schema{}), do: :ok
 
   @spec run_before_run_hook(Path.t(), map() | String.t() | nil, worker_host(), keyword()) ::
           :ok | {:error, term()}
@@ -687,9 +717,18 @@ defmodule SymphonyElixir.Workspace do
       "Bootstrapping workspace repo #{issue_log_context(issue_context)} workspace=#{workspace} repo=#{repo_source.display} cache_repo=#{cache_repo} branch=#{branch_name} base_branch=#{target_branch || "origin-default"} worker_host=#{worker_host_for_log(worker_host)}"
     )
 
-    lock_key = repo_cache_lock_key(workspace_root, repo_source, target_branch, worker_host)
+    lock_key = repo_cache_lock_key(workspace_root, repo_source, worker_host)
 
-    with :ok <- ensure_repo_cache(workspace_root, repo_source, target_branch, issue_context, worker_host, settings) do
+    with :ok <-
+           ensure_repo_cache(
+             workspace_root,
+             repo_source,
+             target_branch,
+             issue_context,
+             worker_host,
+             settings,
+             issue_branch: branch_name
+           ) do
       # Clone under the cache lock so a concurrent cache sync cannot move refs mid-clone.
       with_repo_cache_lock(lock_key, fn ->
         add_workspace_worktree(
@@ -711,23 +750,19 @@ defmodule SymphonyElixir.Workspace do
   defp ensure_repo_cache(workspace_root, repo_source, target_branch, issue_context, nil, settings, opts) do
     timeout_ms = hooks_timeout_ms(settings)
     cache_repo = repo_cache_path(workspace_root, repo_source)
-    lock_key = repo_cache_lock_key(workspace_root, repo_source, target_branch, nil)
-    force? = Keyword.get(opts, :force, false)
+    lock_key = repo_cache_lock_key(workspace_root, repo_source, nil)
+    sync_opts = repo_cache_sync_opts(settings, opts)
 
     with_repo_cache_lock(lock_key, fn ->
-      if not force? and repo_cache_sync_fresh?(lock_key) do
-        :ok
-      else
-        sync_local_repo_cache(
-          workspace_root,
-          repo_source,
-          target_branch,
-          issue_context,
-          cache_repo,
-          timeout_ms,
-          lock_key
-        )
-      end
+      sync_local_repo_cache(
+        workspace_root,
+        repo_source,
+        target_branch,
+        issue_context,
+        cache_repo,
+        timeout_ms,
+        sync_opts
+      )
     end)
   end
 
@@ -735,33 +770,48 @@ defmodule SymphonyElixir.Workspace do
        when is_binary(worker_host) do
     timeout_ms = hooks_timeout_ms(settings)
     cache_repo = repo_cache_path(workspace_root, repo_source)
-    lock_key = repo_cache_lock_key(workspace_root, repo_source, target_branch, worker_host)
-    force? = Keyword.get(opts, :force, false)
+    lock_key = repo_cache_lock_key(workspace_root, repo_source, worker_host)
+    sync_opts = repo_cache_sync_opts(settings, opts)
 
     with_repo_cache_lock(lock_key, fn ->
-      if not force? and repo_cache_sync_fresh?(lock_key) do
-        :ok
-      else
-        sync_remote_repo_cache(
-          workspace_root,
-          repo_source,
-          target_branch,
-          issue_context,
-          worker_host,
-          cache_repo,
-          timeout_ms,
-          lock_key
-        )
-      end
+      sync_remote_repo_cache(
+        workspace_root,
+        repo_source,
+        target_branch,
+        issue_context,
+        worker_host,
+        cache_repo,
+        timeout_ms,
+        sync_opts
+      )
     end)
   end
 
-  defp sync_local_repo_cache(workspace_root, repo_source, target_branch, issue_context, cache_repo, timeout_ms, lock_key) do
+  # `force: true` (startup preflight) bypasses the freshness window: one fetch
+  # per process start is cheap and keeps preflight's branch checks meaningful.
+  defp repo_cache_sync_opts(settings, opts) do
+    max_age_ms =
+      if Keyword.get(opts, :force, false) do
+        0
+      else
+        settings.workspace.repo_cache.max_age_ms
+      end
+
+    [
+      max_age_ms: max_age_ms,
+      issue_branch: Keyword.get(opts, :issue_branch),
+      metric_reason: Keyword.get(opts, :metric_reason)
+    ]
+  end
+
+  defp sync_local_repo_cache(workspace_root, repo_source, target_branch, issue_context, cache_repo, timeout_ms, sync_opts) do
     Logger.info("Preparing workspace repo cache #{issue_log_context(issue_context)} workspace_root=#{workspace_root} repo=#{repo_source.display} cache_repo=#{cache_repo} worker_host=local")
 
-    case run_local_script(build_repo_cache_sync_script(cache_repo, repo_source, target_branch), timeout_ms) do
-      {:ok, {_output, 0}} ->
-        mark_repo_cache_synced(lock_key)
+    sync_script = build_repo_cache_sync_script(cache_repo, repo_source, target_branch, sync_opts)
+
+    case run_local_script(sync_script, timeout_ms) do
+      {:ok, {output, 0}} ->
+        record_repo_cache_outcome(repo_source, output, issue_context, sync_opts)
         :ok
 
       {:ok, {output, status}} ->
@@ -788,15 +838,15 @@ defmodule SymphonyElixir.Workspace do
          worker_host,
          cache_repo,
          timeout_ms,
-         lock_key
+         sync_opts
        ) do
     Logger.info("Preparing workspace repo cache #{issue_log_context(issue_context)} workspace_root=#{workspace_root} repo=#{repo_source.display} cache_repo=#{cache_repo} worker_host=#{worker_host}")
 
-    sync_script = build_remote_repo_cache_sync_script(cache_repo, repo_source, target_branch)
+    sync_script = build_remote_repo_cache_sync_script(cache_repo, repo_source, target_branch, sync_opts)
 
     case run_remote_command(worker_host, sync_script, timeout_ms) do
-      {:ok, {_output, 0}} ->
-        mark_repo_cache_synced(lock_key)
+      {:ok, {output, 0}} ->
+        record_repo_cache_outcome(repo_source, output, issue_context, sync_opts)
         :ok
 
       {:ok, {output, status}} ->
@@ -818,26 +868,48 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp with_repo_cache_lock(key, fun) when is_function(fun, 0) do
-    :global.trans({__MODULE__, key}, fun, [node()], :infinity)
-  end
+  defp record_repo_cache_outcome(repo_source, output, issue_context, sync_opts) do
+    case parse_repo_cache_sync_outcome(output) do
+      :skip ->
+        Logger.debug("Repo cache is fresh; skipping remote fetch #{issue_log_context(issue_context)} repo=#{repo_source.display}")
 
-  defp repo_cache_lock_key(workspace_root, repo_source, target_branch, worker_host) do
-    {:symphony_repo_cache_sync, worker_host || :local, workspace_root, repo_source.cache_key, target_branch}
-  end
+        PrometheusMetrics.record_repo_cache_skip(repo_source.display)
 
-  defp repo_cache_sync_fresh?(key) do
-    case :persistent_term.get(key, nil) do
-      timestamp when is_integer(timestamp) ->
-        System.monotonic_time(:millisecond) - timestamp < @repo_cache_sync_ttl_ms
+      {:fetch, reason} ->
+        PrometheusMetrics.record_repo_cache_fetch(
+          repo_source.display,
+          Keyword.get(sync_opts, :metric_reason) || reason
+        )
 
-      _ ->
-        false
+      :unknown ->
+        :ok
     end
   end
 
-  defp mark_repo_cache_synced(key) do
-    :persistent_term.put(key, System.monotonic_time(:millisecond))
+  defp parse_repo_cache_sync_outcome(output) do
+    output
+    |> IO.iodata_to_binary()
+    |> String.split("\n", trim: true)
+    |> Enum.find_value(fn line ->
+      case String.split(line, "\t", parts: 3) do
+        [@repo_cache_sync_marker, action, reason] -> {action, reason}
+        _ -> nil
+      end
+    end)
+    |> case do
+      {"fetch", "first_clone"} -> {:fetch, :first_clone}
+      {"fetch", _reason} -> {:fetch, :stale}
+      {"skip", _reason} -> :skip
+      _ -> :unknown
+    end
+  end
+
+  defp with_repo_cache_lock(key, fun) when is_function(fun, 0) do
+    RepoCacheLock.with_lock({__MODULE__, key}, fun)
+  end
+
+  defp repo_cache_lock_key(workspace_root, repo_source, worker_host) do
+    {:symphony_repo_cache_sync, worker_host || :local, workspace_root, repo_source.cache_key}
   end
 
   defp validate_project_route_workflow(%{workflow: workflow_ref}, workspace_root, repo_source, issue_context, nil, _settings)
@@ -1005,90 +1077,34 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp build_repo_cache_sync_script(cache_repo, repo_source, target_branch) do
-    script_lines =
-      case repo_source.kind do
-        :github_slug ->
-          [
-            "set -eu",
-            "export GH_PROMPT_DISABLED=1",
-            "export GIT_TERMINAL_PROMPT=0",
-            "cache_repo=#{shell_escape(cache_repo)}",
-            "repo_slug=#{shell_escape(repo_source.raw)}",
-            "target_branch=#{shell_escape(target_branch || "")}",
-            "mkdir -p \"$(dirname \"$cache_repo\")\"",
-            "if ! command -v gh >/dev/null 2>&1; then",
-            "  echo \"GitHub CLI (gh) is required to prepare #{repo_source.display}\" >&2",
-            "  exit 44",
-            "fi",
-            "if ! gh auth status >/dev/null 2>&1; then",
-            "  echo \"GitHub CLI is not authenticated for #{repo_source.display}\" >&2",
-            "  exit 45",
-            "fi",
-            "protocol=\"$(gh config get git_protocol -h github.com 2>/dev/null || true)\"",
-            "if [ -z \"$protocol\" ]; then",
-            "  protocol=ssh",
-            "fi",
-            "if [ \"$protocol\" = \"https\" ]; then",
-            "  remote_url=\"https://github.com/$repo_slug.git\"",
-            "else",
-            "  remote_url=\"git@github.com:$repo_slug.git\"",
-            "fi",
-            "if [ -e \"$cache_repo\" ] && ! git -C \"$cache_repo\" rev-parse --is-inside-work-tree >/dev/null 2>&1; then",
-            "  rm -rf \"$cache_repo\"",
-            "fi",
-            "if ! git -C \"$cache_repo\" rev-parse --is-inside-work-tree >/dev/null 2>&1; then",
-            "  rm -rf \"$cache_repo\"",
-            "  gh repo clone \"$repo_slug\" \"$cache_repo\"",
-            "fi",
-            "git -C \"$cache_repo\" remote set-url origin \"$remote_url\"",
-            "git -C \"$cache_repo\" fetch --prune origin",
-            "git -C \"$cache_repo\" remote set-head origin --auto >/dev/null 2>&1 || true"
-          ]
-
-        _ ->
-          [
-            "set -eu",
-            "export GIT_TERMINAL_PROMPT=0",
-            "cache_repo=#{shell_escape(cache_repo)}",
-            "clone_url=#{shell_escape(repo_source.clone_url)}",
-            "target_branch=#{shell_escape(target_branch || "")}",
-            "mkdir -p \"$(dirname \"$cache_repo\")\"",
-            "if [ -e \"$cache_repo\" ] && ! git -C \"$cache_repo\" rev-parse --is-inside-work-tree >/dev/null 2>&1; then",
-            "  rm -rf \"$cache_repo\"",
-            "fi",
-            "if ! git -C \"$cache_repo\" rev-parse --is-inside-work-tree >/dev/null 2>&1; then",
-            "  rm -rf \"$cache_repo\"",
-            "  git clone \"$clone_url\" \"$cache_repo\"",
-            "fi",
-            "git -C \"$cache_repo\" remote set-url origin \"$clone_url\"",
-            "git -C \"$cache_repo\" fetch --prune origin",
-            "git -C \"$cache_repo\" remote set-head origin --auto >/dev/null 2>&1 || true"
-          ]
-      end
-
-    (script_lines ++
-       resolve_target_branch_shell_lines("cache_repo", "target_branch") ++
-       [
-         # Keep the cache detached: a checked-out branch here would block
-         # `git checkout <default>` in any linked worktree created before clones.
-         "git -C \"$cache_repo\" checkout -f --detach \"origin/$target_branch\"",
-         "git -C \"$cache_repo\" worktree prune"
-       ])
-    |> Enum.join("\n")
+  defp build_repo_cache_sync_script(cache_repo, repo_source, target_branch, opts) do
+    build_repo_cache_sync_script(cache_repo, repo_source, target_branch, opts, &local_shell_assign/2)
   end
 
-  defp build_remote_repo_cache_sync_script(cache_repo, repo_source, target_branch) do
-    script_lines =
+  defp build_remote_repo_cache_sync_script(cache_repo, repo_source, target_branch, opts) do
+    build_repo_cache_sync_script(cache_repo, repo_source, target_branch, opts, &remote_shell_assign/2)
+  end
+
+  defp local_shell_assign(variable_name, value) when is_binary(variable_name) and is_binary(value) do
+    "#{variable_name}=#{shell_escape(value)}"
+  end
+
+  defp build_repo_cache_sync_script(cache_repo, repo_source, target_branch, opts, assign) do
+    max_age_ms = Keyword.get(opts, :max_age_ms, 60_000)
+    issue_branch = Keyword.get(opts, :issue_branch) || ""
+
+    preamble_lines =
       case repo_source.kind do
         :github_slug ->
           [
             "set -eu",
             "export GH_PROMPT_DISABLED=1",
             "export GIT_TERMINAL_PROMPT=0",
-            remote_shell_assign("cache_repo", cache_repo),
-            remote_shell_assign("repo_slug", repo_source.raw),
-            remote_shell_assign("target_branch", target_branch || ""),
+            assign.("cache_repo", cache_repo),
+            assign.("repo_slug", repo_source.raw),
+            assign.("target_branch", target_branch || ""),
+            assign.("issue_branch", issue_branch),
+            assign.("max_age_ms", Integer.to_string(max_age_ms)),
             "mkdir -p \"$(dirname \"$cache_repo\")\"",
             "if ! command -v gh >/dev/null 2>&1; then",
             "  echo \"GitHub CLI (gh) is required to prepare #{repo_source.display}\" >&2",
@@ -1107,40 +1123,85 @@ defmodule SymphonyElixir.Workspace do
             "else",
             "  remote_url=\"git@github.com:$repo_slug.git\"",
             "fi",
-            "if [ -e \"$cache_repo\" ] && ! git -C \"$cache_repo\" rev-parse --is-inside-work-tree >/dev/null 2>&1; then",
-            "  rm -rf \"$cache_repo\"",
-            "fi",
-            "if ! git -C \"$cache_repo\" rev-parse --is-inside-work-tree >/dev/null 2>&1; then",
-            "  rm -rf \"$cache_repo\"",
-            "  gh repo clone \"$repo_slug\" \"$cache_repo\"",
-            "fi",
-            "git -C \"$cache_repo\" remote set-url origin \"$remote_url\"",
-            "git -C \"$cache_repo\" fetch --prune origin",
-            "git -C \"$cache_repo\" remote set-head origin --auto >/dev/null 2>&1 || true"
+            "repo_cache_remote_url=\"$remote_url\""
           ]
 
         _ ->
           [
             "set -eu",
             "export GIT_TERMINAL_PROMPT=0",
-            remote_shell_assign("cache_repo", cache_repo),
-            remote_shell_assign("clone_url", repo_source.clone_url),
-            remote_shell_assign("target_branch", target_branch || ""),
+            assign.("cache_repo", cache_repo),
+            assign.("clone_url", repo_source.clone_url),
+            assign.("target_branch", target_branch || ""),
+            assign.("issue_branch", issue_branch),
+            assign.("max_age_ms", Integer.to_string(max_age_ms)),
             "mkdir -p \"$(dirname \"$cache_repo\")\"",
-            "if [ -e \"$cache_repo\" ] && ! git -C \"$cache_repo\" rev-parse --is-inside-work-tree >/dev/null 2>&1; then",
-            "  rm -rf \"$cache_repo\"",
-            "fi",
-            "if ! git -C \"$cache_repo\" rev-parse --is-inside-work-tree >/dev/null 2>&1; then",
-            "  rm -rf \"$cache_repo\"",
-            "  git clone \"$clone_url\" \"$cache_repo\"",
-            "fi",
-            "git -C \"$cache_repo\" remote set-url origin \"$clone_url\"",
-            "git -C \"$cache_repo\" fetch --prune origin",
-            "git -C \"$cache_repo\" remote set-head origin --auto >/dev/null 2>&1 || true"
+            "repo_cache_remote_url=\"$clone_url\""
           ]
       end
 
-    (script_lines ++
+    clone_lines =
+      case repo_source.kind do
+        :github_slug -> ["  gh repo clone \"$repo_slug\" \"$cache_repo\""]
+        _ -> ["  git clone \"$clone_url\" \"$cache_repo\""]
+      end
+
+    freshness_lines =
+      [
+        "if [ -e \"$cache_repo\" ] && ! git -C \"$cache_repo\" rev-parse --is-inside-work-tree >/dev/null 2>&1; then",
+        "  rm -rf \"$cache_repo\"",
+        "fi",
+        "first_clone=0",
+        "if ! git -C \"$cache_repo\" rev-parse --is-inside-work-tree >/dev/null 2>&1; then",
+        "  rm -rf \"$cache_repo\""
+      ] ++
+        clone_lines ++
+        [
+          "  first_clone=1",
+          "fi",
+          "git -C \"$cache_repo\" remote set-url origin \"$repo_cache_remote_url\"",
+          # A clone already fetched every ref, so it counts as the first fetch.
+          "fetched_at_file=\"$cache_repo/.git/#{@repo_cache_fetched_at_file}\"",
+          "action=skip",
+          "reason=fresh",
+          "if [ \"$first_clone\" = \"1\" ]; then",
+          "  action=fetch",
+          "  reason=first_clone",
+          "  date +%s > \"$fetched_at_file\"",
+          "elif [ \"$max_age_ms\" -eq 0 ]; then",
+          "  action=fetch",
+          "  reason=stale",
+          "  git -C \"$cache_repo\" fetch --prune origin",
+          "  date +%s > \"$fetched_at_file\"",
+          "else",
+          "  fetched_at=0",
+          "  if [ -f \"$fetched_at_file\" ]; then",
+          "    fetched_at=\"$(cat \"$fetched_at_file\" 2>/dev/null || true)\"",
+          "    case \"$fetched_at\" in ''|*[!0-9]*) fetched_at=0 ;; esac",
+          "  fi",
+          "  if [ $(( ($(date +%s) - fetched_at) * 1000 )) -lt \"$max_age_ms\" ]; then",
+          # Within the window the cache is good enough; still refresh just the
+          # issue branch so a PR branch pushed by a different workspace is visible.
+          "    action=skip",
+          "    reason=fresh",
+          "    if [ -n \"$issue_branch\" ]; then",
+          "      if git -C \"$cache_repo\" ls-remote --exit-code --heads origin \"refs/heads/$issue_branch\" >/dev/null 2>&1; then",
+          "        git -C \"$cache_repo\" fetch --no-tags origin \"refs/heads/$issue_branch:refs/remotes/origin/$issue_branch\"",
+          "      fi",
+          "    fi",
+          "  else",
+          "    action=fetch",
+          "    reason=stale",
+          "    git -C \"$cache_repo\" fetch --prune origin",
+          "    date +%s > \"$fetched_at_file\"",
+          "  fi",
+          "fi",
+          "printf '%s\\t%s\\t%s\\n' '#{@repo_cache_sync_marker}' \"$action\" \"$reason\"",
+          "git -C \"$cache_repo\" remote set-head origin --auto >/dev/null 2>&1 || true"
+        ]
+
+    (preamble_lines ++
+       freshness_lines ++
        resolve_target_branch_shell_lines("cache_repo", "target_branch") ++
        [
          # Keep the cache detached: a checked-out branch here would block

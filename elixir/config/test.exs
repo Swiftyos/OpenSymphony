@@ -44,4 +44,6 @@ config :symphony_elixir,
   enforce_local_host: false,
   password_iterations: 1_000,
   # Tests sync labels explicitly.
-  label_sync_on_boot: false
+  label_sync_on_boot: false,
+  # Tests start the repo cache refresher explicitly when they need it.
+  repo_cache_refresher_enabled: false

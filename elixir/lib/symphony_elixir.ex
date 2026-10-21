@@ -49,6 +49,10 @@ defmodule SymphonyElixir.Application do
       SymphonyElixir.ProjectRoutes,
       # Creates any missing Linear labels the flows need, once, in the background.
       SymphonyElixir.LabelSync,
+      # Serializes repo cache syncs; the refresher below uses the same lock.
+      SymphonyElixir.RepoCacheLock,
+      # Warms project repo caches so agent starts rarely fetch from GitHub.
+      SymphonyElixir.RepoCacheRefresher,
       SymphonyElixir.Orchestrator,
       SymphonyElixir.HttpServer,
       SymphonyElixir.StatusDashboard,

@@ -62,8 +62,20 @@ defmodule SymphonyElixirWeb.PrometheusMetrics do
       name: "symphony_account_usage_period_usage_percent",
       help: "Usage percentage for an account usage period bucket.",
       type: "gauge"
+    },
+    %{
+      name: "symphony_repo_cache_fetches_total",
+      help: "Repo cache fetches from the remote, by repo and reason.",
+      type: "counter"
+    },
+    %{
+      name: "symphony_repo_cache_skipped_total",
+      help: "Repo cache syncs that skipped the remote fetch because the cache was fresh.",
+      type: "counter"
     }
   ]
+
+  @repo_cache_counters_key {__MODULE__, :repo_cache_counters}
 
   @type metric_value :: integer() | float()
   @type sample :: %{
@@ -78,6 +90,7 @@ defmodule SymphonyElixirWeb.PrometheusMetrics do
       settings
       |> accounts()
       |> Enum.flat_map(&account_samples/1)
+      |> Kernel.++(repo_cache_samples())
       |> Enum.group_by(& &1.name)
 
     @metric_definitions
@@ -95,6 +108,79 @@ defmodule SymphonyElixirWeb.PrometheusMetrics do
       Enum.join(block_lines, "\n")
     end)
     |> Kernel.<>("\n")
+  end
+
+  @doc """
+  Counts a repo cache fetch from the remote. `reason` is `:refresher`, `:stale`,
+  or `:first_clone`.
+  """
+  @spec record_repo_cache_fetch(String.t(), atom()) :: :ok
+  def record_repo_cache_fetch(repo, reason) when is_binary(repo) and is_atom(reason) do
+    update_repo_cache_counters(fn counters ->
+      fetches =
+        Map.update(counters.fetches, repo, %{reason => 1}, fn reasons ->
+          Map.update(reasons, reason, 1, &(&1 + 1))
+        end)
+
+      %{counters | fetches: fetches}
+    end)
+  end
+
+  @doc "Counts a repo cache sync that skipped the remote fetch because the cache was fresh."
+  @spec record_repo_cache_skip(String.t()) :: :ok
+  def record_repo_cache_skip(repo) when is_binary(repo) do
+    update_repo_cache_counters(fn counters ->
+      skips = Map.update(counters.skips, repo, 1, &(&1 + 1))
+      %{counters | skips: skips}
+    end)
+  end
+
+  @doc false
+  @spec reset_repo_cache_metrics() :: :ok
+  def reset_repo_cache_metrics do
+    :persistent_term.put(@repo_cache_counters_key, empty_repo_cache_counters())
+    :ok
+  end
+
+  defp empty_repo_cache_counters, do: %{fetches: %{}, skips: %{}}
+
+  defp repo_cache_counters do
+    :persistent_term.get(@repo_cache_counters_key, empty_repo_cache_counters())
+  end
+
+  defp update_repo_cache_counters(fun) when is_function(fun, 1) do
+    _ =
+      :global.trans(
+        {__MODULE__, :repo_cache_counters},
+        fn ->
+          :persistent_term.put(@repo_cache_counters_key, fun.(repo_cache_counters()))
+        end,
+        [node()],
+        :infinity
+      )
+
+    :ok
+  end
+
+  defp repo_cache_samples do
+    counters = repo_cache_counters()
+
+    fetch_samples =
+      for {repo, reasons} <- counters.fetches,
+          {reason, count} <- reasons do
+        %{
+          name: "symphony_repo_cache_fetches_total",
+          labels: [repo: repo, reason: Atom.to_string(reason)],
+          value: count
+        }
+      end
+
+    skip_samples =
+      for {repo, count} <- counters.skips do
+        %{name: "symphony_repo_cache_skipped_total", labels: [repo: repo], value: count}
+      end
+
+    fetch_samples ++ skip_samples
   end
 
   defp accounts(%{accounts: %{enabled: true}} = settings) do
