@@ -113,6 +113,13 @@ projects:
     workflow: WORKFLOW.md
     workspace_root: ~/work/symphony-workspaces/project-a
     backend: codex
+    # Other repos this project's issues may need work in. An issue is worked in the
+    # repo its `repo/<name>` label names, else `repo`; see README "Multi-repo projects".
+    # repos:
+    #   - name: worker
+    #     repo: your-org/project-a-worker
+    #     default_branch: main
+    #     description: Queue consumers and scheduled jobs
 
   - linear_project: project-b
     repo: your-org/project-b

@@ -14,6 +14,7 @@ defmodule SymphonyElixir.Workspace do
   @repo_cache_fetched_at_file "symphony-fetched-at"
   @repo_cache_sync_marker "__SYMPHONY_REPO_CACHE__"
   @repo_branch_prefix "symphony/"
+  @reference_repos_dir ".symphony/repos"
 
   @type worker_host :: String.t() | nil
 
@@ -38,6 +39,7 @@ defmodule SymphonyElixir.Workspace do
                settings
              ),
            :ok <- initialize_new_workspace(workspace, issue_context, created?, worker_host, settings) do
+        sync_reference_repos(workspace, issue_context, worker_host, settings)
         {:ok, workspace}
       end
     rescue
@@ -178,7 +180,7 @@ defmodule SymphonyElixir.Workspace do
       case Map.get(route, :repo) do
         repo when is_binary(repo) and repo != "" ->
           route
-          |> preflight_route_repo_setup(repo, worker_hosts, settings)
+          |> preflight_route_repo_setup(worker_hosts, settings)
           |> reduce_while_result()
 
         _ ->
@@ -190,35 +192,37 @@ defmodule SymphonyElixir.Workspace do
   defp reduce_while_result(:ok), do: {:cont, :ok}
   defp reduce_while_result({:error, reason}), do: {:halt, {:error, reason}}
 
-  defp preflight_route_repo_setup(route, repo, worker_hosts, settings) do
-    repo_source = Config.repo_source(repo)
+  # Every repo of the route gets a cache; the workflow is read from the primary.
+  defp preflight_route_repo_setup(route, worker_hosts, settings) do
     workspace_root = Config.workspace_root_for_route(route, settings)
-    target_branch = Map.get(route, :default_branch)
     issue_context = route_issue_context(route)
 
-    Enum.reduce_while(worker_hosts, :ok, fn worker_host, :ok ->
-      route_context = {route, workspace_root, repo_source, target_branch, issue_context}
-
+    for project_repo <- Config.project_repos(route), worker_host <- worker_hosts do
+      {route, workspace_root, project_repo, issue_context, worker_host}
+    end
+    |> Enum.reduce_while(:ok, fn route_context, :ok ->
       route_context
-      |> preflight_route_worker_host(worker_host, settings)
+      |> preflight_route_worker_host(settings)
       |> reduce_while_result()
     end)
   end
 
-  defp preflight_route_worker_host(route_context, worker_host, settings) do
-    {route, workspace_root, repo_source, target_branch, issue_context} = route_context
+  defp preflight_route_worker_host({route, workspace_root, project_repo, issue_context, worker_host}, settings) do
+    repo_source = Config.repo_source(project_repo.repo)
 
     with :ok <-
            ensure_repo_cache(
              workspace_root,
              repo_source,
-             target_branch,
+             project_repo.default_branch,
              issue_context,
              worker_host,
              settings,
              force: true
            ) do
-      validate_project_route_workflow(route, workspace_root, repo_source, issue_context, worker_host, settings)
+      if project_repo.primary,
+        do: validate_project_route_workflow(route, workspace_root, repo_source, issue_context, worker_host, settings),
+        else: :ok
     end
   end
 
@@ -258,20 +262,26 @@ defmodule SymphonyElixir.Workspace do
   """
   @spec refresh_repo_cache(map(), Schema.t()) :: :ok | {:error, term()}
   def refresh_repo_cache(%{repo: repo} = route, %Schema{} = settings) when is_binary(repo) and repo != "" do
-    repo_source = Config.repo_source(repo)
     workspace_root = Config.workspace_root_for_route(route, settings)
-    target_branch = Map.get(route, :default_branch)
     issue_context = route_issue_context(route)
 
-    ensure_repo_cache(
-      workspace_root,
-      repo_source,
-      target_branch,
-      issue_context,
-      nil,
-      settings,
-      metric_reason: :refresher
-    )
+    route
+    |> Config.project_repos()
+    |> Enum.reduce(:ok, fn project_repo, result ->
+      refreshed =
+        ensure_repo_cache(
+          workspace_root,
+          Config.repo_source(project_repo.repo),
+          project_repo.default_branch,
+          issue_context,
+          nil,
+          settings,
+          metric_reason: :refresher
+        )
+
+      # Keep refreshing the other repos; report the first failure.
+      if result == :ok, do: refreshed, else: result
+    end)
   end
 
   def refresh_repo_cache(_route, %Schema{}), do: :ok
@@ -381,6 +391,84 @@ defmodule SymphonyElixir.Workspace do
   defp discard_workspace(workspace, worker_host, settings) when is_binary(worker_host) do
     remove_remote_workspace_path(workspace, worker_host, settings)
     :ok
+  end
+
+  @doc """
+  Where the project's other repos are checked out in a workspace, relative to
+  its root (`<dir>/<repo name>`).
+  """
+  @spec reference_repos_dir() :: String.t()
+  def reference_repos_dir, do: @reference_repos_dir
+
+  # The project's other repos (not the issue's home repo), checked out under
+  # `.symphony/repos/<name>` at their default branch so the agent can read them
+  # and describe a change one of them needs. Refreshed on every run (local edits
+  # there are discarded); a failure is logged and the run goes on without it.
+  defp sync_reference_repos(workspace, issue_context, worker_host, settings) do
+    home = Config.issue_repo(issue_context, settings)
+    workspace_root = Config.workspace_root_for_issue(issue_context, settings)
+
+    for project_repo <- Config.project_repos(Config.linear_project_route(issue_context, settings)),
+        home != nil and project_repo.name != home.name do
+      sync_reference_repo(workspace, workspace_root, project_repo, issue_context, worker_host, settings)
+    end
+
+    :ok
+  end
+
+  defp sync_reference_repo(workspace, workspace_root, project_repo, issue_context, worker_host, settings) do
+    repo_source = Config.repo_source(project_repo.repo)
+    cache_repo = repo_cache_path(workspace_root, repo_source)
+    target = Path.join([workspace, @reference_repos_dir, project_repo.name])
+    timeout_ms = hooks_timeout_ms(settings)
+    script = build_reference_repo_script(cache_repo, target, project_repo.default_branch, worker_host)
+
+    branch = project_repo.default_branch
+
+    with :ok <- ensure_repo_cache(workspace_root, repo_source, branch, issue_context, worker_host, settings),
+         {:ok, {_output, 0}} <-
+           with_repo_cache_lock(repo_cache_lock_key(workspace_root, repo_source, worker_host), fn ->
+             run_workspace_script(script, worker_host, timeout_ms)
+           end) do
+      :ok
+    else
+      failure ->
+        Logger.warning(
+          "Reference repo checkout failed #{issue_log_context(issue_context)} workspace=#{workspace} repo=#{repo_source.display} worker_host=#{worker_host_for_log(worker_host)} result=#{inspect(reference_repo_failure(failure))}"
+        )
+
+        :error
+    end
+  end
+
+  defp reference_repo_failure({:ok, {output, status}}), do: {:exit, status, sanitize_hook_output_for_log(output)}
+  defp reference_repo_failure(other), do: other
+
+  defp run_workspace_script(script, nil, timeout_ms), do: run_local_script(script, timeout_ms)
+  defp run_workspace_script(script, worker_host, timeout_ms), do: run_remote_command(worker_host, script, timeout_ms)
+
+  defp build_reference_repo_script(cache_repo, target, target_branch, worker_host) do
+    assign = if worker_host, do: &remote_shell_assign/2, else: &"#{&1}=#{shell_escape(&2)}"
+
+    ([
+       "set -eu",
+       assign.("cache_repo", cache_repo),
+       assign.("target", target),
+       assign.("target_branch", target_branch || "")
+     ] ++
+       resolve_target_branch_shell_lines("cache_repo", "target_branch") ++
+       [
+         "export GIT_TERMINAL_PROMPT=0",
+         "if [ ! -e \"$target/.git\" ]; then",
+         "  rm -rf \"$target\"",
+         "  mkdir -p \"$(dirname \"$target\")\"",
+         "  git clone --quiet --no-checkout \"$cache_repo\" \"$target\"",
+         "  git -C \"$target\" remote set-url origin \"$(git -C \"$cache_repo\" remote get-url origin)\"",
+         "fi",
+         "git -C \"$target\" fetch --quiet --no-tags \"$cache_repo\" '+refs/remotes/origin/*:refs/remotes/origin/*'",
+         "git -C \"$target\" checkout --quiet --force --detach \"origin/$target_branch\""
+       ])
+    |> Enum.join("\n")
   end
 
   defp maybe_bootstrap_workspace_repo(_workspace, _issue_context, false, _worker_host, _settings), do: :ok
@@ -653,7 +741,8 @@ defmodule SymphonyElixir.Workspace do
       issue_id: issue_id,
       issue_identifier: identifier || "issue",
       project_slug: Map.get(issue, :project_slug),
-      project_name: Map.get(issue, :project_name)
+      project_name: Map.get(issue, :project_name),
+      labels: List.wrap(Map.get(issue, :labels))
     }
   end
 
@@ -662,7 +751,8 @@ defmodule SymphonyElixir.Workspace do
       issue_id: Map.get(issue, :id),
       issue_identifier: identifier || "issue",
       project_slug: Map.get(issue, :project_slug),
-      project_name: Map.get(issue, :project_name)
+      project_name: Map.get(issue, :project_name),
+      labels: List.wrap(Map.get(issue, :labels))
     }
   end
 

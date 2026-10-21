@@ -19,15 +19,19 @@ defmodule SymphonyElixir.ProjectRoutes do
   use GenServer
   require Logger
 
-  alias SymphonyElixir.Config.Schema.TrackerProject
+  alias SymphonyElixir.Config
+  alias SymphonyElixir.Config.Schema.{TrackerProject, TrackerProjectRepo}
   alias SymphonyElixir.StateStore
 
   @table :symphony_project_routes
   @slug_pattern ~r/^[a-z0-9][a-z0-9-]{0,95}$/
   @repo_pattern ~r/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/
   @branch_pattern ~r/^[A-Za-z0-9][A-Za-z0-9._\/-]{0,199}$/
+  @repo_name_pattern ~r/^[a-z0-9][a-z0-9._-]{0,63}$/
   @backends ["codex", "claude", "opencode"]
   @max_routes 100
+  @max_extra_repos 10
+  @max_description 500
 
   @type route :: %{
           slug: String.t(),
@@ -35,6 +39,7 @@ defmodule SymphonyElixir.ProjectRoutes do
           workflow: String.t(),
           default_branch: String.t(),
           backend: String.t() | nil,
+          repos: [%{name: String.t(), repo: String.t(), default_branch: String.t(), description: String.t() | nil}],
           added_by: String.t(),
           added_at: String.t()
         }
@@ -64,7 +69,8 @@ defmodule SymphonyElixir.ProjectRoutes do
         workflow: route.workflow,
         backend: route.backend,
         default_branch: route.default_branch,
-        workspace_root: nil
+        workspace_root: nil,
+        repos: Enum.map(route.repos, &struct(TrackerProjectRepo, &1))
       }
     end)
   end
@@ -154,18 +160,77 @@ defmodule SymphonyElixir.ProjectRoutes do
         {:error, "backend must be one of #{Enum.join(@backends, ", ")}, or left out for the default."}
 
       true ->
-        {:ok,
-         %{
-           slug: slug,
-           repo: repo,
-           workflow: workflow,
-           default_branch: branch,
-           backend: backend,
-           added_by: added_by,
-           added_at: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
-         }}
+        with {:ok, repos} <- validate_repos(Map.get(attrs, "repos"), repo) do
+          {:ok,
+           %{
+             slug: slug,
+             repo: repo,
+             workflow: workflow,
+             default_branch: branch,
+             backend: backend,
+             repos: repos,
+             added_by: added_by,
+             added_at: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+           }}
+        end
     end
   end
+
+  # The project's other repos, held to the same rules as the primary one.
+  defp validate_repos(nil, _primary), do: {:ok, []}
+
+  defp validate_repos(repos, primary) when is_list(repos) and length(repos) <= @max_extra_repos do
+    repos
+    |> Enum.reduce_while({:ok, [], MapSet.new([Config.repo_name(primary)])}, &add_repo/2)
+    |> case do
+      {:ok, repos, _names} -> {:ok, repos}
+      {:error, message} -> {:error, message}
+    end
+  end
+
+  defp validate_repos(_repos, _primary), do: {:error, "repos must be a list of at most #{@max_extra_repos} repos."}
+
+  defp add_repo(entry, {:ok, acc, names}) do
+    case validate_repo(entry) do
+      {:ok, %{name: name} = repo} -> add_unique_repo(repo, acc, names, MapSet.member?(names, name))
+      {:error, message} -> {:halt, {:error, message}}
+    end
+  end
+
+  defp add_unique_repo(repo, acc, names, false), do: {:cont, {:ok, acc ++ [repo], MapSet.put(names, repo.name)}}
+
+  defp add_unique_repo(repo, _acc, _names, true),
+    do: {:halt, {:error, "repos has two repos named #{repo.name} (the primary repo is named after its last path segment); give one another name."}}
+
+  defp validate_repo(%{} = attrs) do
+    repo = string(attrs, "repo")
+    name = repo_name(string(attrs, "name", nil), repo)
+    branch = string(attrs, "default_branch", "main")
+    description = string(attrs, "description", nil)
+
+    cond do
+      not Regex.match?(@repo_pattern, repo) ->
+        {:error, "each of repos needs repo as a GitHub repository owner/name, e.g. acme/widgets-worker."}
+
+      not Regex.match?(@repo_name_pattern, name) ->
+        {:error, "repo names must be lowercase letters, digits, '.', '_' or '-' (#{inspect(name)})."}
+
+      not Regex.match?(@branch_pattern, branch) or String.contains?(branch, "..") ->
+        {:error, "default_branch of #{name} isn't a valid branch name."}
+
+      is_binary(description) and String.length(description) > @max_description ->
+        {:error, "the description of #{name} is longer than #{@max_description} characters."}
+
+      true ->
+        {:ok, %{name: name, repo: repo, default_branch: branch, description: description}}
+    end
+  end
+
+  defp validate_repo(_attrs), do: {:error, "each of repos must be an object with repo (and optionally name, default_branch, description)."}
+
+  defp repo_name(name, _repo) when is_binary(name), do: String.downcase(name)
+  defp repo_name(nil, ""), do: ""
+  defp repo_name(nil, repo), do: Config.repo_name(repo)
 
   defp string(attrs, key, default \\ "") do
     case Map.get(attrs, key) do

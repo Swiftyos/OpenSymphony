@@ -21,6 +21,7 @@ defmodule SymphonyElixir.Orchestrator do
     SessionHistory,
     StatusDashboard,
     Tracker,
+    Unblocker,
     UsageLedger,
     Workspace
   }
@@ -526,6 +527,8 @@ defmodule SymphonyElixir.Orchestrator do
     if state.delayed_restart, do: send(self(), :delayed_restart_check)
 
     Enum.each(issues, &UsageLedger.observe_issue/1)
+    # A cast: the unblocking (tracker reads and writes) happens in its own tasks.
+    Unblocker.observe(issues)
 
     if available_slots(state) > 0 do
       choose_issues(issues, state)

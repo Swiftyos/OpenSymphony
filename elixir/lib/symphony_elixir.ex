@@ -69,6 +69,8 @@ defmodule SymphonyElixir.Application do
       SymphonyElixir.RepoCacheLock,
       # Warms project repo caches so agent starts rarely fetch from GitHub.
       SymphonyElixir.RepoCacheRefresher,
+      # Moves blocked issues back to work once their blockers are done.
+      SymphonyElixir.Unblocker,
       SymphonyElixir.RunnerCommands,
       SymphonyElixir.Capacity.Metrics,
       SymphonyElixir.Orchestrator,

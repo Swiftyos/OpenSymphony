@@ -163,6 +163,8 @@ Fields:
     - `id` (string or null)
     - `identifier` (string or null)
     - `state` (string or null)
+    - `state_type` (string or null, extension): the tracker's state category, e.g. Linear's
+      `completed` or `canceled`
 - `created_at` (timestamp or null)
 - `updated_at` (timestamp or null)
 
@@ -862,6 +864,14 @@ An issue is dispatch-eligible only if all are true:
 - Per-state concurrency slots are available.
 - Blocker rule for `Todo` state passes:
   - If the issue state is `Todo`, do not dispatch when any blocker is non-terminal.
+
+Unblocking (extension): an issue in a `parked` stage (e.g. Blocked) that has at least one blocker,
+all of them completed (`state_type` `completed`; a cancelled blocker keeps it parked), is moved
+back to work on the next poll: to the stage it was parked from when its flow connects the two,
+else to the first `agent` or `queue` stage the parked stage leads to. Before the move the
+orchestrator re-reads the issue and posts one `## Unblocked` comment summarizing each blocker
+(title, link, attachments such as PRs, and its stage summaries). A parked issue with no
+blockers waits for a person.
 
 Sorting order (stable intent):
 

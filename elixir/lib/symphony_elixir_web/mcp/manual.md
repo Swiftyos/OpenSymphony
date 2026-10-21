@@ -20,9 +20,11 @@ To answer "what is this?", start here; for the live state, call `symphony_status
 
 - **Issue**: a Linear issue. Symphony works an issue when its Linear project is one Symphony
   listens to (see `list_projects`) and its current stage is one agents run.
-- **Project**: a Linear project mapped to one GitHub repo. An issue's agent works in a fresh
-  clone of that repo, on the branch `symphony/<issue identifier>`, and the repo's
-  `WORKFLOW.md` gives every stage its setup steps and base instructions.
+- **Project**: a Linear project mapped to a GitHub repo, and optionally more repos. An issue's
+  agent works in a fresh clone of its repo, on the branch `symphony/<issue identifier>`, and
+  the primary repo's `WORKFLOW.md` gives every stage its setup steps and base instructions. In
+  a multi-repo project an issue's repo is the one its `repo/<name>` label names (else the
+  primary), and the other repos are checked out read-only beside it.
 - **Flow**: the stages issues move through and the connections between them. Each team has a
   flow, and a project may have its own. An issue follows its project's flow if it has one,
   otherwise its team's, otherwise the organisation's default flow.
@@ -63,6 +65,9 @@ To answer "what is this?", start here; for the live state, call `symphony_status
    issue on, from Linear or the dashboard or with `move_issue` here.
 6. If an agent is stuck (missing access, unclear requirements) it moves the issue to Blocked
    and says what it needs; a person resolves it and moves it back.
+7. If the fix belongs in another of the project's repos, the agent files an issue for that repo,
+   links it as blocking, and moves its own issue to Blocked. When every blocker is done,
+   Symphony moves the issue back to Implement with a comment saying what the blockers changed.
 
 Agents never merge pull requests unless their flow's instructions say so, and they never push
 to the default branch.
@@ -77,7 +82,8 @@ A flow decides where people step in. Common gates:
   to Done, or comments and sends it back to Implement.
 - **Approval on a stage**: the agent's move out of the stage is held (the issue carries an
   approval label) until a person approves it or sends it back (`review_issue`).
-- **Blocked**: always needs a person.
+- **Blocked**: needs a person, unless the issue is blocked by other Linear issues: then Symphony
+  moves it back to work once they are all done (a cancelled one still needs a person).
 
 To find work waiting on you: `list_issues` (each issue shows its stage), or
 `list_issues` with `awaiting_approval: true` for held moves.
@@ -143,7 +149,12 @@ example approve to the next stage, send back to the previous one).
 `value: true`; set it back to `false` to resume.
 
 **Unblock an issue.** Read why with `get_issue`, fix the cause (access, a clarified
-description), then `move_issue` to the stage its Blocked transitions allow.
+description), then `move_issue` to the stage its Blocked transitions allow. An issue blocked by
+other issues is moved back automatically once they are all done.
+
+**Give a project more repos.** `add_project` again with `repos` (each `repo` as owner/name,
+optionally `name`, `default_branch` and `description`). Label an issue `repo/<name>` to have
+it worked in that repo.
 
 **Tell an agent something.** `send_agent_message` with the issue identifier and your message.
 

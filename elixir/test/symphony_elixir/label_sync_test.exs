@@ -73,6 +73,37 @@ defmodule SymphonyElixir.LabelSyncTest do
     assert LabelSync.project_names()["checkout"] == "Checkout API"
   end
 
+  test "a project with more than one repo gets the repo group with a label per repo" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "linear",
+      tracker_api_token: "k",
+      tracker_project_slug: nil,
+      tracker_projects: [%{slug: "checkout", repo: "acme/checkout-api", repos: [%{name: "worker", repo: "acme/checkout-worker"}]}]
+    )
+
+    linear([])
+
+    assert {:ok, %{"OPS" => created}} = LabelSync.sync()
+    assert "repo" in created
+    assert "repo/checkout-api" in created
+    assert "repo/worker" in created
+    assert_receive {:graphql, _, %{prefix: "repo"}}
+
+    # A failure is logged and the other labels are still reported.
+    reply(fn query, variables ->
+      cond do
+        query =~ "SymphonyProjectTeams" -> {:ok, %{"data" => %{"projects" => %{"nodes" => [%{"slugId" => "checkout", "name" => "Checkout API", "teams" => %{"nodes" => [%{"key" => "OPS"}]}}]}}}}
+        query =~ "SymphonyStageLabels" and variables.prefix == "repo" -> {:error, :down}
+        query =~ "SymphonyStageLabels" -> {:ok, %{"data" => %{"teams" => %{"nodes" => [%{"id" => "t1"}]}, "issueLabels" => %{"nodes" => []}}}}
+        query =~ "SymphonyPlainLabels" -> {:ok, %{"data" => %{"teams" => %{"nodes" => [%{"id" => "t1", "labels" => %{"nodes" => []}}]}, "issueLabels" => %{"nodes" => []}}}}
+        query =~ "SymphonyCreateLabel" -> {:ok, %{"data" => %{"issueLabelCreate" => %{"success" => true, "issueLabel" => %{"id" => "new"}}}}}
+      end
+    end)
+
+    log = capture_log(fn -> assert {:ok, %{"OPS" => created}} = LabelSync.sync() end)
+    assert log =~ "repo label sync failed"
+  end
+
   test "a flow without stage labels only needs the plain labels" do
     plain_flow = %{
       "stages" => [

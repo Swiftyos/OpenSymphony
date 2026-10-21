@@ -37,12 +37,47 @@ defmodule SymphonyElixir.Config.Schema do
     def dump(_value), do: :error
   end
 
+  defmodule TrackerProjectRepo do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    alias SymphonyElixir.Config.Schema
+
+    @primary_key false
+    # The name becomes the `repo/<name>` Linear label and a directory name.
+    @name_pattern ~r/^[a-z0-9][a-z0-9._-]{0,63}$/
+
+    embedded_schema do
+      field(:name, :string)
+      field(:repo, :string)
+      field(:default_branch, :string)
+      field(:description, :string)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:name, :repo, :default_branch, :description], empty_values: [])
+      |> update_change(:name, &(&1 |> Schema.normalize_optional_string() |> downcase()))
+      |> update_change(:repo, &Schema.normalize_optional_string/1)
+      |> update_change(:default_branch, &Schema.normalize_optional_string/1)
+      |> update_change(:description, &Schema.normalize_optional_string/1)
+      |> validate_required([:name, :repo])
+      |> validate_format(:name, @name_pattern, message: "must be lowercase letters, digits, '.', '_' or '-'")
+    end
+
+    defp downcase(nil), do: nil
+    defp downcase(value), do: String.downcase(value)
+  end
+
   defmodule TrackerProject do
     @moduledoc false
     use Ecto.Schema
     import Ecto.Changeset
 
     alias SymphonyElixir.Config.Schema
+    alias SymphonyElixir.Config.Schema.TrackerProjectRepo
 
     @primary_key false
 
@@ -53,6 +88,8 @@ defmodule SymphonyElixir.Config.Schema do
       field(:backend, :string)
       field(:default_branch, :string)
       field(:workspace_root, :string)
+      # More repos agents may work in for this project; `repo` stays the primary.
+      embeds_many(:repos, TrackerProjectRepo, on_replace: :delete)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -72,6 +109,7 @@ defmodule SymphonyElixir.Config.Schema do
           [backend: "must be one of: codex, opencode, claude"]
         end
       end)
+      |> cast_embed(:repos, with: &TrackerProjectRepo.changeset/2)
       |> validate_required([:slug])
     end
   end

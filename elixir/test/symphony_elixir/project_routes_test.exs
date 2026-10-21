@@ -41,6 +41,37 @@ defmodule SymphonyElixir.ProjectRoutesTest do
     assert {:error, :not_found} = ProjectRoutes.delete(nil)
   end
 
+  test "a route can list more repos, each a GitHub repo with a unique name" do
+    base = %{"slug" => "0a1b2c3d4e5f", "repo" => "acme/widgets"}
+
+    assert {:ok, %{repos: [worker, %{name: "infra", default_branch: "trunk"}]}} =
+             ProjectRoutes.put(
+               Map.put(base, "repos", [
+                 %{"name" => "Worker", "repo" => "acme/widgets-worker", "description" => "Jobs"},
+                 %{"repo" => "acme/infra", "default_branch" => "trunk"}
+               ]),
+               "ada"
+             )
+
+    assert worker == %{name: "worker", repo: "acme/widgets-worker", default_branch: "main", description: "Jobs"}
+    assert [%{repos: [%{name: "worker"}, %{name: "infra"}]}] = ProjectRoutes.tracker_projects()
+
+    for {repos, message} <- [
+          {[%{"repo" => "/srv/worker"}], "owner/name"},
+          {[%{}], "owner/name"},
+          {[%{"repo" => "acme/x", "description" => String.duplicate("x", 501)}], "longer than 500"},
+          {[%{"repo" => "acme/widgets"}], "two repos named widgets"},
+          {[%{"name" => "a", "repo" => "acme/a"}, %{"name" => "a", "repo" => "acme/b"}], "two repos named a"},
+          {[%{"name" => "../x", "repo" => "acme/x"}], "repo names"},
+          {[%{"repo" => "acme/x", "default_branch" => "-x"}], "branch"},
+          {"acme/x", "list"},
+          {["acme/x"], "object"}
+        ] do
+      assert {:error, error} = ProjectRoutes.put(Map.put(base, "repos", repos), "ada"), inspect(repos)
+      assert error =~ message
+    end
+  end
+
   test "routes are persisted, and re-validated on load" do
     dir = Path.join(System.tmp_dir!(), "project-routes-#{System.unique_integer([:positive])}")
     path = Path.join(dir, "project_routes.json")

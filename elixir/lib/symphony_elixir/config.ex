@@ -64,8 +64,23 @@ defmodule SymphonyElixir.Config do
           workflow: String.t() | nil,
           backend: String.t() | nil,
           default_branch: String.t() | nil,
-          workspace_root: String.t() | nil
+          workspace_root: String.t() | nil,
+          repos: [map()]
         }
+
+  @typedoc """
+  A repo a project's agents can work in: the route's primary `repo`, or one of
+  its `repos:`. An issue's home repo is the one its `repo/<name>` label names.
+  """
+  @type project_repo :: %{
+          name: String.t(),
+          repo: String.t(),
+          default_branch: String.t() | nil,
+          description: String.t() | nil,
+          primary: boolean()
+        }
+
+  @repo_label_group "repo"
 
   @type repo_source_kind :: :local_path | :github_slug | :remote_url
 
@@ -528,7 +543,7 @@ defmodule SymphonyElixir.Config do
       [] ->
         case settings.tracker.project_slug do
           project_slug when is_binary(project_slug) ->
-            [%{slug: project_slug, repo: nil, workflow: nil, backend: nil, workspace_root: nil}]
+            [%{slug: project_slug, repo: nil, workflow: nil, backend: nil, workspace_root: nil, repos: []}]
 
           _ ->
             []
@@ -605,11 +620,88 @@ defmodule SymphonyElixir.Config do
 
   @spec project_repo_for_issue(map() | String.t() | nil, Schema.t()) :: String.t() | nil
   def project_repo_for_issue(issue_or_identifier, %Schema{} = settings) do
-    case linear_project_route(issue_or_identifier, settings) do
-      %{repo: repo} when is_binary(repo) and repo != "" -> repo
-      _ -> nil
+    case issue_repo(issue_or_identifier, settings) do
+      %{repo: repo} -> repo
+      nil -> nil
     end
   end
+
+  @doc """
+  The repos a project route's agents can work in, primary first. The primary is
+  named after its repo (`acme/payments-api` -> `payments-api`).
+  """
+  @spec project_repos(map() | nil) :: [project_repo()]
+  def project_repos(%{repo: repo} = route) when is_binary(repo) and repo != "" do
+    primary = %{name: repo_name(repo), repo: repo, default_branch: Map.get(route, :default_branch), description: nil, primary: true}
+
+    extra =
+      for %{name: name, repo: extra_repo} = entry <- List.wrap(Map.get(route, :repos)), is_binary(name) and is_binary(extra_repo) do
+        %{name: name, repo: extra_repo, default_branch: Map.get(entry, :default_branch), description: Map.get(entry, :description), primary: false}
+      end
+
+    [primary | extra]
+  end
+
+  def project_repos(_route), do: []
+
+  @doc """
+  The repo an issue's work happens in: the one its `repo/<name>` label names,
+  else the project's primary repo. Nil when the project has no repo.
+  """
+  @spec issue_repo(map() | String.t() | nil, Schema.t()) :: project_repo() | nil
+  def issue_repo(issue_or_identifier, %Schema{} = settings) do
+    repos = issue_or_identifier |> linear_project_route(settings) |> project_repos()
+    wanted = issue_repo_label_name(issue_or_identifier)
+
+    Enum.find(repos, &(&1.name == wanted)) || List.first(repos)
+  end
+
+  @doc """
+  The Linear label group that picks an issue's repo (`repo/<name>`).
+  """
+  @spec repo_label_group() :: String.t()
+  def repo_label_group, do: @repo_label_group
+
+  @doc """
+  The label that sends an issue to the named repo.
+  """
+  @spec repo_label(String.t()) :: String.t()
+  def repo_label(name) when is_binary(name), do: @repo_label_group <> "/" <> name
+
+  @doc """
+  The short name of a repo: its last path segment, lowercased, without `.git`.
+  """
+  @spec repo_name(String.t()) :: String.t()
+  def repo_name(repo) when is_binary(repo) do
+    repo
+    |> String.trim()
+    |> String.trim_trailing("/")
+    |> String.split(["/", ":"])
+    |> List.last()
+    |> String.replace_suffix(".git", "")
+    |> String.downcase()
+    |> String.replace(~r/[^a-z0-9._-]+/, "-")
+    |> String.trim("-")
+    |> case do
+      "" -> "repo"
+      name -> name
+    end
+  end
+
+  defp issue_repo_label_name(issue) do
+    prefix = @repo_label_group <> "/"
+
+    issue
+    |> issue_labels()
+    |> Enum.find_value(fn label ->
+      label = String.downcase(label)
+      if String.starts_with?(label, prefix), do: String.replace_prefix(label, prefix, "")
+    end)
+  end
+
+  defp issue_labels(%{labels: labels}) when is_list(labels), do: Enum.filter(labels, &is_binary/1)
+  defp issue_labels(%{"labels" => labels}) when is_list(labels), do: Enum.filter(labels, &is_binary/1)
+  defp issue_labels(_issue), do: []
 
   @spec project_repo_source_for_issue(map() | String.t() | nil) :: repo_source() | nil
   def project_repo_source_for_issue(issue_or_identifier),
@@ -631,7 +723,7 @@ defmodule SymphonyElixir.Config do
 
   @spec project_default_branch_for_issue(map() | String.t() | nil, Schema.t()) :: String.t() | nil
   def project_default_branch_for_issue(issue_or_identifier, %Schema{} = settings) do
-    case linear_project_route(issue_or_identifier, settings) do
+    case issue_repo(issue_or_identifier, settings) do
       %{default_branch: default_branch} when is_binary(default_branch) and default_branch != "" ->
         default_branch
 
@@ -843,6 +935,26 @@ defmodule SymphonyElixir.Config do
 
       not repo_relative_workflow_path?(workflow_path) ->
         {:error, {:invalid_workflow_config, "projects #{inspect(slug)} workflow must be relative to the repo root: #{workflow_path}"}}
+
+      true ->
+        validate_project_repos(slug, project_repos(route))
+    end
+  end
+
+  defp validate_project_repos(slug, repos) do
+    duplicate =
+      repos
+      |> Enum.frequencies_by(& &1.name)
+      |> Enum.find_value(fn {name, count} -> if count > 1, do: name end)
+
+    missing = Enum.find(repos, &(not &1.primary and local_repo_path?(&1.repo) and not File.exists?(&1.repo)))
+
+    cond do
+      duplicate ->
+        {:error, {:invalid_workflow_config, "projects #{inspect(slug)} has two repos named #{inspect(duplicate)} (the primary repo is named after its last path segment)"}}
+
+      missing ->
+        {:error, {:invalid_workflow_config, "projects #{inspect(slug)} repo #{inspect(missing.name)} path does not exist: #{missing.repo}"}}
 
       true ->
         :ok

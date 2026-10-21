@@ -48,6 +48,7 @@ defmodule SymphonyElixir.Linear.Client do
               identifier
               state {
                 name
+                type
               }
             }
           }
@@ -101,6 +102,7 @@ defmodule SymphonyElixir.Linear.Client do
               identifier
               state {
                 name
+                type
               }
             }
           }
@@ -705,7 +707,8 @@ defmodule SymphonyElixir.Linear.Client do
             %{
               id: blocker_issue["id"],
               identifier: blocker_issue["identifier"],
-              state: get_in(blocker_issue, ["state", "name"])
+              state: get_in(blocker_issue, ["state", "name"]),
+              state_type: get_in(blocker_issue, ["state", "type"])
             }
           ]
         else

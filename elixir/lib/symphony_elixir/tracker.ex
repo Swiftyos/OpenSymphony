@@ -14,7 +14,9 @@ defmodule SymphonyElixir.Tracker do
   @callback set_stage(String.t(), String.t(), String.t() | nil, keyword()) :: :ok | {:error, term()}
   @callback ensure_stage_labels(String.t(), [String.t()]) :: {:ok, [String.t()]} | {:error, term()}
   @callback ensure_labels(String.t(), [String.t()]) :: {:ok, [String.t()]} | {:error, term()}
+  @callback ensure_group_labels(String.t(), String.t(), [String.t()]) :: {:ok, [String.t()]} | {:error, term()}
   @callback project_info([String.t()]) :: {:ok, %{String.t() => map()}} | {:error, term()}
+  @callback fetch_issue_reports([String.t()]) :: {:ok, [map()]} | {:error, term()}
 
   @spec fetch_candidate_issues() :: {:ok, [term()]} | {:error, term()}
   def fetch_candidate_issues do
@@ -81,10 +83,25 @@ defmodule SymphonyElixir.Tracker do
   def ensure_labels(team_key, names), do: adapter().ensure_labels(team_key, names)
 
   @doc """
+  Makes sure a team has a `group` label group with these child labels (e.g. the
+  `repo` group with one label per project repo), creating what's missing.
+  """
+  @spec ensure_group_labels(String.t(), String.t(), [String.t()]) :: {:ok, [String.t()]} | {:error, term()}
+  def ensure_group_labels(team_key, group, labels), do: adapter().ensure_group_labels(team_key, group, labels)
+
+  @doc """
   Each project's (by slug) name and team keys: `%{name: ..., teams: [...]}`.
   """
   @spec project_info([String.t()]) :: {:ok, %{String.t() => map()}} | {:error, term()}
   def project_info(slugs), do: adapter().project_info(slugs)
+
+  @doc """
+  What happened on some issues (by id): `%{id, identifier, title, url, state,
+  state_type, attachments: [%{title, url}], comments: [body]}`, comments newest
+  first.
+  """
+  @spec fetch_issue_reports([String.t()]) :: {:ok, [map()]} | {:error, term()}
+  def fetch_issue_reports(ids), do: adapter().fetch_issue_reports(ids)
 
   @spec adapter() :: module()
   def adapter do

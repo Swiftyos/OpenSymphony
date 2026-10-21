@@ -9,6 +9,8 @@ defmodule SymphonyElixir.LabelSync do
       flow the team's issues in that project follow
     * `tracker.require_label` (e.g. `auto-build`) and `tracker.approval_label`
       (e.g. `needs-approval`)
+    * for a project with more than one repo, the `repo` label group with a
+      child label per repo (`repo/<name>` picks the repo an issue is worked in)
 
   Labels that already exist in the team or workspace are left alone. It runs
   once at startup, and for each project added through MCP (`sync_projects/1`);
@@ -63,10 +65,12 @@ defmodule SymphonyElixir.LabelSync do
         remember_names(info)
         teams_by_project = Map.new(info, fn {slug, %{teams: teams}} -> {slug, teams} end)
 
+        repo_labels = repo_labels_by_team(teams_by_project, settings)
+
         created =
           teams_by_project
           |> stage_labels_by_team()
-          |> Map.new(fn {team, labels} -> {team, ensure(team, labels, plain)} end)
+          |> Map.new(fn {team, labels} -> {team, ensure(team, labels, plain) ++ ensure_repo_labels(team, Map.get(repo_labels, team, []))} end)
 
         log(created)
         {:ok, created}
@@ -109,6 +113,34 @@ defmodule SymphonyElixir.LabelSync do
         Map.update(acc, team, labels, &Enum.uniq(&1 ++ labels))
       end)
     end)
+  end
+
+  # Single-repo projects need no repo labels: every issue goes to the one repo.
+  defp repo_labels_by_team(teams_by_project, settings) do
+    routes = Config.linear_project_routes(settings)
+
+    Enum.reduce(teams_by_project, %{}, fn {slug, teams}, acc ->
+      names =
+        case routes |> Enum.find(&(&1.slug == slug)) |> Config.project_repos() do
+          [_primary, _ | _] = repos -> Enum.map(repos, & &1.name)
+          _ -> []
+        end
+
+      Enum.reduce(teams, acc, fn team, acc -> Map.update(acc, team, names, &Enum.uniq(&1 ++ names)) end)
+    end)
+  end
+
+  defp ensure_repo_labels(_team, []), do: []
+
+  defp ensure_repo_labels(team, names) do
+    case Tracker.ensure_group_labels(team, Config.repo_label_group(), names) do
+      {:ok, created} ->
+        created
+
+      {:error, reason} ->
+        Logger.warning("Linear repo label sync failed team=#{team} reason=#{inspect(reason)}")
+        []
+    end
   end
 
   defp ensure(team, stage_labels, plain) do

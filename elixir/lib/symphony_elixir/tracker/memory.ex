@@ -115,6 +115,12 @@ defmodule SymphonyElixir.Tracker.Memory do
     {:ok, []}
   end
 
+  @spec ensure_group_labels(String.t(), String.t(), [String.t()]) :: {:ok, [String.t()]}
+  def ensure_group_labels(team_key, group, labels) do
+    send_event({:memory_tracker_ensure_group_labels, team_key, group, labels})
+    {:ok, []}
+  end
+
   # Teams come from the configured issues' identifiers (`PAY-1` -> `PAY`).
   @spec project_info([String.t()]) :: {:ok, %{String.t() => map()}}
   def project_info(slugs) do
@@ -126,6 +132,21 @@ defmodule SymphonyElixir.Tracker.Memory do
        teams = for issue <- mine, team = SymphonyElixir.IssueStage.team(issue), uniq: true, do: team
        {slug, %{name: Enum.find_value(mine, & &1.project_name), teams: teams}}
      end)}
+  end
+
+  # Reports come from `:memory_tracker_issue_reports` (by id), else the issue itself.
+  @spec fetch_issue_reports([String.t()]) :: {:ok, [map()]}
+  def fetch_issue_reports(ids) do
+    reports = Application.get_env(:symphony_elixir, :memory_tracker_issue_reports, %{})
+    issues = Map.new(issue_entries(), &{&1.id, &1})
+
+    {:ok, ids |> Enum.map(&(Map.get(reports, &1) || issue_report(Map.get(issues, &1)))) |> Enum.reject(&is_nil/1)}
+  end
+
+  defp issue_report(nil), do: nil
+
+  defp issue_report(%Issue{} = issue) do
+    %{id: issue.id, identifier: issue.identifier, title: issue.title, url: issue.url, state: issue.state, state_type: nil, attachments: [], comments: []}
   end
 
   defp issue_entries do

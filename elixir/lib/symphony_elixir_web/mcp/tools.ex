@@ -202,7 +202,22 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
         repo: %{type: "string", description: "GitHub repository as owner/name, e.g. acme/widgets."},
         workflow: %{type: "string", description: "Path of the workflow file in the repo (default WORKFLOW.md)."},
         default_branch: %{type: "string", description: "Branch PRs target (default main)."},
-        backend: %{type: "string", enum: ["codex", "claude", "opencode"], description: "Default harness (stage settings and labels still win)."}
+        backend: %{type: "string", enum: ["codex", "claude", "opencode"], description: "Default harness (stage settings and labels still win)."},
+        repos: %{
+          type: "array",
+          description:
+            "Other GitHub repos this project's issues may need work in. Each issue is worked in one repo: the one its repo/<name> label names, else the primary repo. Agents can read the others, and file an issue for the repo that needs a change.",
+          items: %{
+            type: "object",
+            properties: %{
+              repo: %{type: "string", description: "GitHub repository as owner/name."},
+              name: %{type: "string", description: "Short name for the repo/<name> label (default: the repo's name)."},
+              default_branch: %{type: "string", description: "Branch PRs target (default main)."},
+              description: %{type: "string", description: "What lives in this repo, so agents know when a problem belongs there."}
+            },
+            required: ["repo"]
+          }
+        }
       },
       required: ["project", "repo"]
     },
@@ -507,12 +522,12 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
       Config.linear_project_routes()
       |> Enum.reject(&(MapSet.member?(stored_slugs, &1.slug) and not MapSet.member?(file_slugs, &1.slug)))
       # Legacy single-project routes are plain maps without every key.
-      |> Enum.map(&(&1 |> Map.take([:repo, :workflow, :default_branch, :backend]) |> Map.merge(%{project: &1.slug, source: "config", active: true})))
+      |> Enum.map(&(&1 |> Map.take([:repo, :workflow, :default_branch, :backend]) |> Map.merge(%{project: &1.slug, repos: extra_repos(&1), source: "config", active: true})))
 
     from_mcp =
       Enum.map(stored, fn route ->
         route
-        |> Map.take([:repo, :workflow, :default_branch, :backend, :added_by, :added_at])
+        |> Map.take([:repo, :workflow, :default_branch, :backend, :repos, :added_by, :added_at])
         |> Map.merge(%{project: route.slug, source: "mcp", active: live? and not MapSet.member?(file_slugs, route.slug)})
       end)
 
@@ -533,7 +548,7 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
 
       {:ok,
        %{
-         added: Map.take(route, [:slug, :repo, :workflow, :default_branch, :backend]),
+         added: Map.take(route, [:slug, :repo, :workflow, :default_branch, :backend, :repos]),
          note:
            "Symphony polls this project from now on. Before filing issues: #{route.repo} needs #{route.workflow} on #{route.default_branch}, " <>
              "and Symphony's GitHub access needs push and pull-request rights on it."
@@ -727,4 +742,8 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
   defp orchestrator, do: Endpoint.config(:orchestrator) || Orchestrator
 
   defp snapshot_timeout_ms, do: Endpoint.config(:snapshot_timeout_ms) || 15_000
+
+  defp extra_repos(route) do
+    for repo <- Config.project_repos(route), not repo.primary, do: Map.take(repo, [:name, :repo, :default_branch, :description])
+  end
 end

@@ -193,6 +193,36 @@ projects:
     backend: claude
 ```
 
+Multi-repo projects:
+
+A project whose work spans several repos lists the others under `repos:`. `repo` stays the
+primary: its `workflow` applies to every issue in the project.
+
+```yaml
+projects:
+  - linear_project: "payments"
+    repo: your-org/payments-api            # primary, named "payments-api"
+    workflow: WORKFLOW.md
+    repos:
+      - name: worker
+        repo: your-org/payments-worker
+        default_branch: main
+        description: Queue consumers; job processing errors usually start here
+```
+
+- Each issue is worked in one repo, its home repo: the one its `repo/<name>` label names (for
+  example `repo/worker`), else the primary. The workspace is a checkout of the home repo on
+  `symphony/<ID>`, and the commits, branch and PR go there only. Symphony creates the `repo`
+  label group and a label per repo in each project team.
+- The project's other repos are checked out read-only under `.symphony/repos/<name>` at their
+  default branch, refreshed at the start of every run, so the agent can read them.
+- When the fix belongs in another repo, the agent (told how in its prompt) files a Linear issue
+  for that repo (`repo/<name>`, Todo, same project), links it as blocking its own issue, and moves
+  its issue to Blocked. Once every blocker is done, Symphony moves the issue back to Implement and
+  comments what each blocker changed (its PRs and stage summaries), and the next run starts from
+  that comment. A cancelled blocker, or a Blocked issue with no blockers, still waits for a person.
+- Projects added with the MCP `add_project` tool take the same `repos` list (GitHub repos only).
+
 Provider switching example:
 
 ```text

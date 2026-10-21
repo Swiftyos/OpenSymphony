@@ -3,7 +3,7 @@ defmodule SymphonyElixir.PromptBuilder do
   Builds agent prompts from Linear issue data.
   """
 
-  alias SymphonyElixir.{Config, IssueConfig, IssueStage, Workflow}
+  alias SymphonyElixir.{Config, IssueConfig, IssueStage, RepoPrompt, Workflow}
   alias SymphonyElixir.Factory.StagePrompt
 
   @render_opts [strict_variables: true, strict_filters: true]
@@ -12,6 +12,7 @@ defmodule SymphonyElixir.PromptBuilder do
   def build_prompt(issue, opts \\ []) do
     source = resolve_prompt_template(issue, opts)
     stage = StagePrompt.variables(issue)
+    repo_opts = repo_opts(opts)
 
     rendered =
       source
@@ -21,6 +22,7 @@ defmodule SymphonyElixir.PromptBuilder do
           "attempt" => Keyword.get(opts, :attempt),
           "issue" => issue |> Map.from_struct() |> to_solid_map() |> Map.put("stage", stage["id"]),
           "stage" => stage,
+          "repo" => RepoPrompt.variables(issue, repo_opts),
           "factory" => %{"label_prefix" => IssueStage.label_prefix()}
         },
         @render_opts
@@ -28,9 +30,23 @@ defmodule SymphonyElixir.PromptBuilder do
       |> IO.iodata_to_binary()
 
     # Templates that don't place the stage section themselves get it appended.
-    if String.contains?(source, "stage.prompt") or stage["prompt"] == "",
-      do: rendered,
-      else: rendered <> "\n\n" <> stage["prompt"] <> "\n"
+    rendered =
+      if String.contains?(source, "stage.prompt") or stage["prompt"] == "",
+        do: rendered,
+        else: rendered <> "\n\n" <> stage["prompt"] <> "\n"
+
+    # A multi-repo project's agents always get the repositories section.
+    case RepoPrompt.render(issue, repo_opts) do
+      "" -> rendered
+      repos -> rendered <> "\n\n" <> repos
+    end
+  end
+
+  defp repo_opts(opts) do
+    case Keyword.get(opts, :issue_config) do
+      %IssueConfig{settings: settings} -> [settings: settings]
+      _ -> []
+    end
   end
 
   defp resolve_prompt_template(issue, opts) do

@@ -342,8 +342,15 @@ defmodule SymphonyElixir.Linear.Adapter do
 
   @spec ensure_stage_labels(String.t(), [String.t()]) :: {:ok, [String.t()]} | {:error, term()}
   def ensure_stage_labels(team_key, labels) when is_binary(team_key) and is_list(labels) do
-    prefix = SymphonyElixir.IssueStage.label_prefix()
+    ensure_group_labels(team_key, SymphonyElixir.IssueStage.label_prefix(), labels)
+  end
 
+  @doc """
+  Makes sure a team has a `group` label group with these child labels, creating
+  what's missing. Returns the labels created, as `group/label`.
+  """
+  @spec ensure_group_labels(String.t(), String.t(), [String.t()]) :: {:ok, [String.t()]} | {:error, term()}
+  def ensure_group_labels(team_key, prefix, labels) when is_binary(team_key) and is_binary(prefix) and is_list(labels) do
     with {:ok, response} <- client_module().graphql(@label_inventory_query, %{teamKey: team_key, prefix: prefix}),
          {:ok, team_id} <- inventory_team_id(response),
          nodes = get_in(response, ["data", "issueLabels", "nodes"]) || [],
@@ -407,6 +414,72 @@ defmodule SymphonyElixir.Linear.Adapter do
       {:ok, _id} -> {:cont, {:ok, created ++ [name]}}
       {:error, reason} -> {:halt, {:error, reason}}
     end
+  end
+
+  @issue_reports_query """
+  query SymphonyIssueReports($ids: [ID!]!) {
+    issues(filter: {id: {in: $ids}}, first: 50) {
+      nodes {
+        id
+        identifier
+        title
+        url
+        state {
+          name
+          type
+        }
+        attachments(first: 25) {
+          nodes {
+            title
+            url
+          }
+        }
+        comments(first: 100) {
+          nodes {
+            body
+            createdAt
+          }
+        }
+      }
+    }
+  }
+  """
+
+  @doc """
+  What happened on some issues (by id): title, link, state, attachments (PRs)
+  and comments, newest first. Used to tell a blocked issue what its blockers did.
+  """
+  @spec fetch_issue_reports([String.t()]) :: {:ok, [map()]} | {:error, term()}
+  def fetch_issue_reports([]), do: {:ok, []}
+
+  def fetch_issue_reports(ids) when is_list(ids) do
+    case client_module().graphql(@issue_reports_query, %{ids: ids}) do
+      {:ok, %{"data" => %{"issues" => %{"nodes" => nodes}}}} when is_list(nodes) ->
+        {:ok, Enum.map(nodes, &issue_report/1)}
+
+      {:ok, response} ->
+        {:error, {:unexpected_response, response}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp issue_report(node) do
+    %{
+      id: node["id"],
+      identifier: node["identifier"],
+      title: node["title"],
+      url: node["url"],
+      state: get_in(node, ["state", "name"]),
+      state_type: get_in(node, ["state", "type"]),
+      attachments: for(%{"url" => url} = a <- get_in(node, ["attachments", "nodes"]) || [], is_binary(url), do: %{title: a["title"], url: url}),
+      comments:
+        (get_in(node, ["comments", "nodes"]) || [])
+        |> Enum.filter(&is_binary(&1["body"]))
+        |> Enum.sort_by(&(&1["createdAt"] || ""), :desc)
+        |> Enum.map(& &1["body"])
+    }
   end
 
   @project_teams_query """
