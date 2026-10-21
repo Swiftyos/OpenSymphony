@@ -65,6 +65,86 @@ defmodule SymphonyElixir.Capacity.Prometheus do
       name: "symphony_run_tokens_per_minute",
       help: "Token rate of a running agent over the run's age.",
       type: "gauge"
+    },
+    %{
+      name: "symphony_run_usage_reports_total",
+      help: "CPU and memory reports from runners (pods, process runners), by how the runner measured itself.",
+      type: "counter"
+    },
+    %{
+      name: "symphony_agent_tokens_total",
+      help: "Tokens agents used, by backend and type (input includes cached input).",
+      type: "counter"
+    },
+    %{
+      name: "symphony_agent_turns_total",
+      help: "Agent turns started, by backend.",
+      type: "counter"
+    },
+    %{
+      name: "symphony_agent_tool_calls_total",
+      help: "Agent tool calls (commands, edits, tools) that finished, by backend and outcome.",
+      type: "counter"
+    },
+    %{
+      name: "symphony_agent_runs_total",
+      help: "Agent runs that ended, by backend and outcome.",
+      type: "counter"
+    },
+    %{
+      name: "symphony_agent_run_duration_seconds",
+      help: "Duration of agent runs that ended, by backend and outcome.",
+      type: "histogram"
+    },
+    %{
+      name: "symphony_runner_pods",
+      help: "Runner pods by phase, from the controller's pod watch.",
+      type: "gauge"
+    },
+    %{
+      name: "symphony_runner_pods_waiting",
+      help: "Pending runner pods waiting for capacity: Kueue's scheduling gate, or no node that fits.",
+      type: "gauge"
+    },
+    %{
+      name: "symphony_runner_pod_start_seconds",
+      help: "Time from a runner pod's creation to its runner container running (Kueue admission, scheduling, image pulls).",
+      type: "histogram"
+    },
+    %{
+      name: "symphony_runner_pod_failures_total",
+      help: "Runner pods that failed, by reason (DeadlineExceeded, Evicted, OOMKilled, Error).",
+      type: "counter"
+    },
+    %{
+      name: "symphony_runner_launches_total",
+      help: "Runner pod launches, by outcome.",
+      type: "counter"
+    },
+    %{
+      name: "symphony_runner_launch_failures_total",
+      help: "Runner pod launches that failed, by reason.",
+      type: "counter"
+    },
+    %{
+      name: "symphony_runner_janitor_deletions_total",
+      help: "Finished runner pods and orphaned run Secrets the janitor deleted.",
+      type: "counter"
+    },
+    %{
+      name: "symphony_runner_pod_watch_reconnects_total",
+      help: "Times the runner pod watch was restarted, by reason (closed is the API server's normal timeout).",
+      type: "counter"
+    },
+    %{
+      name: "symphony_runner_pod_watch_synced",
+      help: "1 while the runner pod cache is synced and fresh, else 0.",
+      type: "gauge"
+    },
+    %{
+      name: "symphony_runner_pod_status_checks_total",
+      help: "Run watcher pod checks, by where the answer came from (cache, or an API GET on a miss or a stale cache).",
+      type: "counter"
     }
   ]
 

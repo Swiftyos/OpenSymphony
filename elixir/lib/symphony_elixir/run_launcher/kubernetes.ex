@@ -42,19 +42,17 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes do
 
   require Logger
 
+  alias SymphonyElixir.Capacity.Metrics
   alias SymphonyElixir.Config
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Kube
   alias SymphonyElixir.RunLauncher.Kubernetes.PodSpec
+  alias SymphonyElixir.RunLauncher.Kubernetes.PodWatch
   alias SymphonyElixir.RunSpec
   alias SymphonyElixir.RunWatcher
   alias SymphonyElixir.SymphonyConfig
   alias SymphonyElixir.Workflow
 
-  # Follow-up (pod watch): each run's watcher GETs its pod every poll (5s).
-  # At 1000 concurrent runs that is 200 GET/s against the API server; one pod
-  # watch (or informer) over the runner label should feed the watchers
-  # instead. See docs/durable-runs.md.
   @prefix "k8s:"
   @terminal_phases ["Succeeded", "Failed"]
 
@@ -79,13 +77,31 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes do
          :ok <- create_run_objects(rendered, client),
          {:ok, watcher} <- start_watcher(spec, rendered, opts) do
       Logger.info("Started runner pod run_id=#{spec.run_id} ref=#{rendered.ref} watcher=#{inspect(watcher)}")
+      Metrics.record_counter("symphony_runner_launches_total", outcome: "started")
       {:ok, watcher, rendered.ref}
     else
       {:error, reason} = error ->
         Logger.error("Unable to start runner pod run_id=#{spec.run_id} reason=#{inspect(reason, limit: 10)}")
+        Metrics.record_counter("symphony_runner_launches_total", outcome: "failed")
+        Metrics.record_counter("symphony_runner_launch_failures_total", reason: launch_failure_reason(reason))
         error
     end
   end
+
+  @doc false
+  # A bounded label for why a launch failed: the step, or the API's HTTP
+  # status, never the free-text error.
+  @spec launch_failure_reason(term()) :: String.t()
+  def launch_failure_reason({:invalid_settings, _settings}), do: "settings"
+  def launch_failure_reason({:runner_config, _path, _reason}), do: "runner_config"
+  def launch_failure_reason({:watcher_failed, _reason}), do: "watcher"
+  def launch_failure_reason({:http_error, status, _body}) when is_integer(status), do: "http_#{status}"
+  def launch_failure_reason(:not_in_cluster), do: "kube_client"
+  def launch_failure_reason({:in_cluster_config, _reason}), do: "kube_client"
+  def launch_failure_reason(%{__exception__: true}), do: "transport"
+  def launch_failure_reason(reason) when is_atom(reason), do: "render"
+  def launch_failure_reason({reason, _detail}) when is_atom(reason), do: "render"
+  def launch_failure_reason(_reason), do: "other"
 
   @doc "The behaviour's `start/2`: a run spec (or `%{spec: spec}`) is started as a pod."
   @impl true
@@ -118,6 +134,10 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes do
   it Failed, `{:unauthorized, reason}` for a 401/403 (or no usable
   credentials), and `{:unknown, reason}` for any other error or a phase that
   is not known yet (`Unknown`, or none).
+
+  The pod is read from `SymphonyElixir.RunLauncher.Kubernetes.PodWatch`'s
+  cache; only a pod missing from it, or a cache that is not synced or has
+  gone stale, is fetched from the API server.
   """
   @impl true
   @spec status(String.t()) :: SymphonyElixir.RunLauncher.status()
@@ -126,21 +146,41 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes do
   @doc "`status/1` with explicit `SymphonyElixir.Kube` options."
   @spec status(String.t(), keyword()) :: SymphonyElixir.RunLauncher.status()
   def status(ref, opts) when is_binary(ref) do
-    with {:ok, namespace, name} <- parse_ref(ref),
-         {:ok, client} <- client(opts) do
-      case Kube.get_pod(client, namespace, name) do
-        {:ok, pod} -> pod_status(pod)
-        {:error, :not_found} -> {:gone, nil}
-        {:error, {:http_error, status, _body} = reason} when status in [401, 403] -> {:unauthorized, reason}
-        {:error, reason} -> {:unknown, reason}
-      end
-    else
-      :error -> {:gone, nil}
-      {:error, reason} -> {:unauthorized, reason}
+    case parse_ref(ref) do
+      {:ok, namespace, name} ->
+        case PodWatch.lookup(namespace, name, Keyword.get(opts, :pod_cache, PodWatch.table())) do
+          {:ok, pod} ->
+            record_status_check("cache")
+            pod_status(pod)
+
+          miss_or_stale ->
+            record_status_check(Atom.to_string(miss_or_stale))
+            fetch_status(namespace, name, opts)
+        end
+
+      :error ->
+        {:gone, nil}
     end
   end
 
   def status(_ref, _opts), do: {:gone, nil}
+
+  defp fetch_status(namespace, name, opts) do
+    case client(opts) do
+      {:ok, client} ->
+        case Kube.get_pod(client, namespace, name) do
+          {:ok, pod} -> pod_status(pod)
+          {:error, :not_found} -> {:gone, nil}
+          {:error, {:http_error, status, _body} = reason} when status in [401, 403] -> {:unauthorized, reason}
+          {:error, reason} -> {:unknown, reason}
+        end
+
+      {:error, reason} ->
+        {:unauthorized, reason}
+    end
+  end
+
+  defp record_status_check(source), do: Metrics.record_counter("symphony_runner_pod_status_checks_total", source: source)
 
   @doc """
   Deletes the pod (unless it has already finished, so its logs stay), its
@@ -193,7 +233,9 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes do
     end
   end
 
-  defp pod_status(pod) do
+  @doc false
+  @spec pod_status(map()) :: SymphonyElixir.RunLauncher.status()
+  def pod_status(pod) do
     case phase(pod) do
       phase when phase in ["Pending", "Running"] -> :alive
       "Succeeded" -> {:gone, nil}
@@ -222,7 +264,7 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes do
   end
 
   defp start_watcher(spec, rendered, opts) do
-    kube_opts = Keyword.take(opts, [:base_url, :token, :service_account_dir, :env, :req_options])
+    kube_opts = Keyword.take(opts, [:base_url, :token, :service_account_dir, :env, :req_options, :pod_cache])
 
     watcher_opts =
       [launcher: __MODULE__, status: fn -> status(rendered.ref, kube_opts) end] ++

@@ -52,7 +52,11 @@ defmodule SymphonyElixir.Capacity.Metrics do
       16 * 1024 * 1024 * 1024,
       32 * 1024 * 1024 * 1024
     ],
-    "symphony_run_cpu_percent_distribution" => [0, 25, 50, 100, 200, 400, 800]
+    "symphony_run_cpu_percent_distribution" => [0, 25, 50, 100, 200, 400, 800],
+    # Creation to running includes Kueue admission, which can take hours when
+    # the queue is full.
+    "symphony_runner_pod_start_seconds" => [1, 2, 5, 10, 20, 30, 60, 120, 300, 600, 1800, 3600, 7200, 21_600],
+    "symphony_agent_run_duration_seconds" => [30, 60, 120, 300, 600, 1200, 1800, 3600, 7200, 14_400, 21_600, 43_200]
   }
 
   @type labels :: keyword(String.t()) | map()

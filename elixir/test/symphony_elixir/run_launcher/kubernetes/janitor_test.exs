@@ -3,6 +3,7 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.JanitorTest do
 
   import ExUnit.CaptureLog
 
+  alias SymphonyElixir.Capacity.Metrics
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.RunLauncher.Kubernetes.Janitor
 
@@ -69,8 +70,16 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.JanitorTest do
         Req.Test.json(conn, %{})
     end
 
+    Metrics.reset()
     assert {:ok, %{pods: deleted_pods, secrets: ["run-orphan"]}} = Janitor.sweep(opts(respond))
     assert deleted_pods == ["run-old", "run-init", "run-evicted", "run-created"]
+
+    deletions =
+      for %{name: "symphony_runner_janitor_deletions_total", labels: [{"kind", kind}], value: value} <- Metrics.snapshot().counters,
+          into: %{},
+          do: {kind, value}
+
+    assert deletions == %{"pod" => 4, "secret" => 1}
 
     assert_received {:listed, :pods, "app.kubernetes.io/name=symphony-runner"}
     assert_received {:listed, :secrets, "app.kubernetes.io/name=symphony-runner"}

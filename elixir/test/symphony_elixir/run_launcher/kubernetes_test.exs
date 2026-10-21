@@ -3,6 +3,7 @@ defmodule SymphonyElixir.RunLauncher.KubernetesTest do
 
   import ExUnit.CaptureLog
 
+  alias SymphonyElixir.Capacity.Metrics
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.RunLauncher
   alias SymphonyElixir.RunLauncher.Kubernetes
@@ -453,6 +454,50 @@ defmodule SymphonyElixir.RunLauncher.KubernetesTest do
       assert_receive {:deleted, ^secret}
       assert_receive {:deleted, ^config_map}
       RunWatcher.stop(existing)
+    end
+  end
+
+  describe "launch metrics" do
+    test "a started launch and a failed one are counted, the failure by a bounded reason", ctx do
+      Metrics.reset()
+
+      started = fn
+        "POST", @pods, _body, conn -> Req.Test.json(conn, %{"metadata" => %{"uid" => "uid"}})
+        _method, _path, _body, conn -> Req.Test.json(conn, %{"status" => %{"phase" => "Pending"}})
+      end
+
+      rejected = fn
+        "POST", @pods, _body, conn -> Plug.Conn.send_resp(conn, 422, "rejected")
+        _method, _path, _body, conn -> Req.Test.json(conn, %{})
+      end
+
+      capture_log(fn ->
+        assert {:ok, watcher, _ref} = Kubernetes.start_process(ctx.spec, opts(ctx, started))
+        RunWatcher.stop(watcher)
+        assert {:error, _reason} = Kubernetes.start_process(ctx.spec, opts(ctx, rejected))
+      end)
+
+      counters =
+        for %{name: name, labels: labels, value: value} <- Metrics.snapshot().counters,
+            into: %{},
+            do: {{name, labels}, value}
+
+      assert counters[{"symphony_runner_launches_total", [{"outcome", "started"}]}] == 1
+      assert counters[{"symphony_runner_launches_total", [{"outcome", "failed"}]}] == 1
+      assert counters[{"symphony_runner_launch_failures_total", [{"reason", "http_422"}]}] == 1
+    end
+
+    test "failure reasons never carry free text" do
+      assert Kubernetes.launch_failure_reason({:invalid_settings, :x}) == "settings"
+      assert Kubernetes.launch_failure_reason({:runner_config, "/p", :enoent}) == "runner_config"
+      assert Kubernetes.launch_failure_reason({:watcher_failed, :x}) == "watcher"
+      assert Kubernetes.launch_failure_reason({:http_error, 403, "no"}) == "http_403"
+      assert Kubernetes.launch_failure_reason(:not_in_cluster) == "kube_client"
+      assert Kubernetes.launch_failure_reason({:in_cluster_config, :enoent}) == "kube_client"
+      assert Kubernetes.launch_failure_reason(%Req.TransportError{reason: :timeout}) == "transport"
+      assert Kubernetes.launch_failure_reason(:missing_controller_url) == "render"
+      assert Kubernetes.launch_failure_reason({:invalid_kubernetes_config, "message"}) == "render"
+      assert Kubernetes.launch_failure_reason("free text") == "other"
     end
   end
 

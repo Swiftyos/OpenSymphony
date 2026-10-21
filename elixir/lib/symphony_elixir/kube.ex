@@ -2,9 +2,9 @@ defmodule SymphonyElixir.Kube do
   @moduledoc """
   A small Kubernetes API client for the run launcher.
 
-  It covers only what running runner pods needs: create, get, list and delete
-  a pod, create, patch, list and delete a secret, and create, patch and delete
-  a config map. Everything else stays outside this controller.
+  It covers only what running runner pods needs: create, get, list, watch and
+  delete a pod, create, patch, list and delete a secret, and create, patch and
+  delete a config map. Everything else stays outside this controller.
 
   A client is built either from explicit `:base_url`/`:token` options (tests
   pass `req_options: [plug: {Req.Test, Stub}]`) or from an in-cluster service
@@ -86,6 +86,171 @@ defmodule SymphonyElixir.Kube do
   @spec list_pods(t(), String.t(), String.t()) :: {:ok, [resource()]} | {:error, term()}
   def list_pods(%__MODULE__{} = client, namespace, label_selector) do
     list(client, collection_path(namespace, :pods), label_selector)
+  end
+
+  @doc """
+  Lists the pods matching a label selector, page by page (`:limit` per page,
+  500 by default), and returns the items with the list's `resourceVersion`,
+  the point a watch started from it continues at. An expired continue token
+  (`410`) is `{:error, :gone}`; list again from the start.
+  """
+  @spec list_pods_with_version(t(), String.t(), String.t(), keyword()) ::
+          {:ok, [resource()], String.t() | nil} | {:error, term()}
+  def list_pods_with_version(%__MODULE__{} = client, namespace, label_selector, opts \\ []) do
+    limit = Keyword.get(opts, :limit, 500)
+    list_pages(client, collection_path(namespace, :pods), [labelSelector: label_selector, limit: limit], nil, [])
+  end
+
+  @doc """
+  Watches the pods matching a label selector from `resource_version`
+  (`?watch=1`, with bookmarks), streaming the response.
+
+  `on_events` is called with each batch of decoded events (`%{"type" =>
+  "ADDED" | "MODIFIED" | "DELETED" | "BOOKMARK", "object" => pod}`) as their
+  lines arrive. The call returns when the stream ends:
+
+    * `{:ok, :closed}` — the API server ended the watch (`timeoutSeconds`,
+      300 by default, or a restart); watch again from the last
+      `resourceVersion` seen.
+    * `{:error, :gone}` — the version is too old (`410`, as a status or an
+      `ERROR` event); list again.
+    * `{:error, {:watch_error, status}}` — any other `ERROR` event.
+    * `{:error, {:http_error, status, body}}`, `{:error, :not_found}` or a
+      transport error.
+
+  The watch is never retried by `Req` (a replay would repeat events) and asks
+  for an uncompressed response, since chunks are parsed as they arrive.
+  """
+  @spec watch_pods(t(), String.t(), String.t(), String.t() | nil, ([map()] -> any()), keyword()) ::
+          {:ok, :closed} | {:error, term()}
+  def watch_pods(%__MODULE__{req: req}, namespace, label_selector, resource_version, on_events, opts \\ [])
+      when is_function(on_events, 1) do
+    timeout_seconds = Keyword.get(opts, :timeout_seconds, 300)
+
+    params =
+      [labelSelector: label_selector, watch: 1, allowWatchBookmarks: true, timeoutSeconds: timeout_seconds] ++
+        if(is_binary(resource_version) and resource_version != "", do: [resourceVersion: resource_version], else: [])
+
+    request = [
+      method: :get,
+      url: collection_path(namespace, :pods),
+      params: params,
+      retry: false,
+      compressed: false,
+      receive_timeout: Keyword.get(opts, :receive_timeout, (timeout_seconds + 30) * 1_000),
+      into: &watch_chunk(&1, &2, on_events)
+    ]
+
+    case Req.request(req, request) do
+      {:ok, %{status: status} = response} when status in 200..299 -> watch_result(response, on_events)
+      {:ok, %{status: 410}} -> {:error, :gone}
+      {:ok, %{status: 404}} -> {:error, :not_found}
+      {:ok, %{status: status, body: body}} -> {:error, {:http_error, status, error_body(normalize_body(body))}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc false
+  # Splits a chunk (after what was left of the last one) into complete lines
+  # and the unfinished rest.
+  @spec split_lines(binary()) :: {[binary()], binary()}
+  def split_lines(buffer) when is_binary(buffer) do
+    parts = String.split(buffer, "\n")
+    {lines, [rest]} = Enum.split(parts, -1)
+    {Enum.reject(lines, &(String.trim(&1) == "")), rest}
+  end
+
+  @doc false
+  # The events in a batch of watch lines, or why the watch must stop.
+  @spec decode_watch_lines([binary()]) :: {:ok, [map()]} | {:error, term()}
+  def decode_watch_lines(lines) do
+    Enum.reduce_while(lines, {:ok, []}, fn line, {:ok, events} ->
+      case Jason.decode(line) do
+        {:ok, %{"type" => "ERROR", "object" => object}} ->
+          {:halt, watch_error(object)}
+
+        {:ok, %{"type" => type, "object" => object} = event} when is_binary(type) and is_map(object) ->
+          {:cont, {:ok, [event | events]}}
+
+        _other ->
+          {:halt, {:error, {:invalid_watch_event, String.slice(line, 0, 200)}}}
+      end
+    end)
+    |> case do
+      {:ok, events} -> {:ok, Enum.reverse(events)}
+      error -> error
+    end
+  end
+
+  defp watch_error(%{"code" => 410}), do: {:error, :gone}
+  defp watch_error(object), do: {:error, {:watch_error, object}}
+
+  # A non-2xx answer keeps its body for the error; a 2xx one is parsed line
+  # by line as it streams.
+  defp watch_chunk({:data, data}, {request, %{status: status} = response}, on_events) when status in 200..299 do
+    {lines, rest} = split_lines(Req.Response.get_private(response, :kube_watch_buffer, "") <> data)
+    response = Req.Response.put_private(response, :kube_watch_buffer, rest)
+
+    case dispatch_watch_lines(lines, on_events) do
+      :ok -> {:cont, {request, response}}
+      {:error, _reason} = error -> {:halt, {request, Req.Response.put_private(response, :kube_watch_result, error)}}
+    end
+  end
+
+  defp watch_chunk({:data, data}, {request, response}, _on_events) do
+    body = if is_binary(response.body), do: response.body, else: ""
+    {:cont, {request, %{response | body: body <> data}}}
+  end
+
+  # The stream ended: a last line without its newline still counts.
+  defp watch_result(response, on_events) do
+    case Req.Response.get_private(response, :kube_watch_result) do
+      nil ->
+        case dispatch_watch_lines([Req.Response.get_private(response, :kube_watch_buffer, "")] |> Enum.reject(&(String.trim(&1) == "")), on_events) do
+          :ok -> {:ok, :closed}
+          error -> error
+        end
+
+      error ->
+        error
+    end
+  end
+
+  defp dispatch_watch_lines([], _on_events), do: :ok
+
+  defp dispatch_watch_lines(lines, on_events) do
+    case decode_watch_lines(lines) do
+      {:ok, []} ->
+        :ok
+
+      {:ok, events} ->
+        on_events.(events)
+        :ok
+
+      error ->
+        error
+    end
+  end
+
+  defp list_pages(client, path, params, continue, acc) do
+    params = if continue, do: Keyword.put(params, :continue, continue), else: params
+
+    case request(client, :get, path, params: params) do
+      {:ok, body} ->
+        items = body |> Map.get("items") |> List.wrap() |> Enum.filter(&is_map/1)
+        metadata = if is_map(body["metadata"]), do: body["metadata"], else: %{}
+
+        case metadata["continue"] do
+          next when is_binary(next) and next != "" -> list_pages(client, path, params, next, [items | acc])
+          _done -> {:ok, [items | acc] |> Enum.reverse() |> Enum.concat(), metadata["resourceVersion"]}
+        end
+
+      {:error, {:http_error, 410, _body}} ->
+        {:error, :gone}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   @doc "Lists the secrets in a namespace matching a label selector; returns the items."

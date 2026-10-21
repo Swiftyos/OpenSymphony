@@ -16,13 +16,15 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.Janitor do
 
   Nothing else is touched: only objects with the runner label, in the
   configured namespace. A failed list or delete is logged and retried at the
-  next sweep.
+  next sweep. Deletions are counted in
+  `symphony_runner_janitor_deletions_total{kind="pod"|"secret"}`.
   """
 
   use GenServer
 
   require Logger
 
+  alias SymphonyElixir.Capacity.Metrics
   alias SymphonyElixir.Config
   alias SymphonyElixir.Kube
   alias SymphonyElixir.RunLauncher
@@ -55,13 +57,19 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.Janitor do
       pod_names = MapSet.new(pods, &name/1)
       orphans = for secret <- secrets, orphan_secret?(secret, pod_names, now_ms), do: name(secret)
 
-      {:ok,
-       %{
-         pods: Enum.filter(expired, &deleted?(Kube.delete_pod(client, kube.namespace, &1), :pod, &1)),
-         secrets: Enum.filter(orphans, &delete_orphan(client, kube.namespace, &1))
-       }}
+      deleted = %{
+        pods: Enum.filter(expired, &deleted?(Kube.delete_pod(client, kube.namespace, &1), :pod, &1)),
+        secrets: Enum.filter(orphans, &delete_orphan(client, kube.namespace, &1))
+      }
+
+      record_deletions("pod", deleted.pods)
+      record_deletions("secret", deleted.secrets)
+      {:ok, deleted}
     end
   end
+
+  defp record_deletions(_kind, []), do: :ok
+  defp record_deletions(kind, names), do: Metrics.record_counter("symphony_runner_janitor_deletions_total", [kind: kind], length(names))
 
   @impl true
   def init(opts) do

@@ -85,6 +85,8 @@ defmodule SymphonyElixir.Application do
       {DynamicSupervisor, strategy: :one_for_one, name: SymphonyElixir.RunWatcher.Supervisor},
       # Deletes finished runner pods and orphaned run Secrets (Kubernetes launcher only).
       SymphonyElixir.RunLauncher.Kubernetes.Janitor,
+      # One watch over the runner pods, cached for the run watchers (Kubernetes launcher only).
+      SymphonyElixir.RunLauncher.Kubernetes.PodWatch,
       SymphonyElixir.Orchestrator,
       SymphonyElixir.Capacity.Sampler,
       SymphonyElixir.HttpServer,
