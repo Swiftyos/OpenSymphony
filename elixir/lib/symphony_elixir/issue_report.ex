@@ -22,11 +22,11 @@ defmodule SymphonyElixir.IssueReport do
         }
 
   @doc """
-  Posts the report on the issue.
+  Posts the report on the issue. Pass `id:` for an idempotent comment id.
   """
-  @spec post(map(), map()) :: :ok | {:error, term()}
-  def post(%{id: id, identifier: identifier}, definition) when is_binary(id) and is_binary(identifier) do
-    Tracker.create_comment(id, markdown(identifier, definition))
+  @spec post(map(), map(), keyword()) :: :ok | {:error, term()}
+  def post(%{id: id, identifier: identifier}, definition, opts) when is_binary(id) and is_binary(identifier) do
+    Tracker.create_comment(id, markdown(identifier, definition), opts)
   end
 
   @doc """

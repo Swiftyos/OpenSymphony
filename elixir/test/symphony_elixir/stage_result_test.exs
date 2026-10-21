@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.StageResultTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.Effects
   alias SymphonyElixir.Factory.{Definition, StagePrompt, Store}
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.StageResult
@@ -29,6 +30,13 @@ defmodule SymphonyElixir.StageResultTest do
 
   defp kept(workspace), do: workspace |> Path.join(".symphony") |> File.ls!() |> Enum.sort()
 
+  defp comment_id(issue, stage_id, summary) do
+    key =
+      "stage-result:#{issue.id}:#{stage_id}:#{Base.encode16(:crypto.hash(:sha256, String.trim(summary)), case: :lower)}"
+
+    Effects.uuid(key)
+  end
+
   test "no result file means nothing to do", %{workspace: workspace, issue: issue} do
     assert StageResult.process(issue, workspace) == :none
   end
@@ -53,6 +61,53 @@ defmodule SymphonyElixir.StageResultTest do
     assert {:moved, _} = StageResult.process(issue, workspace)
     assert_receive {:memory_tracker_comment, _, body}
     assert body =~ "waiting for a person to approve"
+  end
+
+  test "a result replayed after the move was applied is accepted without a second comment", %{
+    workspace: workspace,
+    issue: issue
+  } do
+    write_result(workspace, %{"move" => "review", "summary" => "Opened PR #4."})
+
+    assert {:moved, %{"id" => "review"} = target} = StageResult.process(issue, workspace)
+    assert_receive {:memory_tracker_comment, "id-PAY-1", _body}
+
+    # The process died before the file was set aside; the issue is now in review.
+    write_result(workspace, %{"move" => "review", "summary" => "Opened PR #4."})
+    moved = %{issue | state: target["linear_state"], labels: []}
+
+    assert StageResult.process(moved, workspace) == {:moved, target}
+    refute_receive {:memory_tracker_comment, _, _}
+    assert length(kept(workspace)) == 2
+  end
+
+  test "a comment already posted under the result's id is not posted again", %{
+    workspace: workspace,
+    issue: issue
+  } do
+    Application.put_env(
+      :symphony_elixir,
+      :memory_tracker_comment_ids,
+      MapSet.new([comment_id(issue, "review", "Opened PR #4.")])
+    )
+
+    write_result(workspace, %{"move" => "review", "summary" => "Opened PR #4."})
+
+    assert {:moved, %{"id" => "review"}} = StageResult.process(issue, workspace)
+    refute_receive {:memory_tracker_comment, _, _}
+    assert_receive {:memory_tracker_stage_update, "id-PAY-1", "In Review", nil}
+  end
+
+  test "a replayed result whose comment does not exist is still rejected", %{
+    workspace: workspace,
+    issue: issue
+  } do
+    write_result(workspace, %{"move" => "review", "summary" => "Opened PR #4."})
+    moved = %{issue | state: "In Review", labels: []}
+
+    assert {:rejected, message} = StageResult.process(moved, workspace)
+    assert message =~ ~s("review" isn't a move you can make from In Review)
+    assert [<<"rejected-", _::binary>>] = kept(workspace)
   end
 
   test "bad results are set aside with a reason for the agent", %{workspace: workspace, issue: issue} do

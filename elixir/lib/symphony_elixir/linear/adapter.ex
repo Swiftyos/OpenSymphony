@@ -15,6 +15,25 @@ defmodule SymphonyElixir.Linear.Adapter do
   }
   """
 
+  @create_comment_with_id_mutation """
+  mutation SymphonyCreateCommentWithId($issueId: String!, $body: String!, $id: String!) {
+    commentCreate(input: {issueId: $issueId, body: $body, id: $id}) {
+      success
+    }
+  }
+  """
+
+  @comment_lookup_query """
+  query SymphonyCommentLookup($id: String!) {
+    comment(id: $id) {
+      id
+      issue {
+        id
+      }
+    }
+  }
+  """
+
   @update_state_mutation """
   mutation SymphonyUpdateIssueState($issueId: String!, $stateId: String!) {
     issueUpdate(id: $issueId, input: {stateId: $stateId}) {
@@ -90,15 +109,63 @@ defmodule SymphonyElixir.Linear.Adapter do
   @spec fetch_issue_states_by_ids([String.t()]) :: {:ok, [term()]} | {:error, term()}
   def fetch_issue_states_by_ids(issue_ids), do: client_module().fetch_issue_states_by_ids(issue_ids)
 
-  @spec create_comment(String.t(), String.t()) :: :ok | {:error, term()}
-  def create_comment(issue_id, body) when is_binary(issue_id) and is_binary(body) do
-    with {:ok, response} <- client_module().graphql(@create_comment_mutation, %{issueId: issue_id, body: body}),
+  @doc """
+  Posts a comment. With `id:` the create is idempotent: if Linear refuses the
+  duplicate (or the request fails after it was applied), the comment is looked
+  up and `:ok` returned when it already exists on this issue.
+  """
+  @spec create_comment(String.t(), String.t(), keyword()) :: :ok | {:error, term()}
+  def create_comment(issue_id, body, opts \\ []) when is_binary(issue_id) and is_binary(body) do
+    id = Keyword.get(opts, :id)
+
+    {mutation, variables} =
+      if is_binary(id),
+        do: {@create_comment_with_id_mutation, %{issueId: issue_id, body: body, id: id}},
+        else: {@create_comment_mutation, %{issueId: issue_id, body: body}}
+
+    with {:ok, response} <- client_module().graphql(mutation, variables),
          true <- get_in(response, ["data", "commentCreate", "success"]) == true do
       :ok
     else
-      false -> {:error, :comment_create_failed}
+      failure -> comment_create_error(failure, id, issue_id)
+    end
+  end
+
+  @doc """
+  Whether a comment with this id exists. Linear answers a missing entity with a
+  "not found" GraphQL error, which means it does not exist; any other error
+  (auth, rate limit) is returned, so a caller never mistakes it for absence.
+  """
+  @spec comment_exists?(String.t()) :: {:ok, boolean()} | {:error, term()}
+  def comment_exists?(id) when is_binary(id) do
+    case client_module().graphql(@comment_lookup_query, %{id: id}) do
+      {:ok, %{"data" => %{"comment" => %{"id" => _id}}}} -> {:ok, true}
+      {:ok, %{"errors" => errors}} when is_list(errors) -> missing_or_error(errors)
+      {:ok, %{"data" => %{"comment" => nil}}} -> {:ok, false}
+      {:ok, response} -> {:error, {:unexpected_response, response}}
       {:error, reason} -> {:error, reason}
-      _ -> {:error, :comment_create_failed}
+    end
+  end
+
+  defp missing_or_error(errors) do
+    not_found? = errors != [] and Enum.all?(errors, &(is_map(&1) and is_binary(&1["message"]) and &1["message"] =~ ~r/not found/i))
+    if not_found?, do: {:ok, false}, else: {:error, {:graphql_errors, errors}}
+  end
+
+  defp comment_create_error(failure, id, issue_id) do
+    error = comment_create_failure(failure)
+
+    if is_binary(id) and comment_on_issue?(id, issue_id), do: :ok, else: error
+  end
+
+  defp comment_create_failure(false), do: {:error, :comment_create_failed}
+  defp comment_create_failure({:error, reason}), do: {:error, reason}
+  defp comment_create_failure(_failure), do: {:error, :comment_create_failed}
+
+  defp comment_on_issue?(id, issue_id) do
+    case client_module().graphql(@comment_lookup_query, %{id: id}) do
+      {:ok, %{"data" => %{"comment" => %{"issue" => %{"id" => ^issue_id}}}}} -> true
+      _ -> false
     end
   end
 

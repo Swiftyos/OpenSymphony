@@ -35,10 +35,41 @@ defmodule SymphonyElixir.Tracker.Memory do
      end)}
   end
 
-  @spec create_comment(String.t(), String.t()) :: :ok | {:error, term()}
-  def create_comment(issue_id, body) do
+  @doc """
+  Posts a comment. With `id:` a comment already posted under that id is not
+  posted or announced again.
+  """
+  @spec create_comment(String.t(), String.t(), keyword()) :: :ok | {:error, term()}
+  def create_comment(issue_id, body, opts \\ []) do
+    case Keyword.get(opts, :id) do
+      nil -> post_comment(issue_id, body)
+      id -> if remember_comment(id), do: post_comment(issue_id, body), else: :ok
+    end
+  end
+
+  @spec comment_exists?(String.t()) :: {:ok, boolean()}
+  def comment_exists?(id) do
+    {:ok, MapSet.member?(comment_ids(), id)}
+  end
+
+  defp post_comment(issue_id, body) do
     send_event({:memory_tracker_comment, issue_id, body})
     :ok
+  end
+
+  defp remember_comment(id) do
+    ids = comment_ids()
+
+    if MapSet.member?(ids, id) do
+      false
+    else
+      Application.put_env(:symphony_elixir, :memory_tracker_comment_ids, MapSet.put(ids, id))
+      true
+    end
+  end
+
+  defp comment_ids do
+    Application.get_env(:symphony_elixir, :memory_tracker_comment_ids, MapSet.new())
   end
 
   @spec update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}

@@ -477,6 +477,13 @@ Issues waiting for a retry or a continuation check are saved in `~/.symphony/ret
 - **On restart** each one is claimed again and re-armed for its remaining delay, so the first poll doesn't dispatch it early and its attempt count isn't reset.
 - **Overdue retries.** A retry that came due while Symphony was down runs right away.
 
+### Idempotent Linear writes
+
+Symphony's own Linear writes after an agent stage result are safe to retry.
+- **Summary comments** carry an id derived from the issue, target stage and summary, so a crash between posting and moving reuses the id and Linear refuses a duplicate.
+- **Completed moves** are recognised on replay: a result whose target stage is already the issue's stage and whose comment exists is accepted instead of rejected.
+- **Final reports** use the same scheme, with an id derived from the move, so the report is posted once.
+
 ### State in Postgres
 
 By default Symphony keeps its state in owner-only files under `~/.symphony`: sessions, retries, usage, users, the agent inbox, factory flows and the dashboard session secret. Set `SYMPHONY_DATABASE_URL` (for example `ecto://symphony:secret@db:5432/symphony`) and the same documents are kept in Postgres instead, in a `state_documents` table keyed by their path under `~/.symphony` (`sessions.json`, `factories/PAY.json`).

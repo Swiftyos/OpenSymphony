@@ -319,6 +319,90 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert {:error, :issue_update_failed} = Adapter.update_issue_state("issue-1", "Odd")
   end
 
+  test "linear adapter create_comment passes an id and reconciles a failed idempotent create" do
+    Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearClient)
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok, %{"data" => %{"commentCreate" => %{"success" => true}}}}
+    )
+
+    assert :ok = Adapter.create_comment("issue-1", "hello", id: "comment-1")
+
+    assert_receive {:graphql_called, create_comment_query, %{body: "hello", issueId: "issue-1", id: "comment-1"}}
+
+    assert create_comment_query =~ "commentCreate"
+
+    Process.put(
+      {FakeLinearClient, :graphql_results},
+      [
+        {:ok, %{"errors" => [%{"message" => "duplicate"}]}},
+        {:ok, %{"data" => %{"comment" => %{"id" => "comment-1", "issue" => %{"id" => "issue-1"}}}}}
+      ]
+    )
+
+    assert :ok = Adapter.create_comment("issue-1", "hello", id: "comment-1")
+    assert_receive {:graphql_called, _, %{id: "comment-1"}}
+    assert_receive {:graphql_called, lookup_query, %{id: "comment-1"}}
+    assert lookup_query =~ "comment(id: $id)"
+
+    Process.put(
+      {FakeLinearClient, :graphql_results},
+      [{:ok, %{"data" => %{"commentCreate" => %{"success" => false}}}}, {:ok, %{"data" => %{"comment" => nil}}}]
+    )
+
+    assert {:error, :comment_create_failed} =
+             Adapter.create_comment("issue-1", "hello", id: "comment-2")
+
+    Process.put(
+      {FakeLinearClient, :graphql_results},
+      [
+        {:error, :boom},
+        {:ok, %{"data" => %{"comment" => %{"id" => "comment-3", "issue" => %{"id" => "issue-2"}}}}}
+      ]
+    )
+
+    assert {:error, :boom} = Adapter.create_comment("issue-1", "hello", id: "comment-3")
+  end
+
+  test "linear adapter comment_exists? treats a missing comment as absent" do
+    Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearClient)
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok, %{"data" => %{"comment" => %{"id" => "comment-1"}}}}
+    )
+
+    assert {:ok, true} = Adapter.comment_exists?("comment-1")
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok, %{"errors" => [%{"message" => "Entity not found"}]}}
+    )
+
+    assert {:ok, false} = Adapter.comment_exists?("comment-2")
+
+    rate_limited = [%{"message" => "Rate limit exceeded"}]
+    Process.put({FakeLinearClient, :graphql_result}, {:ok, %{"errors" => rate_limited}})
+    assert {:error, {:graphql_errors, ^rate_limited}} = Adapter.comment_exists?("comment-2b")
+
+    Process.put({FakeLinearClient, :graphql_result}, {:ok, %{"errors" => []}})
+    assert {:error, {:graphql_errors, []}} = Adapter.comment_exists?("comment-2c")
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok, %{"data" => %{"comment" => nil}}}
+    )
+
+    assert {:ok, false} = Adapter.comment_exists?("comment-3")
+
+    Process.put({FakeLinearClient, :graphql_result}, {:ok, %{"data" => %{}}})
+    assert {:error, {:unexpected_response, %{"data" => %{}}}} = Adapter.comment_exists?("comment-4")
+
+    Process.put({FakeLinearClient, :graphql_result}, {:error, :down})
+    assert {:error, :down} = Adapter.comment_exists?("comment-5")
+  end
+
   test "phoenix observability api preserves state, issue, and refresh responses" do
     snapshot = static_snapshot()
     orchestrator_name = Module.concat(__MODULE__, :ObservabilityApiOrchestrator)

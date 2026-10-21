@@ -8,7 +8,8 @@ defmodule SymphonyElixir.Tracker do
   @callback fetch_candidate_issues() :: {:ok, [term()]} | {:error, term()}
   @callback fetch_issues_by_states([String.t()]) :: {:ok, [term()]} | {:error, term()}
   @callback fetch_issue_states_by_ids([String.t()]) :: {:ok, [term()]} | {:error, term()}
-  @callback create_comment(String.t(), String.t()) :: :ok | {:error, term()}
+  @callback create_comment(String.t(), String.t(), keyword()) :: :ok | {:error, term()}
+  @callback comment_exists?(String.t()) :: {:ok, boolean()} | {:error, term()}
   @callback update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
   @callback set_stage(String.t(), String.t(), String.t() | nil, keyword()) :: :ok | {:error, term()}
   @callback ensure_stage_labels(String.t(), [String.t()]) :: {:ok, [String.t()]} | {:error, term()}
@@ -30,9 +31,22 @@ defmodule SymphonyElixir.Tracker do
     adapter().fetch_issue_states_by_ids(issue_ids)
   end
 
-  @spec create_comment(String.t(), String.t()) :: :ok | {:error, term()}
-  def create_comment(issue_id, body) do
-    adapter().create_comment(issue_id, body)
+  @doc """
+  Posts a comment on an issue. Pass `id:` (a UUID string) to make the write
+  idempotent: creating the same comment again returns `:ok` without posting a
+  second one.
+  """
+  @spec create_comment(String.t(), String.t(), keyword()) :: :ok | {:error, term()}
+  def create_comment(issue_id, body, opts \\ []) do
+    adapter().create_comment(issue_id, body, opts)
+  end
+
+  @doc """
+  Whether a comment with this id exists on the tracker.
+  """
+  @spec comment_exists?(String.t()) :: {:ok, boolean()} | {:error, term()}
+  def comment_exists?(id) do
+    adapter().comment_exists?(id)
   end
 
   @spec update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}

@@ -1411,6 +1411,11 @@ Symphony does not require first-class tracker write APIs in the orchestrator.
 - If the optional `linear_graphql` client-side tool extension is implemented, it is still part of
   the agent toolchain rather than orchestrator business logic.
 
+When an implementation does post stage-anchored tracker writes itself (extension), it should make
+retries idempotent: summary comments carry a deterministic id derived from the issue, target stage,
+and summary, so a retry after a crash reuses the id and the tracker refuses a duplicate. A result
+file replayed after a restart whose move was already applied is accepted rather than rejected.
+
 ## 12. Prompt Construction and Context Assembly
 
 ### 12.1 Inputs

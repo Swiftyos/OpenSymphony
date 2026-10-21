@@ -15,17 +15,21 @@ defmodule SymphonyElixir.StageResult do
        exit 0. Moves to a parked or done stage skip them: putting an issue on
        hold, or finding there's nothing to do, has nothing to check
     3. posts the summary on the issue as the stage's comment
-       (`## <stage name>`), then sets the target stage's Linear state and stage
-       label, adding the approval label when a person must approve the move
+       (`## <stage name>`) with an id derived from the result, so a retry after
+       a crash never posts it twice, then sets the target stage's Linear state
+       and stage label, adding the approval label when a person must approve
+       the move
 
   When something is wrong the file is set aside and the agent is told exactly
-  what to fix, then keeps working. `.symphony/` is kept out of git.
+  what to fix, then keeps working. A replayed result whose move already
+  happened before a restart is accepted instead of rejected. `.symphony/` is
+  kept out of git.
   """
 
   require Logger
 
+  alias SymphonyElixir.{Effects, IssueStage, Tracker}
   alias SymphonyElixir.Factory.Definition
-  alias SymphonyElixir.{IssueStage, Tracker}
   alias SymphonyElixir.Linear.Issue
 
   @dir ".symphony"
@@ -73,10 +77,8 @@ defmodule SymphonyElixir.StageResult do
 
       {:ok, body} ->
         outcome =
-          with {:ok, result} <- decode(body),
-               {:ok, stage, target, definition} <- allowed_move(issue, result["move"]),
-               :ok <- run_checks(stage, target, workspace, opts) do
-            move(issue, stage, target, definition, result["summary"])
+          with {:ok, result} <- decode(body) do
+            handle_result(issue, result, workspace, opts)
           end
 
         set_aside(file, outcome)
@@ -142,6 +144,45 @@ defmodule SymphonyElixir.StageResult do
     end
   end
 
+  defp handle_result(issue, result, workspace, opts) do
+    case replayed(issue, result) do
+      {:ok, target} ->
+        replay(issue, target, result["summary"])
+
+      :no ->
+        with {:ok, stage, target, definition} <- allowed_move(issue, result["move"]),
+             :ok <- run_checks(stage, target, workspace, opts) do
+          move(issue, stage, target, definition, result["summary"])
+        end
+    end
+  end
+
+  # A result the agent wrote before a restart may already have been applied;
+  # its summary comment existing proves the move happened.
+  defp replayed(issue, %{"move" => move, "summary" => summary}) do
+    case IssueStage.stage_definition(issue) do
+      %{"id" => id} = target when move == id ->
+        if Tracker.comment_exists?(Effects.uuid(key(issue, target, summary))) == {:ok, true},
+          do: {:ok, target},
+          else: :no
+
+      _ ->
+        :no
+    end
+  end
+
+  defp replay(issue, target, summary) do
+    Logger.info("Symphony already moved #{issue.identifier} to #{target["id"]} (result replayed after a restart)")
+    finished(issue, target, IssueStage.definition(issue), report_opts(issue, target, summary))
+    {:moved, target}
+  end
+
+  defp key(issue, target, summary) do
+    "stage-result:#{issue.id}:#{target["id"]}:#{Base.encode16(:crypto.hash(:sha256, String.trim(summary)), case: :lower)}"
+  end
+
+  defp report_opts(issue, target, summary), do: [id: Effects.uuid("issue-report:" <> key(issue, target, summary))]
+
   defp move(issue, stage, target, definition, summary) do
     approval = Definition.requires_approval?(definition, stage)
     add_labels = if approval, do: [IssueStage.approval_label()], else: []
@@ -151,10 +192,15 @@ defmodule SymphonyElixir.StageResult do
         do: "_Moved to #{target["name"]} by Agent Factory; waiting for a person to approve._",
         else: "_Moved to #{target["name"]} by Agent Factory._"
 
-    with :ok <- Tracker.create_comment(issue.id, "## #{stage["name"]}\n\n#{String.trim(summary)}\n\n#{note}"),
+    with :ok <-
+           Tracker.create_comment(
+             issue.id,
+             "## #{stage["name"]}\n\n#{String.trim(summary)}\n\n#{note}",
+             id: Effects.uuid(key(issue, target, summary))
+           ),
          :ok <- Tracker.set_stage(issue.id, target["linear_state"], target["label"], add_labels: add_labels) do
       Logger.info("Symphony moved #{issue.identifier} from=#{stage["id"]} to=#{target["id"]} approval=#{approval}")
-      finished(issue, target, definition)
+      finished(issue, target, definition, report_opts(issue, target, summary))
       {:moved, target}
     else
       {:error, reason} ->
@@ -165,16 +211,19 @@ defmodule SymphonyElixir.StageResult do
 
   @doc """
   Posts the final report when a move (held or not) lands in a done stage. The
-  ledger is told about the move first, so the report includes it.
+  ledger is told about the move first, so the report includes it. Pass `id:`
+  for an idempotent report comment id.
   """
-  @spec finished(Issue.t(), map(), map()) :: :ok
-  def finished(issue, %{"kind" => "done"} = target, definition) do
+  @spec finished(Issue.t(), map(), map(), keyword()) :: :ok
+  def finished(issue, target, definition, opts \\ [])
+
+  def finished(issue, %{"kind" => "done"} = target, definition, opts) do
     SymphonyElixir.UsageLedger.observe_issue(%{issue | state: target["linear_state"], labels: []})
-    SymphonyElixir.IssueReport.post(issue, definition)
+    SymphonyElixir.IssueReport.post(issue, definition, opts)
     :ok
   end
 
-  def finished(_issue, _target, _definition), do: :ok
+  def finished(_issue, _target, _definition, _opts), do: :ok
 
   # Keep a record of every result; a rejected one must not be processed again.
   defp set_aside(file, outcome) do
