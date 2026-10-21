@@ -1,9 +1,11 @@
-.PHONY: help all setup deps build fmt fmt-check lint test coverage ci dialyzer e2e secrets
+.PHONY: help all setup deps build fmt fmt-check lint test coverage ci dialyzer e2e secrets images
 
 MIX ?= mix
+CONTAINER_ENGINE ?= $(shell command -v podman >/dev/null 2>&1 && echo podman || echo docker)
+IMAGE_REVISION ?= $(shell git -C .. rev-parse --short HEAD 2>/dev/null || echo unknown)
 
 help:
-	@echo "Targets: setup, deps, fmt, fmt-check, lint, test, coverage, dialyzer, e2e, secrets, ci"
+	@echo "Targets: setup, deps, fmt, fmt-check, lint, test, coverage, dialyzer, e2e, secrets, images, ci"
 
 setup:
 	$(MIX) setup
@@ -49,3 +51,14 @@ ci:
 	$(MAKE) dialyzer
 
 all: ci
+
+# Builds from the repository root, so both images' build contexts are explicit.
+images:
+	cd .. && $(CONTAINER_ENGINE) build \
+		-f elixir/images/symphony/Containerfile \
+		--build-arg REVISION=$(IMAGE_REVISION) \
+		-t symphony:dev .
+	cd .. && $(CONTAINER_ENGINE) build \
+		-f elixir/images/agent-tools/Containerfile \
+		--build-arg REVISION=$(IMAGE_REVISION) \
+		-t symphony-agent-tools:dev .

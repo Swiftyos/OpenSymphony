@@ -1,0 +1,14 @@
+# Build context for the images in elixir/images/. From the repository root:
+#
+#   podman build -f elixir/images/symphony/Containerfile -t symphony:dev .
+#   podman build -f elixir/images/agent-tools/Containerfile -t symphony-agent-tools:dev .
+#
+# Keep build output and local runtime state out of the context.
+.git
+**/.tmp
+**/_build
+**/deps
+**/cover
+**/bin
+**/node_modules
+observability/.data

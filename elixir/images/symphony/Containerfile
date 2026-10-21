@@ -1,0 +1,93 @@
+# Symphony controller and runner image. The role is chosen by the arguments:
+#
+#   podman run IMAGE /cfg/WORKFLOW.md --port 4000 --i-understand-...
+#   podman run IMAGE runner /state/runs/<id>/spec.json --i-understand-...
+#
+# Build from the repository root (the build context is the repo root, so
+# elixir/ is copied in):
+#
+#   podman build -f elixir/images/symphony/Containerfile -t symphony:dev .
+
+ARG ELIXIR_IMAGE=hexpm/elixir:1.19.5-erlang-28.5.0.5-debian-bookworm-20260824-slim
+
+FROM ${ELIXIR_IMAGE} AS build
+
+ENV MIX_ENV=prod \
+    LANG=C.UTF-8
+
+WORKDIR /app
+
+RUN mix local.hex --force && mix local.rebar --force
+
+COPY elixir/mix.exs elixir/mix.lock ./
+RUN mix deps.get --only prod
+
+COPY elixir/config config
+COPY elixir/lib lib
+COPY elixir/priv priv
+
+# escript.build: the escript embeds Elixir and the application, so the runtime
+# only needs the Erlang VM (and escript) from the same hexpm image.
+RUN mix build
+
+
+FROM debian:bookworm-slim AS runtime
+
+ARG REVISION=unknown
+
+ENV LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    HOME=/home/symphony \
+    GIT_TERMINAL_PROMPT=0 \
+    GH_PROMPT_DISABLED=1
+
+# Erlang/OTP runtime from the build image. escript needs escript on PATH; the
+# rest are the tools the VM (and observers) expect next to it.
+COPY --from=build /usr/local/lib/erlang /usr/local/lib/erlang
+COPY --from=build /usr/local/bin/erl /usr/local/bin/erlc /usr/local/bin/escript \
+                  /usr/local/bin/epmd /usr/local/bin/run_erl /usr/local/bin/to_erl \
+                  /usr/local/bin/
+COPY --from=build /app/bin/symphony /usr/local/bin/symphony
+
+# git and ssh for workspace clones, gh for the GitHub CLI, tini for signal
+# handling, and the shared libraries the Erlang VM's NIFs link against.
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      ca-certificates \
+      curl \
+      git \
+      gnupg \
+      openssh-client \
+      libstdc++6 \
+      libncurses6 \
+      libssl3 \
+      tini; \
+    mkdir -p /etc/apt/keyrings; \
+    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      -o /etc/apt/keyrings/githubcli-archive-keyring.gpg; \
+    chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg; \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends gh; \
+    rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+    groupadd --gid 10001 symphony; \
+    useradd --uid 10001 --gid symphony --create-home --home-dir /home/symphony --shell /bin/bash symphony; \
+    mkdir -p /srv/symphony; \
+    chown symphony:symphony /srv/symphony /home/symphony
+
+USER symphony:symphony
+WORKDIR /srv/symphony
+
+EXPOSE 4000
+
+LABEL org.opencontainers.image.title="symphony" \
+      org.opencontainers.image.description="Symphony controller and runner (agent orchestration)" \
+      org.opencontainers.image.source="https://github.com/Swiftyos/OpenSymphony" \
+      org.opencontainers.image.revision="${REVISION}" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
+ENTRYPOINT ["/usr/bin/tini", "--", "symphony"]

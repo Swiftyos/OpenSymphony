@@ -1,0 +1,58 @@
+# Agent CLI tools for Symphony runner pods, injected into any team base image
+# by an init container:
+#
+#   initContainers:
+#     - name: agent-tools
+#       image: symphony-agent-tools:dev
+#       args: ["/opt/symphony"]
+#       volumeMounts:
+#         - name: agent-tools
+#           mountPath: /opt/symphony
+#
+# The image itself is tiny; /opt/symphony holds the native Codex and Claude Code
+# binaries (no Node runtime is needed at run time).
+#
+# Build from the repository root:
+#
+#   podman build -f elixir/images/agent-tools/Containerfile -t symphony-agent-tools:dev .
+
+FROM node:22-bookworm-slim AS build
+
+ARG CODEX_VERSION=0.163.0
+ARG CLAUDE_CODE_VERSION=2.1.306
+
+WORKDIR /build
+
+RUN npm init --yes >/dev/null \
+ && npm install --no-audit --no-fund --omit=dev \
+      @openai/codex@${CODEX_VERSION} \
+      @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
+
+# Both packages ship native binaries in per-platform optional dependencies:
+# Codex at @openai/codex-<platform>/vendor/<triple>/bin/codex and Claude Code at
+# @anthropic-ai/claude-code-<platform>/claude. Only the build platform's
+# package is installed, so the globs resolve to exactly one binary.
+RUN set -eux; \
+    mkdir -p /opt/symphony/bin; \
+    cp node_modules/@openai/codex-*/vendor/*/bin/codex /opt/symphony/bin/codex; \
+    cp node_modules/@anthropic-ai/claude-code-linux-*/claude /opt/symphony/bin/claude; \
+    chmod 0755 /opt/symphony/bin/codex /opt/symphony/bin/claude; \
+    /opt/symphony/bin/codex --version; \
+    /opt/symphony/bin/claude --version
+
+
+FROM busybox:latest
+
+ARG REVISION=unknown
+
+LABEL org.opencontainers.image.title="symphony-agent-tools" \
+      org.opencontainers.image.description="Codex and Claude Code binaries for Symphony runner pods" \
+      org.opencontainers.image.source="https://github.com/Swiftyos/OpenSymphony" \
+      org.opencontainers.image.revision="${REVISION}" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
+COPY --from=build /opt/symphony /opt/symphony
+COPY elixir/images/agent-tools/copy-agent-tools.sh /usr/local/bin/copy-agent-tools
+RUN chmod 0755 /usr/local/bin/copy-agent-tools
+
+ENTRYPOINT ["/usr/local/bin/copy-agent-tools"]
