@@ -378,6 +378,25 @@ defmodule SymphonyElixir.DurableRunsProcessTest do
     GenServer.stop(pid)
   end
 
+  test "process dispatch hands the runner the issue's resolved environment" do
+    path = Workflow.workflow_file_path()
+    "---\n" <> rest = File.read!(path)
+    File.write!(path, "---\nenvironments:\n  default:\n    image: registry.example.com/default:1\n" <> rest)
+    WorkflowStore.force_reload()
+
+    issue = Support.issue_fixture("issue-env-spec", "MT-ENVSPEC")
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    Application.put_env(:symphony_elixir, :run_launcher, FakeLauncher)
+    FakeLauncher.on_start(:ok, self())
+
+    {:ok, pid} = Orchestrator.start_link(name: Module.concat(__MODULE__, "EnvironmentSpecOrchestrator"))
+
+    assert_receive {:fake_start, %RunSpec{environment: environment}, _ref}, 5_000
+    assert %{name: "default", image: "registry.example.com/default:1"} = environment
+
+    GenServer.stop(pid)
+  end
+
   test "a process launch failure forgets the pending run and retries with the launcher's error" do
     issue = Support.issue_fixture("issue-launch-fail", "MT-LFAIL")
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])

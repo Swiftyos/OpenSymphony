@@ -1572,6 +1572,7 @@ defmodule SymphonyElixir.Orchestrator do
       workspace_root: workspace_root,
       route: %{backend: route.backend, effort: route.effort, warnings: Map.get(route, :warnings, [])},
       account: account_spec(account),
+      environment: Map.get(issue_config, :environment),
       controller_url: RunSpec.controller_url(),
       token: RunToken.sign(run_id, epoch)
     }
