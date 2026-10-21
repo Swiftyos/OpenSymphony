@@ -1352,7 +1352,9 @@ defmodule SymphonyElixir.Workspace do
         {[], false}
 
       true ->
-        case GitHubApp.installation_token(repo_source, settings: settings) do
+        # Cache syncs only clone and fetch, for the home repo and the read-only
+        # reference repos alike, so they never get a token that can push.
+        case GitHubApp.installation_token(repo_source, settings: settings, access: :read) do
           {:ok, %{token: token}} ->
             host = GitHubApp.git_host(settings.github_app)
             {GitHubApp.git_env(token, host: host, base_env: base_env), host}

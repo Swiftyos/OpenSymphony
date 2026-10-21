@@ -166,6 +166,32 @@ defmodule SymphonyElixir.GitHubAppTest do
                     }}
   end
 
+  test "access: :read requests the configured contents and metadata as read only", %{pem: pem} do
+    parent = self()
+
+    plug = fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      send(parent, {:permissions, Jason.decode!(body)["permissions"]})
+      token_response().(conn)
+    end
+
+    assert {:ok, _token} = GitHubApp.installation_token("octo/repo", config: config(pem), cache: false, plug: plug, access: :read)
+    assert_receive {:permissions, %{"contents" => "read", "metadata" => "read"} = permissions}
+    assert map_size(permissions) == 2
+
+    assert GitHubApp.read_permissions(%{"contents" => "write", "issues" => "write", "pull_requests" => "write"}) == %{"contents" => "read", "metadata" => "read"}
+    assert GitHubApp.read_permissions(%{issues: :write}) == %{"metadata" => "read"}
+
+    # Read and write tokens for one repo are cached separately.
+    name = :"github_app_cache_#{System.unique_integer([:positive])}"
+    start_supervised!({Cache, name: name})
+    clock = fn -> at("2030-01-01T00:00:00Z") end
+    assert {:ok, _} = GitHubApp.installation_token("octo/repo", config: config(pem), cache: name, plug: plug, clock: clock, access: :read)
+    assert {:ok, _} = GitHubApp.installation_token("octo/repo", config: config(pem), cache: name, plug: plug, clock: clock)
+    assert_receive {:permissions, %{"contents" => "read"}}
+    assert_receive {:permissions, %{"contents" => "write"}}
+  end
+
   test "installation discovery uses GET /repos/{owner}/{repo}/installation", %{pem: pem} do
     parent = self()
 

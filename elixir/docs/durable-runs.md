@@ -265,6 +265,9 @@ spec; the token is not persisted in `spec.json`, logs, or transcripts.
   it, and then `exec`s the agent, which reads its protocol from the rest of
   stdin. Repo cache syncs on worker hosts send their script and env over ssh
   stdin too.
+- Repo cache syncs, for the home repo and multi-repo reference repos alike,
+  mint read-only tokens (`contents`/`metadata: read`); write permissions only
+  reach the agent, and only for its home repo.
 - Agents get a token with at least 50 minutes left (a cached token closer to
   expiry is replaced); workspace syncs accept one with five minutes left.
 - `SymphonyElixir.GitHubApp.token_for_run/2` resolves a fresh token from a run

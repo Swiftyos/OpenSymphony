@@ -549,7 +549,11 @@ When configured, Symphony signs a short-lived app JWT, discovers the
 installation for the issue's repository if needed, and mints an installation
 token scoped to that one repository. The token is cached per repository:
 workspace syncs reuse it until five minutes before expiry, while agents always
-start with a token that has at least 50 minutes left. Workspace cache sync
+start with a token that has at least 50 minutes left. Repo cache syncs (the
+issue's home repo and a multi-repo project's read-only reference repos) only
+clone and fetch, so they get a separate `contents: read`/`metadata: read`
+token; only the agent's token for its home repo carries the configured write
+permissions. Workspace cache sync
 (local, or over ssh stdin on a worker host) and agent `git`/`gh` commands use it
 through the environment only: `GH_TOKEN` for `gh`, and an
 `http.https://<host>/.extraHeader` (the GitHub Enterprise host when `base_url`

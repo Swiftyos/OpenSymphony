@@ -225,4 +225,49 @@ defmodule SymphonyElixir.WorkspaceGitHubAppTest do
     assert env =~ "GIT_CONFIG_KEY_0=symphony.inherited"
     assert env =~ "GIT_CONFIG_KEY_1=http.https://github.com/.extraHeader"
   end
+
+  test "cache syncs for the home repo and the reference repos ask for read-only tokens", ctx do
+    worker_repo = Path.join(ctx.test_root, "worker-source")
+    File.mkdir_p!(worker_repo)
+    File.write!(Path.join(worker_repo, "README.md"), "worker\n")
+    System.cmd("git", ["-C", worker_repo, "init", "-q", "-b", "main"])
+    System.cmd("git", ["-C", worker_repo, "-c", "user.name=T", "-c", "user.email=t@example.com", "add", "README.md"])
+    System.cmd("git", ["-C", worker_repo, "-c", "user.name=T", "-c", "user.email=t@example.com", "commit", "-q", "-m", "initial"])
+
+    File.write!(Path.join(ctx.test_root, "gitconfig"), """
+    [url "#{Path.join(ctx.test_root, "source")}"]
+      insteadOf = https://github.com/octo/repo.git
+    [url "#{worker_repo}"]
+      insteadOf = https://github.com/octo/worker.git
+    [core]
+      hooksPath = #{Path.join(ctx.test_root, "hooks")}
+    """)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_project_slug: nil,
+      tracker_projects: [%{slug: "project-a", repo: "octo/repo", repos: [%{name: "worker", repo: "octo/worker"}]}],
+      workspace_root: Path.join(ctx.test_root, "workspaces")
+    )
+
+    settings = app_settings(System.unique_integer([:positive]))
+    parent = self()
+
+    Application.put_env(:symphony_elixir, :github_app_req_options,
+      plug: fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(parent, {:minted, Jason.decode!(body)})
+        Req.Test.json(conn, %{"token" => @token, "expires_at" => "2999-01-01T00:00:00Z"})
+      end
+    )
+
+    issue = %Issue{identifier: "GHA-5", project_slug: "project-a", labels: []}
+    assert {:ok, workspace} = Workspace.create_for_issue(issue, nil, settings: settings)
+    assert File.read!(Path.join(workspace, "README.md")) == "hello\n"
+    assert File.read!(Path.join(workspace, ".symphony/repos/worker/README.md")) == "worker\n"
+
+    read_only = %{"contents" => "read", "metadata" => "read"}
+    assert_received {:minted, %{"repositories" => ["repo"], "permissions" => ^read_only}}
+    assert_received {:minted, %{"repositories" => ["worker"], "permissions" => ^read_only}}
+    refute_received {:minted, _}
+  end
 end

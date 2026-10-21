@@ -82,15 +82,25 @@ defmodule SymphonyElixir.GitHubApp do
   Option `:min_ttl_ms` is how long a cached token must still be valid to be
   reused (default five minutes); a token closer to expiry is replaced by a
   freshly minted one.
+
+  Option `:access` is `:configured` (default, `github_app.permissions`) or
+  `:read`, which requests only `read_permissions/1`, for a clone or fetch that
+  never pushes.
   """
   @spec installation_token(String.t() | map(), keyword()) :: {:ok, token()} | {:error, term()}
   def installation_token(repo, opts \\ []) do
     config = config_from_opts(opts)
     clock = Keyword.get(opts, :clock, fn -> DateTime.utc_now() end)
 
+    requested =
+      case Keyword.get(opts, :access, :configured) do
+        :read -> read_permissions(config.permissions)
+        :configured -> config.permissions
+      end
+
     with :ok <- ensure_configured(config),
          {:ok, slug} <- repo_slug(repo),
-         {:ok, permissions} <- validate_permissions(config.permissions) do
+         {:ok, permissions} <- validate_permissions(requested) do
       cached_or_mint(config, slug, permissions, opts, clock)
     end
   end
@@ -215,6 +225,20 @@ defmodule SymphonyElixir.GitHubApp do
   end
 
   def validate_permissions(_permissions), do: {:error, {:invalid_permissions, :not_a_map}}
+
+  @doc """
+  Read-only permissions for a clone or fetch: the configured `contents` and
+  `metadata` permissions, downgraded to `read`. Asking for a permission the app
+  was not granted fails at GitHub, so nothing is added that is not configured;
+  `metadata: read` (which every installation has) is the floor.
+  """
+  @spec read_permissions(map()) :: %{String.t() => String.t()}
+  def read_permissions(permissions) when is_map(permissions) do
+    permissions
+    |> Map.new(fn {key, _value} -> {to_string(key), "read"} end)
+    |> Map.take(["contents", "metadata"])
+    |> Map.put("metadata", "read")
+  end
 
   @doc "The repository permissions `validate_permissions/1` accepts."
   @spec allowed_permissions() :: [String.t()]
