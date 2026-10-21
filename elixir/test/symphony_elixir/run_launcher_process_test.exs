@@ -214,6 +214,9 @@ defmodule SymphonyElixir.RunLauncher.ProcessTest do
 
     try do
       # Another process now owns the pid: not alive, and stop leaves it be.
+      # (The shared ps snapshot, taken before the fake ps, would still show
+      # the runner until it expires; a fresh one would not have it.)
+      :ok = SymphonyElixir.RunLauncher.Process.ProcessTable.forget(String.to_integer(pid))
       refute ProcessLauncher.alive?(ref)
       assert :ok = ProcessLauncher.stop(ref, 50)
     after

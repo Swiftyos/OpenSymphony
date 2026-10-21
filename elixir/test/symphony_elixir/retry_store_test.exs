@@ -113,7 +113,8 @@ defmodule SymphonyElixir.RetryStoreTest do
     end)
 
     send(pid, {:DOWN, ref, :process, self(), :crashed})
-    Process.sleep(50)
+    # The :DOWN (and its synchronous retry save) is handled before this returns.
+    _state = :sys.get_state(pid)
     assert %{^issue_id => %{attempt: 1, metadata: %{identifier: "MT-900"}}} = RetryStore.load()
     GenServer.stop(pid)
 

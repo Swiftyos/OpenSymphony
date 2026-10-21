@@ -110,6 +110,16 @@ defmodule SymphonyElixir.RunLauncher.Process do
 
   def alive?(_ref), do: false
 
+  # Whether a process reference is alive, checked on the process itself.
+  defp exact_status("process:" <> rest) do
+    with {:ok, pid, start} <- parse_process_ref(rest),
+         true <- process_alive?(pid, start) do
+      :alive
+    else
+      _gone -> {:gone, nil}
+    end
+  end
+
   @impl true
   def stop(ref), do: stop(ref, @kill_grace_ms)
 
@@ -220,7 +230,7 @@ defmodule SymphonyElixir.RunLauncher.Process do
 
   # A backgrounded runner is checked by its watcher shortly after start; a
   # systemd unit is started (and its failures reported) by systemd-run itself.
-  defp startup_check("process:" <> _rest, run_id), do: [log: runner_log(run_id)]
+  defp startup_check("process:" <> _rest = ref, run_id), do: [log: runner_log(run_id), startup_status: fn -> exact_status(ref) end]
   defp startup_check(_ref, _run_id), do: []
 
   defp runner_log(run_id), do: Path.join(RunSpec.dir(run_id), "runner.log")

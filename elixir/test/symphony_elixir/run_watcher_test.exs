@@ -283,6 +283,25 @@ defmodule SymphonyElixir.RunWatcherTest do
     end
   end
 
+  test "the startup check uses its own exact check when given one", %{run_id: run_id} do
+    log = Path.join(System.tmp_dir!(), "run-watcher-startup-#{System.unique_integer([:positive])}.log")
+    File.write!(log, "boom at launch")
+    on_exit(fn -> File.rm(log) end)
+
+    # The regular check (a stale snapshot) says alive; the exact one says gone.
+    {:ok, watcher} =
+      RunWatcher.start(%{run_id: run_id}, "fake:" <> run_id,
+        status: fn -> :alive end,
+        startup_status: fn -> {:gone, nil} end,
+        log: log,
+        startup_check_ms: 0,
+        poll_interval_ms: 60_000
+      )
+
+    monitor = Process.monitor(watcher)
+    assert_receive {:DOWN, ^monitor, :process, ^watcher, {:launch_failed, "boom at launch"}}, 1_000
+  end
+
   test "last_seen degrades when the watcher is the calling process", %{run_id: run_id} do
     Registry.register(RunWatcher.registry(), run_id, nil)
     assert RunWatcher.last_seen(run_id) == nil

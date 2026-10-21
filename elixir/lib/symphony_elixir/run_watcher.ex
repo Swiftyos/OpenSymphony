@@ -58,6 +58,7 @@ defmodule SymphonyElixir.RunWatcher do
       log: Keyword.get(opts, :log),
       startup_check_ms: Keyword.get(opts, :startup_check_ms, @startup_check_ms),
       status: Keyword.get(opts, :status),
+      startup_status: Keyword.get(opts, :startup_status),
       unauthorized_timeout_ms: Keyword.get(opts, :unauthorized_timeout_ms, @unauthorized_timeout_ms)
     }
 
@@ -191,6 +192,7 @@ defmodule SymphonyElixir.RunWatcher do
        lost_grace_ms: args.lost_grace_ms,
        log: Map.get(args, :log),
        status: Map.get(args, :status),
+       startup_status: Map.get(args, :startup_status),
        unauthorized_timeout_ms: Map.get(args, :unauthorized_timeout_ms, @unauthorized_timeout_ms),
        last_seen_ms: now,
        gone_since_ms: nil,
@@ -213,7 +215,7 @@ defmodule SymphonyElixir.RunWatcher do
 
   @impl true
   def handle_info(:startup_check, state) do
-    if status(state) == :alive do
+    if startup_status(state) == :alive do
       schedule_poll(state.poll_interval_ms)
       {:noreply, state}
     else
@@ -282,6 +284,11 @@ defmodule SymphonyElixir.RunWatcher do
       {:noreply, %{state | unauthorized_since_ms: since}}
     end
   end
+
+  # The startup check can be given its own, exact check (the process
+  # launcher's shared ps snapshot may still show a runner that just died).
+  defp startup_status(%{startup_status: status} = state) when is_function(status, 0), do: status(%{state | status: status})
+  defp startup_status(state), do: status(state)
 
   defp status(%{status: status}) when is_function(status, 0) do
     status.()
