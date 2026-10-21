@@ -127,7 +127,10 @@ Kubernetes they move behind a tool gateway.
        and cleans up the run in a task and schedules a failure retry whose error is the log's
        tail.
      - The reference is `process:<pid>:<start time>` (`ps -o lstart=`): `alive?` and `stop`
-       treat a pid whose start time differs as another process.
+       treat a pid whose start time differs as another process. Watchers' checks are served
+       by one shared `ps -A` snapshot (`RunLauncher.Process.ProcessTable`, at most every 2s)
+       instead of two forks per run per poll; a pid the snapshot does not show alive, and
+       every check while stopping a run, is checked directly.
      - The run is recorded in the registry (with a `pending:` reference) before the runner
        starts, so its first events find it; a failed launch deletes it again.
      - `spec.json` (it holds the run token) is deleted when the run ends or is stopped.
