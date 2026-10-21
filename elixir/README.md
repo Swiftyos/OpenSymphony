@@ -21,6 +21,9 @@ This directory contains the current Elixir/OTP implementation of Symphony, based
 
 Supported backends today are Codex, OpenCode, and Claude Code.
 
+For how the pieces fit together (supervision tree, run lifecycle, launchers, durability, security
+and scaling), see [`docs/architecture.md`](../docs/architecture.md).
+
 During unattended agent sessions, Symphony also bootstraps a workspace-local Linear integration so
 that repo skills can make raw Linear GraphQL calls without storing secrets in the repo. OpenCode
 gets a generated custom tool, and Claude Code gets a generated workspace-local MCP server.

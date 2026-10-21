@@ -25,6 +25,12 @@ and what it all costs by project, team, task, and harness.
 
 See [elixir/README.md](elixir/README.md#web-dashboard) for details.
 
+## Architecture
+
+[docs/architecture.md](docs/architecture.md) explains how Symphony is built and how an issue
+moves through it: components, run lifecycle, durability, launchers, security, observability and
+scaling. [docs/](docs/README.md) indexes the rest of the documentation.
+
 ## Current capabilities
 
 The experimental Elixir implementation currently supports:
