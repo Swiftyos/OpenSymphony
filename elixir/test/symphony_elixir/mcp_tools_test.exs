@@ -377,6 +377,7 @@ defmodule SymphonyElixir.McpToolsTest do
       assert {:ok, _, %{resources: ["*"]}} = McpTokens.create(admin.id, "x", ["read"], 7, ["PAY", "*"])
       assert {:ok, _, %{resources: ["PAY", "project:checkout"]}} = McpTokens.create(mia.id, "y", ["read"], 7, [" pay", "project: checkout"])
       assert {:error, :invalid_resources} = McpTokens.create(mia.id, "z", ["read"], 7, [5])
+      refute Auth.token_resource_allowed?(nil, "PAY")
     end
 
     test "an admin's team token loses admin rights and everything outside the team", %{admin: admin} do
