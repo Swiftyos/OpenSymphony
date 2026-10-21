@@ -107,6 +107,7 @@ defmodule SymphonyElixir.RunnerTestSupport do
           identifier: Keyword.get(opts, :identifier, "MT-RUNNER-1"),
           backend: Keyword.get(opts, :backend, "claude"),
           issue_title: "Runner protocol",
+          project_slug: Keyword.get(opts, :project_slug),
           labels: []
         }
       })

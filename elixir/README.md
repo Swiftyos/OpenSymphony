@@ -549,8 +549,28 @@ the issue's `symphony/<ISSUE>` branch with a single remote round trip (and
 removes the stale local ref if the branch no longer exists), so a branch pushed
 by a previous run in another workspace is resumed. Caches on remote SSH workers
 are not refreshed in the background: their first start after the freshness
-window does a full fetch. A future Kubernetes runner will have runner pods clone
-from a controller-served mirror instead of the local cache clone.
+window does a full fetch.
+
+**Serving runners.** A runner pod has no cache, so the controller serves these
+caches read-only over git's smart HTTP protocol at
+`/git/<run_id>/<repo-key>`. The repo key is the cache directory key (for example
+`owner_name-<digest>`) for a configured project repo, never a filesystem path.
+The run token from the spec authenticates it, either as
+`Authorization: Bearer <token>` or as HTTP basic with the token as the password
+(the `https://x-access-token:<token>@host/...` form git uses). A run may only
+read its own issue's project repo; registries without a project slug (the legacy
+single-project fallback) may read any configured repo and the gap is logged.
+`info/refs` advertises the refs the cache has now, including protocol v2 when
+the client asks for it, and `git-upload-pack` streams the request to the cache.
+`git-receive-pack` is refused, so pushes still go to GitHub from the workspace's
+own origin. If the cache is older than `workspace.repo_cache.max_age_ms` the
+request asks `RepoCacheRefresher` to sync in the background and serves the
+current refs; the request never fetches from GitHub, and it does not hold the
+cache lock (a concurrent fetch is safe for git readers). A run spec gets
+`git_mirror_url` when the controller has the issue repo's cache;
+`SymphonyElixir.GitMirror.clone_url(spec)` turns it into a clone URL carrying the
+token. Wiring that clone into workspace creation waits for the Kubernetes
+launcher.
 
 ### Scheduling
 

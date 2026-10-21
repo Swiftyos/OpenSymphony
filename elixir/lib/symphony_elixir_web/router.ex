@@ -38,6 +38,11 @@ defmodule SymphonyElixirWeb.Router do
     plug(SymphonyElixirWeb.RunnerAuth)
   end
 
+  # Read-only git mirror: the same run tokens, via bearer or basic auth.
+  pipeline :git_mirror do
+    plug(SymphonyElixirWeb.RunnerAuth)
+  end
+
   scope "/", SymphonyElixirWeb do
     pipe_through(:mcp)
 
@@ -108,6 +113,14 @@ defmodule SymphonyElixirWeb.Router do
     get("/api/v1/issues/:issue_identifier/messages", AgentMessagesController, :index)
     post("/api/v1/issues/:issue_identifier/messages", AgentMessagesController, :create)
     get("/api/v1/:issue_identifier", ObservabilityApiController, :issue)
+  end
+
+  scope "/git/:run_id/:repo", SymphonyElixirWeb do
+    pipe_through(:git_mirror)
+
+    get("/info/refs", GitMirrorController, :info_refs)
+    post("/git-upload-pack", GitMirrorController, :upload_pack)
+    post("/git-receive-pack", GitMirrorController, :read_only)
   end
 
   scope "/runner/v1/runs/:run_id", SymphonyElixirWeb do

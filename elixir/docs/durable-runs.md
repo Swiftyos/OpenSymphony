@@ -122,6 +122,17 @@ Kubernetes they move behind a tool gateway.
    - **End-to-end test.** It kills the controller mid-run, restarts it, and checks that the run
      is adopted and completes once.
 5. **Kubernetes launcher** (Phase 3): the runner is a pod's entrypoint.
+   - **Repo access.** A runner pod has no repo cache. The controller serves each
+     project cache read-only at `/git/<run_id>/<repo-key>` over git smart HTTP,
+     authenticated by the run token (bearer or HTTP basic with the token as the
+     password). The key names a configured repo's cache, never a path. A run may
+     read only its own issue's project repo; metadata without a project slug may
+     read any configured repo (logged, for the legacy single-project fallback).
+     Receive-pack is refused. The endpoint serves the cache as it is and asks the
+     background refresher to catch up when it is stale; it never fetches from
+     GitHub in the request. Specs get `git_mirror_url` when the cache exists, and
+     `SymphonyElixir.GitMirror.clone_url/1` embeds the token for the runner's
+     clone.
 
 ## Controller responsiveness
 

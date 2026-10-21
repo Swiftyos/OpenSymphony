@@ -7,8 +7,10 @@ defmodule SymphonyElixirWeb.RunnerAuth do
   its running set. A request is accepted only when:
 
     * the registry has a run with this id (`404` otherwise),
-    * `Authorization: Bearer <token>` is the HMAC for the run's current epoch
-      (`401` for a missing or forged token), and
+    * the credential is the HMAC for the run's current epoch (`401` for a
+      missing or forged token): either `Authorization: Bearer <token>` or HTTP
+      basic auth with the token as the password, which is what `git` sends for
+      a URL like `https://x-access-token:<token>@host/...`, and
     * that epoch is the current one — a token for an earlier run of the issue
       is fenced with `409 {"error": "stale_epoch"}`.
 
@@ -49,7 +51,7 @@ defmodule SymphonyElixirWeb.RunnerAuth do
   defp find_run(_run_id), do: nil
 
   defp authorize(conn, run_id, issue_id, entry) do
-    token = bearer(conn)
+    token = credential(conn)
 
     cond do
       RunToken.verify(run_id, entry.epoch, token) ->
@@ -73,11 +75,26 @@ defmodule SymphonyElixirWeb.RunnerAuth do
     end
   end
 
-  defp bearer(conn) do
+  defp credential(conn) do
     with [header | _] <- get_req_header(conn, "authorization"),
-         [scheme, token] <- String.split(header, " ", parts: 2),
-         "bearer" <- String.downcase(scheme) do
-      String.trim(token)
+         [scheme, credential] <- String.split(header, " ", parts: 2) do
+      case String.downcase(scheme) do
+        "bearer" -> String.trim(credential)
+        "basic" -> basic_token(credential)
+        _ -> nil
+      end
+    else
+      _ -> nil
+    end
+  end
+
+  # Git's credential helper puts the run token after the first colon; the user
+  # name (`x-access-token`) is ignored.
+  defp basic_token(encoded) do
+    with {:ok, decoded} <- Base.decode64(encoded),
+         [_user, token] <- String.split(decoded, ":", parts: 2),
+         token when token != "" <- String.trim(token) do
+      token
     else
       _ -> nil
     end
@@ -85,8 +102,14 @@ defmodule SymphonyElixirWeb.RunnerAuth do
 
   defp deny(conn, status, error) do
     conn
+    |> maybe_challenge(status)
     |> put_status(status)
     |> json(%{error: error})
     |> halt()
   end
+
+  # Without a challenge, git does not retry with the basic credential from a
+  # clone URL; the bearer token is unaffected because it is sent up front.
+  defp maybe_challenge(conn, 401), do: put_resp_header(conn, "www-authenticate", ~s(Basic realm="symphony"))
+  defp maybe_challenge(conn, _status), do: conn
 end

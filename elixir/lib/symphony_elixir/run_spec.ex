@@ -9,7 +9,7 @@ defmodule SymphonyElixir.RunSpec do
   protocol around it.
   """
 
-  alias SymphonyElixir.HttpServer
+  alias SymphonyElixir.{Config, GitMirror, HttpServer}
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.PrivateFile
   alias SymphonyElixir.StateStore
@@ -24,6 +24,7 @@ defmodule SymphonyElixir.RunSpec do
     :effort,
     :account,
     :controller_url,
+    :git_mirror_url,
     :token
   ]
 
@@ -60,6 +61,7 @@ defmodule SymphonyElixir.RunSpec do
           effort: String.t() | nil,
           account: %{backend: String.t(), id: String.t()} | nil,
           controller_url: String.t() | nil,
+          git_mirror_url: String.t() | nil,
           token: String.t() | nil
         }
 
@@ -71,15 +73,27 @@ defmodule SymphonyElixir.RunSpec do
   @spec path(String.t()) :: Path.t()
   def path(run_id) when is_binary(run_id), do: Path.join(dir(run_id), "spec.json")
 
-  @doc "Writes the spec owner-only; returns its path."
+  @doc """
+  Writes the spec owner-only; returns its path.
+
+  When the controller has a cache for the issue's project repo, the spec gets
+  the read-only git mirror URL so a runner can clone from the controller.
+  """
   @spec write(t()) :: {:ok, Path.t()} | {:error, term()}
   def write(%__MODULE__{run_id: run_id} = spec) when is_binary(run_id) do
     path = path(run_id)
+    spec = attach_git_mirror(spec, Config.settings!())
 
     case PrivateFile.write(path, Jason.encode!(encode(spec), pretty: true)) do
       :ok -> {:ok, path}
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  @doc "Adds the mirror URL when this controller has the issue's repo cache."
+  @spec attach_git_mirror(t(), Config.Schema.t()) :: t()
+  def attach_git_mirror(%__MODULE__{} = spec, %Config.Schema{} = settings) do
+    %{spec | git_mirror_url: spec.git_mirror_url || GitMirror.mirror_url_for(spec, settings)}
   end
 
   @doc "Reads a spec written with `write/1`."
