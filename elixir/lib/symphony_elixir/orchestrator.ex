@@ -12,12 +12,14 @@ defmodule SymphonyElixir.Orchestrator do
     AgentRoute,
     AgentRunner,
     Config,
+    Environment,
     FactoryControls,
     IssueConfig,
     IssueStage,
     RetryStore,
     RunLauncher,
     RunRegistry,
+    Sandbox,
     SessionHistory,
     StatusDashboard,
     Tracker,
@@ -83,7 +85,9 @@ defmodule SymphonyElixir.Orchestrator do
       codex_totals: nil,
       codex_rate_limits: nil,
       agent_totals: nil,
-      rate_limits: nil
+      rate_limits: nil,
+      # Rejected environments already reported, {issue_id, message} => monotonic ms.
+      environment_rejections: %{}
     ]
   end
 
@@ -98,6 +102,7 @@ defmodule SymphonyElixir.Orchestrator do
     now_ms = System.monotonic_time(:millisecond)
     config = Config.validated_settings!()
     :ok = Workspace.preflight_repo_setup!(config)
+    sweep_sandbox_orphans(config)
 
     state =
       %State{
@@ -579,6 +584,12 @@ defmodule SymphonyElixir.Orchestrator do
   @spec sort_issues_for_dispatch_for_test([Issue.t()]) :: [Issue.t()]
   def sort_issues_for_dispatch_for_test(issues) when is_list(issues) do
     sort_issues_for_dispatch(issues)
+  end
+
+  @doc false
+  @spec do_dispatch_issue_for_test(term(), Issue.t()) :: {:ok | :unavailable | :error, term()}
+  def do_dispatch_issue_for_test(%State{} = state, %Issue{} = issue) do
+    do_dispatch_issue(state, issue, nil, nil)
   end
 
   @doc false
@@ -1284,18 +1295,38 @@ defmodule SymphonyElixir.Orchestrator do
         end
 
       {:error, reason} ->
-        Logger.error("Skipping dispatch; issue config resolution failed for #{issue_context(issue)}: #{inspect(reason)}")
-        note_environment_error(issue, reason)
-        {:error, state}
+        {:error, report_dispatch_config_error(state, issue, reason)}
     end
   end
 
-  defp note_environment_error(%Issue{identifier: identifier}, {:environment_invalid, _identifier, message})
-       when is_binary(identifier) do
+  # An invalid environment is resolved again each poll and stays skipped; the
+  # log line and transcript note are de-duplicated per issue and message.
+  defp report_dispatch_config_error(%State{} = state, %Issue{} = issue, {:environment_invalid, _identifier, message} = reason)
+       when is_binary(message) do
+    now_ms = System.monotonic_time(:millisecond)
+
+    case Environment.note_rejection(state.environment_rejections, issue.id, message, now_ms) do
+      {:report, seen} ->
+        Logger.error("Skipping dispatch; issue config resolution failed for #{issue_context(issue)}: #{inspect(reason)}")
+        note_environment_error(issue, message)
+        %{state | environment_rejections: seen}
+
+      {:suppress, seen} ->
+        Logger.debug("Skipping dispatch; environment still rejected for #{issue_context(issue)}")
+        %{state | environment_rejections: seen}
+    end
+  end
+
+  defp report_dispatch_config_error(%State{} = state, issue, reason) do
+    Logger.error("Skipping dispatch; issue config resolution failed for #{issue_context(issue)}: #{inspect(reason)}")
+    state
+  end
+
+  defp note_environment_error(%Issue{identifier: identifier}, message) when is_binary(identifier) do
     Transcript.note(identifier, "Environment rejected; the run will not start. #{message}")
   end
 
-  defp note_environment_error(_issue, _reason), do: :ok
+  defp note_environment_error(_issue, _message), do: :ok
 
   defp dispatch_issue_with_account(%State{} = state, issue, attempt, recipient, worker_host, route, issue_config) do
     case select_account_for_dispatch(route.backend, worker_host, state, issue_config.settings) do
@@ -1998,6 +2029,13 @@ defmodule SymphonyElixir.Orchestrator do
         map_size(state.running) - map_size(state.pending_dispatches),
       0
     )
+  end
+
+  # Service containers and networks left behind by workspaces deleted while
+  # Symphony was down. Off the init path: it shells out to the engine.
+  defp sweep_sandbox_orphans(config) do
+    if Sandbox.enabled?(config), do: Task.start(fn -> Sandbox.sweep_orphans(config) end)
+    :ok
   end
 
   @spec request_refresh() :: map() | :unavailable

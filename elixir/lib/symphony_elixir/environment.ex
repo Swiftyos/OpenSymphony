@@ -12,7 +12,10 @@ defmodule SymphonyElixir.Environment do
   `.symphony/environment.yaml` (read from the repo cache at its default branch)
   may choose an image only from the catalog's `allowed_images` prefixes, and may
   lower but never raise `resources` past the catalog entry's values. Service
-  images must also be in `allowed_images`.
+  images must also be in `allowed_images`; the catalog caps the number of
+  services (`max_services`, default 4) and each service's `cpu`/`memory`
+  (`service_resources`, default 1 CPU and 1g), which a service may lower.
+  A repo service with the same name as a catalog service replaces it.
 
   An invalid or disallowed file fails closed: `resolve/3` returns an error, no
   container is created, and the controller reports the error. There is no
@@ -31,8 +34,14 @@ defmodule SymphonyElixir.Environment do
   @service_name_pattern ~r/^[a-z][a-z0-9-]{0,62}$/
   @env_name_pattern ~r/^[A-Za-z_][A-Za-z0-9_]*$/
   @repo_keys MapSet.new(["image", "services", "resources", "setup"])
-  @service_keys MapSet.new(["name", "image", "env", "ports", "command"])
+  @service_keys MapSet.new(["name", "image", "env", "ports", "command", "resources"])
   @resource_keys ["cpu", "memory"]
+  @default_max_services 4
+  @default_service_resources %{"cpu" => 1, "memory" => "1g"}
+  # The smallest limit Docker and Podman accept for `--memory`.
+  @min_memory_bytes 6 * 1024 * 1024
+  @rejection_report_interval_ms 60 * 60 * 1_000
+  @port_pattern ~r/^(\d{1,5})(?:\/(?:tcp|udp))?$/
   @repo_file Path.join(".symphony", "environment.yaml")
 
   defstruct [
@@ -51,7 +60,8 @@ defmodule SymphonyElixir.Environment do
           image: String.t(),
           env: %{optional(String.t()) => String.t()},
           ports: [String.t()],
-          command: [String.t()]
+          command: [String.t()],
+          resources: %{optional(String.t()) => number() | String.t()}
         }
 
   @type t :: %__MODULE__{
@@ -141,6 +151,22 @@ defmodule SymphonyElixir.Environment do
   def format_error(:invalid_environment_settings), do: "invalid environment settings"
   def format_error(other), do: inspect(other, limit: 10)
 
+  @doc """
+  Decides whether a rejected environment is reported (logged and noted on the
+  transcript) or suppressed. An invalid environment is resolved again on every
+  poll; each distinct `{issue_id, message}` is reported once, then at most once
+  per `interval_ms` (an hour by default). `seen` maps those keys to the last
+  report time and is pruned of entries older than the interval.
+  """
+  @spec note_rejection(map(), String.t() | nil, String.t(), integer(), pos_integer()) :: {:report | :suppress, map()}
+  def note_rejection(seen, issue_id, message, now_ms, interval_ms \\ @rejection_report_interval_ms)
+      when is_map(seen) and is_integer(now_ms) do
+    seen = Map.filter(seen, fn {_key, reported_at} -> now_ms - reported_at < interval_ms end)
+    key = {issue_id, message}
+
+    if Map.has_key?(seen, key), do: {:suppress, seen}, else: {:report, Map.put(seen, key, now_ms)}
+  end
+
   # ---------------------------------------------------------------- name resolution
 
   defp resolve_name(issue, settings, catalog, opts) do
@@ -201,18 +227,24 @@ defmodule SymphonyElixir.Environment do
     allowed_images = list_of_strings(map_get(entry, :allowed_images) || [])
     egress_extra = list_of_strings(map_get(entry, :egress_extra) || [])
     setup = list_of_strings(map_get(entry, :setup) || [])
+    error_context = {:invalid_environment_catalog, name}
 
     with {:ok, image} <- required_image(image, {:invalid_environment_catalog, name, "needs an image"}),
          :ok <- ensure_map(resources, {:invalid_environment_catalog, name, "resources must be a map"}),
          :ok <- validate_catalog_resources(resources, name),
-         {:ok, services} <-
-           normalize_services(map_get(entry, :services) || [], :any, {:invalid_environment_catalog, name}) do
+         :ok <- validate_allowed_images(allowed_images, name),
+         {:ok, max_services} <- max_services(map_get(entry, :max_services), name),
+         {:ok, service_bounds} <- service_bounds(map_get(entry, :service_resources), name),
+         {:ok, services} <- normalize_services(map_get(entry, :services) || [], :any, service_bounds, error_context),
+         :ok <- enforce_service_count(services, max_services, error_context) do
       {:ok,
        %{
          name: name,
          image: image,
          resources: resources_map(resources),
          allowed_images: allowed_images,
+         max_services: max_services,
+         service_resources: service_bounds,
          services: services,
          setup: setup,
          egress_extra: egress_extra
@@ -230,7 +262,7 @@ defmodule SymphonyElixir.Environment do
       if valid_catalog_resource?(key, value) do
         {:cont, :ok}
       else
-        {:halt, {:error, {:invalid_environment_catalog, name, "resources must set a positive cpu and a memory size such as 4g"}}}
+        {:halt, {:error, {:invalid_environment_catalog, name, "resources must set a positive cpu and a memory size of at least 6m, such as 4g"}}}
       end
     end)
   end
@@ -238,6 +270,47 @@ defmodule SymphonyElixir.Environment do
   defp valid_catalog_resource?("cpu", value), do: is_number(parse_cpu(value))
   defp valid_catalog_resource?("memory", value), do: match?({:ok, _bytes}, parse_memory(value))
   defp valid_catalog_resource?(_key, _value), do: false
+
+  # A prefix that does not end at a path, tag, or digest boundary would let
+  # `registry.example.com/agents` also allow `registry.example.com/agents-evil/...`.
+  defp validate_allowed_images(allowed_images, name) do
+    case Enum.reject(allowed_images, &String.ends_with?(&1, ["/", ":", "@"])) do
+      [] ->
+        :ok
+
+      invalid ->
+        {:error, {:invalid_environment_catalog, name, "allowed_images entries must end in /, : or @ (got #{Enum.join(invalid, ", ")})"}}
+    end
+  end
+
+  defp max_services(nil, _name), do: {:ok, @default_max_services}
+  defp max_services(value, _name) when is_integer(value) and value >= 0, do: {:ok, value}
+
+  defp max_services(_value, name),
+    do: {:error, {:invalid_environment_catalog, name, "max_services must be a non-negative integer"}}
+
+  defp service_bounds(nil, _name), do: {:ok, @default_service_resources}
+
+  defp service_bounds(%{} = raw, name) do
+    resources = resources_map(raw)
+
+    if Enum.all?(resources, fn {key, value} -> valid_catalog_resource?(key, value) end) do
+      {:ok, Map.merge(@default_service_resources, resources)}
+    else
+      {:error, {:invalid_environment_catalog, name, "service_resources must set a positive cpu and a memory size such as 1g"}}
+    end
+  end
+
+  defp service_bounds(_raw, name),
+    do: {:error, {:invalid_environment_catalog, name, "service_resources must be a map"}}
+
+  defp enforce_service_count(services, max_services, error_context) do
+    if length(services) <= max_services do
+      :ok
+    else
+      {:error, error(error_context, "declares #{length(services)} services; the catalog allows at most #{max_services}")}
+    end
+  end
 
   # ---------------------------------------------------------------- repo file
 
@@ -392,7 +465,7 @@ defmodule SymphonyElixir.Environment do
       {"memory", value}, :ok ->
         case parse_memory(value) do
           {:ok, _bytes} -> {:cont, :ok}
-          :error -> {:halt, {:error, {:invalid_repo_environment, path, "memory must be a size such as 4g or 512m"}}}
+          :error -> {:halt, {:error, {:invalid_repo_environment, path, "memory must be a size of at least 6m, such as 4g or 512m"}}}
         end
     end)
   end
@@ -430,19 +503,25 @@ defmodule SymphonyElixir.Environment do
         {:ok, catalog.services}
 
       services when is_list(services) ->
-        with {:ok, repo_services} <-
-               normalize_services(services, catalog.allowed_images, {:invalid_repo_environment, path}) do
-          merged =
-            Enum.reduce(repo_services, catalog.services, fn service, acc ->
-              [service | Enum.reject(acc, &(&1.name == service.name))]
-            end)
+        error_context = {:invalid_repo_environment, path}
 
-          {:ok, Enum.sort_by(merged, & &1.name)}
+        with {:ok, repo_services} <-
+               normalize_services(services, catalog.allowed_images, catalog.service_resources, error_context),
+             merged = merge_services(catalog.services, repo_services),
+             :ok <- enforce_service_count(merged, catalog.max_services, error_context) do
+          {:ok, merged}
         end
 
       other ->
         {:error, {:invalid_repo_environment, path, "services must be a list, got #{inspect(other)}"}}
     end
+  end
+
+  # A repo service replaces the catalog service of the same name.
+  defp merge_services(catalog_services, repo_services) do
+    repo_services
+    |> Enum.reduce(catalog_services, fn service, acc -> [service | Enum.reject(acc, &(&1.name == service.name))] end)
+    |> Enum.sort_by(& &1.name)
   end
 
   defp resolve_setup(catalog, nil, _path), do: {:ok, catalog.setup}
@@ -466,10 +545,10 @@ defmodule SymphonyElixir.Environment do
 
   # ---------------------------------------------------------------- services
 
-  defp normalize_services(services, allowed_images, error_context) when is_list(services) do
+  defp normalize_services(services, allowed_images, bounds, error_context) when is_list(services) do
     services
     |> Enum.reduce_while({:ok, []}, fn raw, {:ok, acc} ->
-      case normalize_service(raw, allowed_images, error_context) do
+      case normalize_service(raw, allowed_images, bounds, error_context) do
         {:ok, service} -> {:cont, {:ok, [service | acc]}}
         {:error, _reason} = error -> {:halt, error}
       end
@@ -490,10 +569,10 @@ defmodule SymphonyElixir.Environment do
     end
   end
 
-  defp normalize_services(_services, _allowed_images, error_context),
+  defp normalize_services(_services, _allowed_images, _bounds, error_context),
     do: {:error, error(error_context, "services must be a list")}
 
-  defp normalize_service(%{} = raw, allowed_images, error_context) do
+  defp normalize_service(%{} = raw, allowed_images, bounds, error_context) do
     unknown =
       raw
       |> Map.keys()
@@ -509,13 +588,42 @@ defmodule SymphonyElixir.Environment do
          {:ok, image} <- service_image(image, allowed_images, error_context),
          {:ok, env} <- service_env(map_get(raw, :env), error_context),
          {:ok, ports} <- service_ports(map_get(raw, :ports), error_context),
-         {:ok, command} <- service_command(map_get(raw, :command), error_context) do
-      {:ok, %{name: name, image: image, env: env, ports: ports, command: command}}
+         {:ok, command} <- service_command(map_get(raw, :command), error_context),
+         {:ok, resources} <- service_resources(map_get(raw, :resources), bounds, name, error_context) do
+      {:ok, %{name: name, image: image, env: env, ports: ports, command: command, resources: resources}}
     end
   end
 
-  defp normalize_service(_raw, _allowed_images, error_context),
+  defp normalize_service(_raw, _allowed_images, _bounds, error_context),
     do: {:error, error(error_context, "each service must be a map")}
+
+  # Every service gets the catalog's `service_resources`; a service may lower them.
+  defp service_resources(nil, bounds, _name, _error_context), do: {:ok, bounds}
+
+  defp service_resources(%{} = raw, bounds, name, error_context) do
+    resources = resources_map(raw)
+
+    case Enum.find(resources, fn {key, value} -> not valid_service_resource?(key, value, bounds) end) do
+      nil ->
+        {:ok, Map.merge(bounds, resources)}
+
+      {key, value} ->
+        {:error,
+         error(
+           error_context,
+           "service #{name} #{key} #{inspect(value)} must be a positive cpu or a memory size of at least 6m, " <>
+             "within the catalog's service_resources (#{inspect(bounds)})"
+         )}
+    end
+  end
+
+  defp service_resources(_raw, _bounds, name, error_context),
+    do: {:error, error(error_context, "service #{name} resources must be a map")}
+
+  defp valid_service_resource?(key, value, bounds) when key in @resource_keys,
+    do: valid_catalog_resource?(key, value) and not over_bound?(key, value, Map.fetch!(bounds, key))
+
+  defp valid_service_resource?(_key, _value, _bounds), do: false
 
   defp no_unknown_service_keys([], _error_context), do: :ok
 
@@ -586,11 +694,15 @@ defmodule SymphonyElixir.Environment do
       port, {:ok, acc} when is_integer(port) and port > 0 and port <= 65_535 ->
         {:cont, {:ok, [Integer.to_string(port) | acc]}}
 
-      port, {:ok, acc} when is_binary(port) and port != "" ->
-        {:cont, {:ok, [String.trim(port) | acc]}}
+      port, {:ok, acc} when is_binary(port) ->
+        port = String.trim(port)
+
+        if valid_port_string?(port),
+          do: {:cont, {:ok, [port | acc]}},
+          else: {:halt, {:error, error(error_context, "service ports must be numbers 1-65535, optionally with /tcp or /udp")}}
 
       _port, _acc ->
-        {:halt, {:error, error(error_context, "service ports must be port numbers")}}
+        {:halt, {:error, error(error_context, "service ports must be numbers 1-65535, optionally with /tcp or /udp")}}
     end)
     |> case do
       {:ok, ports} -> {:ok, Enum.reverse(ports)}
@@ -600,6 +712,13 @@ defmodule SymphonyElixir.Environment do
 
   defp service_ports(_ports, error_context),
     do: {:error, error(error_context, "service ports must be a list")}
+
+  defp valid_port_string?(port) do
+    case Regex.run(@port_pattern, port) do
+      [_, number] -> String.to_integer(number) in 1..65_535
+      nil -> false
+    end
+  end
 
   defp service_command(nil, _error_context), do: {:ok, []}
 
@@ -695,16 +814,17 @@ defmodule SymphonyElixir.Environment do
     end
   end
 
-  defp parse_memory(value) when is_integer(value) and value > 0, do: {:ok, value}
+  # `--memory 0` means "no limit" to Docker and Podman, and anything under 6m
+  # is rejected by them, so a limit must be at least 6m.
+  defp parse_memory(value) when is_integer(value) and value >= @min_memory_bytes, do: {:ok, value}
 
   defp parse_memory(value) when is_binary(value) do
-    case Regex.run(~r/^\s*(\d+(?:\.\d+)?)\s*([kmgt]?)i?b?\s*$/i, value) do
-      [_, amount, unit] ->
-        amount = if String.contains?(amount, "."), do: amount, else: amount <> ".0"
-        {:ok, round(String.to_float(amount) * multiplier(unit))}
-
-      _ ->
-        :error
+    with [_, amount, unit] <- Regex.run(~r/^\s*(\d+(?:\.\d+)?)\s*([kmgt]?)i?b?\s*$/i, value),
+         amount = if(String.contains?(amount, "."), do: amount, else: amount <> ".0"),
+         bytes when bytes >= @min_memory_bytes <- round(String.to_float(amount) * multiplier(unit)) do
+      {:ok, bytes}
+    else
+      _ -> :error
     end
   end
 

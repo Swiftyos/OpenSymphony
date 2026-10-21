@@ -111,7 +111,9 @@ sandbox:
 #   default:
 #     image: registry.example.com/agents/base:1
 #     resources: {cpu: 4, memory: 8g}
-#     allowed_images: [registry.example.com/agents/, ghcr.io/acme/]
+#     allowed_images: [registry.example.com/agents/, ghcr.io/acme/]  # end in /, : or @
+#     max_services: 4                            # default 4
+#     service_resources: {cpu: 1, memory: 1g}    # per-service maxima (default)
 #     services:
 #       - name: cache
 #         image: registry.example.com/services/redis:7

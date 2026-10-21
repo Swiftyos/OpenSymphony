@@ -124,6 +124,7 @@ defmodule SymphonyElixir.AgentRunner do
            effort: AgentRoute.codex_effort(route.effort),
            issue: issue,
            account: Keyword.get(opts, :account),
+           settings: issue_config.settings,
            resume_thread_id: resume && resume["thread_id"]
          ) do
       {:ok, session} ->
@@ -221,7 +222,9 @@ defmodule SymphonyElixir.AgentRunner do
       effort: AgentRoute.claude_effort(route.effort),
       variant: AgentRoute.opencode_variant(route.effort),
       issue: issue,
-      account: Keyword.get(opts, :account)
+      account: Keyword.get(opts, :account),
+      # The run's settings carry the resolved environment into the sandbox.
+      settings: issue_config.settings
     ]
 
     StageResult.exclude_from_git(workspace)

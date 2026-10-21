@@ -50,7 +50,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     command = codex_launch_command(command, issue)
 
     with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
-         {:ok, port} <- start_port(expanded_workspace, worker_host, command, issue, account) do
+         {:ok, port} <- start_port(expanded_workspace, worker_host, command, issue, account, Keyword.get(opts, :settings)) do
       metadata = port_metadata(port, worker_host, account)
 
       with {:ok, session_policies} <- session_policies(expanded_workspace, worker_host),
@@ -214,11 +214,14 @@ defmodule SymphonyElixir.Codex.AppServer do
     Enum.reduce(Telemetry.codex_config_overrides(issue), command, &Config.with_codex_config(&2, shell_escape(&1)))
   end
 
-  defp start_port(workspace, nil, command, issue, account) do
+  # `run_settings` are the run's settings (the issue's resolved environment
+  # included), so the sandbox container gets that environment's image,
+  # resources, and services even when no workspace hook created it first.
+  defp start_port(workspace, nil, command, issue, account, run_settings) do
     environment = port_environment(issue, account)
     env_names = Enum.map(environment, fn {key, _value} -> to_string(key) end)
 
-    with {:ok, spec} <- Sandbox.command_spec(workspace, command, env_names) do
+    with {:ok, spec} <- Sandbox.command_spec(workspace, command, env_names, settings: run_settings) do
       port =
         Port.open(
           {:spawn_executable, String.to_charlist(spec.executable)},
@@ -237,7 +240,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp start_port(workspace, worker_host, command, issue, account) when is_binary(worker_host) do
+  defp start_port(workspace, worker_host, command, issue, account, _run_settings) when is_binary(worker_host) do
     remote_command = remote_launch_command(workspace, command, issue, account)
     SSH.start_port(worker_host, remote_command, line: @port_line_bytes)
   end

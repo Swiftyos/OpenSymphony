@@ -1302,6 +1302,15 @@ defmodule SymphonyElixir.Config.Schema do
       not string_list?(Map.get(entry, "allowed_images", [])) ->
         "environment #{inspect(name)} allowed_images must be a list of strings"
 
+      not Enum.all?(Map.get(entry, "allowed_images", []), &String.ends_with?(&1, ["/", ":", "@"])) ->
+        "environment #{inspect(name)} allowed_images entries must end in /, : or @"
+
+      not valid_max_services?(Map.get(entry, "max_services")) ->
+        "environment #{inspect(name)} max_services must be a non-negative integer"
+
+      not is_map(Map.get(entry, "service_resources", %{})) ->
+        "environment #{inspect(name)} service_resources must be a map"
+
       not string_list?(Map.get(entry, "egress_extra", [])) ->
         "environment #{inspect(name)} egress_extra must be a list of strings"
 
@@ -1327,6 +1336,9 @@ defmodule SymphonyElixir.Config.Schema do
       end
     end)
   end
+
+  defp valid_max_services?(nil), do: true
+  defp valid_max_services?(value), do: is_integer(value) and value >= 0
 
   defp string_list?(value) when is_list(value), do: Enum.all?(value, &is_binary/1)
   defp string_list?(_value), do: false

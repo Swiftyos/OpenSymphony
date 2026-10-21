@@ -275,7 +275,8 @@ result is written into the run spec:
     "resources": {"cpu": 2, "memory": "4g"},
     "services": [
       {"name": "db", "image": "registry.example.com/postgres:16",
-       "env": {}, "ports": ["5432"], "command": []}
+       "env": {}, "ports": ["5432"], "command": [],
+       "resources": {"cpu": 1, "memory": "1g"}}
     ],
     "setup": ["pip install -r requirements.txt"],
     "egress_extra": ["api.example.com"],
@@ -287,10 +288,13 @@ result is written into the run spec:
 
 `environment` is `null` when the platform has no catalog. On the VM
 (`sandbox.kind: docker`) the resolved image and resources replace the sandbox
-defaults, each service runs as a sibling container on a per-issue network, and
-`setup` commands run once when the container is created; services stop at reap
-and are removed with the workspace. The controller owns the bounds: catalog
-`resources` are maxima, and repo/service images must match `allowed_images`; a
+defaults, each service runs as a sibling container on a per-issue `--internal`
+network (the agent keeps `sandbox.network` and joins it too, so services never
+widen egress), and `setup` commands run once, under `hooks.timeout_ms`, when the
+container is created; services stop at reap and are removed with the workspace.
+The controller owns the bounds: catalog `resources` are maxima, repo/service
+images must match `allowed_images`, services are capped by `max_services` and
+each carries its `resources` (bounded by the catalog's `service_resources`); a
 rejected file fails the dispatch closed.
 
 For Phase 3 the launcher renders this spec directly: the runner pod's main

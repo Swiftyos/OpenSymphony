@@ -82,7 +82,9 @@ defmodule SymphonyElixir.ConfigCoverageSchemaTest do
               "resources" => %{"cpu" => 2, "memory" => "4g"},
               "allowed_images" => ["registry.example.com/"],
               "services" => [%{"name" => "db", "image" => "registry.example.com/postgres:16"}],
-              "egress_extra" => ["api.example.com"]
+              "egress_extra" => ["api.example.com"],
+              "max_services" => 2,
+              "service_resources" => %{"cpu" => 1, "memory" => "512m"}
             }
           },
           "teams" => %{"pay" => %{"environment" => "python"}}
@@ -101,6 +103,10 @@ defmodule SymphonyElixir.ConfigCoverageSchemaTest do
             {%{"environments" => %{"x" => %{"image" => "i", "services" => "bad"}}}, "services must be a list"},
             {%{"environments" => %{"x" => %{"image" => "i", "allowed_images" => "bad"}}}, "allowed_images"},
             {%{"environments" => %{"x" => %{"image" => "i", "egress_extra" => "bad"}}}, "egress_extra"},
+            {%{"environments" => %{"x" => %{"image" => "i", "allowed_images" => ["registry.example.com"]}}}, "must end in /, : or @"},
+            {%{"environments" => %{"x" => %{"image" => "i", "max_services" => -1}}}, "max_services must be a non-negative integer"},
+            {%{"environments" => %{"x" => %{"image" => "i", "max_services" => "2"}}}, "max_services must be a non-negative integer"},
+            {%{"environments" => %{"x" => %{"image" => "i", "service_resources" => "bad"}}}, "service_resources must be a map"},
             {%{"environments" => "bad"}, "environments is invalid"},
             {%{"environments" => %{"" => %{"image" => "i"}}}, "environment names must be non-empty strings"},
             {%{"teams" => %{"PAY" => %{"environment" => "Bad/Name"}}}, "environment must be a catalog environment name"},

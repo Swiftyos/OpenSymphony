@@ -707,9 +707,11 @@ environments:
   default:
     image: registry.example.com/agents/base:1
     resources: {cpu: 4, memory: 8g}     # catalog MAXIMA for a repo file
-    allowed_images:                     # prefixes a repo file may choose from
-      - registry.example.com/agents/
+    allowed_images:                     # prefixes a repo file may choose from;
+      - registry.example.com/agents/    # each must end in /, : or @
       - ghcr.io/acme/
+    max_services: 4                     # services per run (default 4)
+    service_resources: {cpu: 1, memory: 1g}  # per-service maxima (the default)
     services:
       - name: cache
         image: registry.example.com/services/redis:7
@@ -752,27 +754,64 @@ services:
   - name: db
     image: ghcr.io/acme/postgres:16              # must match allowed_images
     env: {POSTGRES_PASSWORD: local-only}
-    ports: [5432]
+    ports: [5432]                                # 1-65535, optionally 5432/tcp or 53/udp
     command: ["postgres", "-c", "fsync=off"]
+    resources: {cpu: 0.5, memory: 512m}          # <= service_resources
 ```
 
+A repo service with the same name as a catalog service replaces it (image,
+env, ports, command, and resources); the rest of the catalog's services stay.
+
 What is enforced: repo and service images must match the catalog's
-`allowed_images` prefixes; resources may lower, not raise, the catalog maxima,
-and a resource the catalog does not bound may not be set; service names, env
-names, ports, commands, setup entries, and unknown keys are validated. Invalid
-or disallowed values **fail closed**: the run is not started, the issue gets a
-transcript note and a log line naming the file and reason, and the next poll
-tries again. There is no fallback to a wider environment.
+`allowed_images` prefixes (which must end at a `/`, `:` or `@` boundary, so
+`registry.example.com/agents/` does not also allow `registry.example.com/agents-evil/`);
+resources may lower, not raise, the catalog maxima, and a resource the catalog
+does not bound may not be set; `cpu` must be above 0 and `memory` at least `6m`
+(`0` would mean "unlimited" to the engine); the catalog and repo services
+together may not exceed `max_services`, and every service runs with the
+catalog's `service_resources` (default 1 CPU, `1g`), which a service may only
+lower; service names, env names, ports (1-65535, optional `/tcp` or `/udp`),
+commands, setup entries, and unknown keys are validated. Invalid or disallowed
+values **fail closed**: the run is not started, the issue gets a transcript
+note and a log line naming the file and reason, and the next poll tries again
+(the log line and note appear once per distinct error, then at most hourly).
+There is no fallback to a wider environment.
 
 With `sandbox.kind: docker`, the resolved `image` replaces `sandbox.image` for
 that issue's container, resource limits become `--cpus`/`--memory`, and declared
 services start as sibling containers on a per-issue network (`<container>-net`,
 container names `<container>-<service>`) where the sandbox reaches them by
-service name. `setup` commands run inside the container once, when Symphony
-creates it; a failing setup command discards the container so the next attempt
-starts clean. Services stop at the end of each run and are removed with the
-workspace. Without an `environments:` catalog, Symphony keeps today's sandbox
-behaviour exactly.
+service name. The run's resolved environment is used however the container is
+first created (a workspace hook or the agent launch), and services stopped at
+the end of the previous run are started again before the next one.
+
+Services never widen the agent's network. The per-issue network is created
+`--internal` (no route out), and services join only that network. The agent
+container keeps the operator's `sandbox.network` and also joins the internal
+network: with a named network (for example a filtered-egress one) it gets
+`--network <yours> --network <container>-net`; with `none` it gets only the
+internal network; with no `sandbox.network` it starts on the engine default
+network and the internal one is attached with `network connect`. Modes that
+cannot be combined with another network (`host`, `container:…`, `slirp4netns`,
+`pasta`) make container creation fail rather than change the agent's network;
+use a named network or `none` when environments declare services. (Docker
+needs 25 or newer to accept two `--network` flags; Podman accepts them.) Each service
+gets `--cpus`/`--memory` from its resolved resources and, from
+`sandbox.run_args`, only the hardening flags `--cap-drop`, `--security-opt`,
+`--userns`, and `--pids-limit`; workspace mounts, `sandbox.mounts`, and other
+run args apply to the agent container only.
+
+`setup` commands run inside the container once, when Symphony creates it, each
+under `hooks.timeout_ms`. A failing or timed-out setup command discards the
+container so the next attempt starts clean; on a timeout the `exec` client is
+killed (and the image's `timeout`, when it has one, kills the command inside the
+container a few seconds later as a backstop) and the run fails with
+`{:sandbox_setup_timeout, command, timeout_ms}`. Services stop at the end of
+each run and are removed with the workspace. At startup Symphony removes
+service containers (labelled `symphony.service-of`) and per-issue networks
+whose labelled workspace directory no longer exists; the agent container
+itself is left to workspace cleanup. Without an `environments:` catalog,
+Symphony keeps today's sandbox behaviour exactly.
 
 The resolved environment (name, image, resources, services, setup, egress
 extras, and a content digest) is stored on the `RunSpec` for the Kubernetes

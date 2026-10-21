@@ -55,7 +55,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
     with {:ok, settings} <- Config.claude_runtime_settings(effort: Keyword.get(opts, :effort)),
          {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
          session = {session_flag, session_id},
-         {:ok, port} <- start_port(expanded_workspace, worker_host, session, settings, issue, account) do
+         {:ok, port} <- start_port(expanded_workspace, worker_host, session, settings, issue, account, opts) do
       {:ok,
        %{
          port: port,
@@ -167,11 +167,17 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
     end
   end
 
-  defp start_port(workspace, nil, session_id, settings, issue, account) do
+  # `opts[:settings]` is the run's settings (the issue's resolved environment
+  # included), so the sandbox container gets that environment's image,
+  # resources, and services even when no workspace hook created it first.
+  defp start_port(workspace, nil, session_id, settings, issue, account, opts) do
     environment = port_environment(issue, account)
     env_names = Enum.map(environment, fn {key, _value} -> to_string(key) end)
+    sandbox_opts = [settings: Keyword.get(opts, :settings)]
 
-    with {:ok, spec} <- Sandbox.command_spec(workspace, launch_command(session_id, settings), env_names) do
+    command = launch_command(session_id, settings)
+
+    with {:ok, spec} <- Sandbox.command_spec(workspace, command, env_names, sandbox_opts) do
       {:ok,
        Port.open(
          {:spawn_executable, String.to_charlist(spec.executable)},
@@ -188,7 +194,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
     end
   end
 
-  defp start_port(workspace, worker_host, session_id, settings, issue, account) when is_binary(worker_host) do
+  defp start_port(workspace, worker_host, session_id, settings, issue, account, _opts) when is_binary(worker_host) do
     command = remote_launch_command(workspace, session_id, settings, issue, account)
     SSH.start_port(worker_host, command, line: @port_line_bytes)
   end

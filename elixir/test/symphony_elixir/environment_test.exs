@@ -187,7 +187,13 @@ defmodule SymphonyElixir.EnvironmentTest do
           {"resources:\n  memory: 17g\n", "exceeds"},
           {"resources:\n  cpu: 2\n  memory: 4g\n  disk: 10g\n", "unknown resources"},
           {"resources:\n  cpu: -1\n", "positive number"},
-          {"resources:\n  memory: huge\n", "size such as"},
+          {"resources:\n  memory: huge\n", "at least 6m"},
+          {"resources:\n  memory: '0'\n", "at least 6m"},
+          {"resources:\n  memory: 0\n", "at least 6m"},
+          {"resources:\n  memory: 5m\n", "at least 6m"},
+          {"resources:\n  memory: 4096\n", "at least 6m"},
+          {"resources:\n  cpu: 0\n", "positive number"},
+          {"resources:\n  cpu: '0'\n", "positive number"},
           {"resources:\n  gpu: 1\n", "unknown resources"}
         ] do
       write_repo_file(root, yaml)
@@ -223,8 +229,14 @@ defmodule SymphonyElixir.EnvironmentTest do
           {"services:\n  - name: db\n    image: registry.example.com/postgres:16\n    env:\n      BAD-NAME: x\n", "shell identifiers"},
           {"services:\n  - name: db\n    image: registry.example.com/postgres:16\n    env:\n      GOOD: 1\n", "must be a string"},
           {"services:\n  - name: db\n    image: registry.example.com/postgres:16\n    ports: nope\n", "ports must be a list"},
-          {"services:\n  - name: db\n    image: registry.example.com/postgres:16\n    ports: [0]\n", "port numbers"},
-          {"services:\n  - name: db\n    image: registry.example.com/postgres:16\n    ports: ['']\n", "port numbers"},
+          {"services:\n  - name: db\n    image: registry.example.com/postgres:16\n    ports: [0]\n", "numbers 1-65535"},
+          {"services:\n  - name: db\n    image: registry.example.com/postgres:16\n    ports: ['']\n", "numbers 1-65535"},
+          {"services:\n  - name: db\n    image: registry.example.com/postgres:16\n    ports: [65536]\n", "numbers 1-65535"},
+          {"services:\n  - name: db\n    image: registry.example.com/postgres:16\n    ports: ['65536']\n", "numbers 1-65535"},
+          {"services:\n  - name: db\n    image: registry.example.com/postgres:16\n    ports: ['0/tcp']\n", "numbers 1-65535"},
+          {"services:\n  - name: db\n    image: registry.example.com/postgres:16\n    ports: ['5432/sctp']\n", "numbers 1-65535"},
+          {"services:\n  - name: db\n    image: registry.example.com/postgres:16\n    ports: ['5432 --privileged']\n", "numbers 1-65535"},
+          {"services:\n  - name: db\n    image: registry.example.com/postgres:16\n    ports: [1.5]\n", "numbers 1-65535"},
           {"services:\n  - name: db\n    image: registry.example.com/postgres:16\n    command: [1]\n", "command must be"},
           {"services:\n  - name: db\n    image: registry.example.com/postgres:16\n  - name: db\n    image: registry.example.com/postgres:16\n", "duplicate"},
           {"services:\n  - nope\n", "each service must be a map"}
@@ -281,6 +293,16 @@ defmodule SymphonyElixir.EnvironmentTest do
           {%{"image" => "x", "resources" => "nope"}, "resources must be a map"},
           {%{"image" => "x", "resources" => %{"cpu" => 0}}, "positive cpu"},
           {%{"image" => "x", "resources" => %{"memory" => "nope"}}, "positive cpu"},
+          {%{"image" => "x", "resources" => %{"memory" => "0"}}, "at least 6m"},
+          {%{"image" => "x", "resources" => %{"cpu" => "0"}}, "positive cpu"},
+          {%{"image" => "x", "allowed_images" => ["registry.example.com/agents"]}, "must end in /, : or @"},
+          {%{"image" => "x", "allowed_images" => ["ghcr.io/acme/", "docker.io"]}, "(got docker.io)"},
+          {%{"image" => "x", "max_services" => -1}, "max_services must be a non-negative integer"},
+          {%{"image" => "x", "max_services" => "4"}, "max_services must be a non-negative integer"},
+          {%{"image" => "x", "service_resources" => "nope"}, "service_resources must be a map"},
+          {%{"image" => "x", "service_resources" => %{"memory" => "0"}}, "service_resources must set"},
+          {%{"image" => "x", "service_resources" => %{"gpu" => 1}}, "service_resources must set"},
+          {%{"image" => "x", "max_services" => 1, "services" => [%{"name" => "a", "image" => "i"}, %{"name" => "b", "image" => "i"}]}, "declares 2 services; the catalog allows at most 1"},
           {%{"image" => "x", "resources" => %{"gpu" => 1}}, "positive cpu"},
           {%{"image" => "x", "services" => "nope"}, "services must be a list"},
           {%{"image" => "x", "services" => [%{"name" => "Bad", "image" => "ok"}]}, "service name"},
@@ -329,7 +351,7 @@ defmodule SymphonyElixir.EnvironmentTest do
           {"null\n", :ok},
           {"# comment\n", :ok},
           {"image: ''\n", :ok},
-          {"resources:\n  cpu: '2'\n  memory: 4096\n", :ok},
+          {"resources:\n  cpu: '2'\n  memory: 8388608\n", :ok},
           {"services:\n  - name: worker\n    image: registry.example.com/worker:1\n    ports: ['8080']\n    command: [node, worker.js]\n", :ok}
         ] do
       write_repo_file(root, yaml)
@@ -346,7 +368,7 @@ defmodule SymphonyElixir.EnvironmentTest do
           {"image: [x]\n", "image must be a string"},
           {"resources: [x]\n", "resources must be a map"},
           {"resources:\n  cpu: 'abc'\n", "positive number"},
-          {"resources:\n  memory: [1]\n", "size such as"},
+          {"resources:\n  memory: [1]\n", "at least 6m"},
           {"services:\n  - name: worker\n    image: [x]\n", "needs an image"},
           {"services:\n  - name: worker\n    image: registry.example.com/worker:1\n    command: 1\n", "command must be"}
         ] do
@@ -363,7 +385,7 @@ defmodule SymphonyElixir.EnvironmentTest do
   test "memory units and an unbounded catalog are handled", %{root: root} do
     settings = settings(%{"big" => %{"image" => "registry.example.com/big:1", "resources" => %{"memory" => "2t"}}})
 
-    for memory <- ["1k", "1m", "1t", "1b"] do
+    for memory <- ["6144k", "6m", "1t", "7340032b", "1.5GiB"] do
       write_repo_file(root, "resources:\n  memory: #{memory}\n")
       assert {:ok, environment} = Environment.resolve(issue(), settings, route: route("big"), repo_root: root)
       assert environment.resources["memory"] == memory
@@ -451,5 +473,112 @@ defmodule SymphonyElixir.EnvironmentTest do
 
     assert {:ok, %{repo_file: false}} =
              Environment.resolve(issue(), settings, route: %{slug: "proj", repo: nil, environment: "default"})
+  end
+
+  test "services get the catalog's service_resources, which a service may only lower", %{root: root} do
+    catalog = %{
+      "default" => %{
+        "image" => "registry.example.com/base:1",
+        "allowed_images" => ["registry.example.com/"],
+        "service_resources" => %{"cpu" => 2},
+        "services" => [%{"name" => "cache", "image" => "docker.io/redis:7"}]
+      },
+      "plain" => %{
+        "image" => "registry.example.com/base:1",
+        "allowed_images" => ["registry.example.com/"],
+        "services" => [%{"name" => "cache", "image" => "docker.io/redis:7", "resources" => %{"memory" => "256m"}}]
+      }
+    }
+
+    settings = settings(catalog)
+
+    assert {:ok, %{services: [cache]}} = Environment.resolve(issue(), settings, route: route("default"), repo_root: root)
+    # A partial service_resources keeps the default for the other limit.
+    assert cache.resources == %{"cpu" => 2, "memory" => "1g"}
+
+    assert {:ok, %{services: [plain]}} = Environment.resolve(issue(), settings, route: route("plain"), repo_root: root)
+    assert plain.resources == %{"cpu" => 1, "memory" => "256m"}
+
+    write_repo_file(root, """
+    services:
+      - name: db
+        image: registry.example.com/postgres:16
+        ports: [5432, '5432/tcp', '53/udp']
+        resources: {cpu: 0.5, memory: 512m}
+    """)
+
+    assert {:ok, environment} = Environment.resolve(issue(), settings, route: route("default"), repo_root: root)
+    db = Enum.find(environment.services, &(&1.name == "db"))
+    assert db.resources == %{"cpu" => 0.5, "memory" => "512m"}
+    assert db.ports == ["5432", "5432/tcp", "53/udp"]
+
+    for {resources, message} <- [
+          {"{cpu: 3}", "service db cpu 3"},
+          {"{memory: 2g}", "service db memory"},
+          {"{memory: '0'}", "at least 6m"},
+          {"{cpu: 0}", "positive cpu"},
+          {"{gpu: 1}", "service db gpu"},
+          {"nope", "resources must be a map"}
+        ] do
+      write_repo_file(root, "services:\n  - name: db\n    image: registry.example.com/postgres:16\n    resources: #{resources}\n")
+
+      assert {:error, {:invalid_repo_environment, _path, actual}} =
+               Environment.resolve(issue(), settings, route: route("default"), repo_root: root),
+             resources
+
+      assert actual =~ message
+    end
+  end
+
+  test "the catalog caps the number of services; a repo service replaces a catalog one by name", %{root: root} do
+    catalog = %{
+      "default" => %{
+        "image" => "registry.example.com/base:1",
+        "allowed_images" => ["registry.example.com/"],
+        "max_services" => 2,
+        "services" => [%{"name" => "cache", "image" => "docker.io/redis:7"}]
+      },
+      "four" => %{"image" => "registry.example.com/base:1", "allowed_images" => ["registry.example.com/"]}
+    }
+
+    settings = settings(catalog)
+    service = fn name -> "  - name: #{name}\n    image: registry.example.com/#{name}:1\n" end
+
+    write_repo_file(root, "services:\n" <> service.("cache") <> service.("db"))
+    assert {:ok, %{services: services}} = Environment.resolve(issue(), settings, route: route("default"), repo_root: root)
+    assert Enum.map(services, &{&1.name, &1.image}) == [{"cache", "registry.example.com/cache:1"}, {"db", "registry.example.com/db:1"}]
+
+    write_repo_file(root, "services:\n" <> service.("db") <> service.("queue"))
+
+    assert {:error, {:invalid_repo_environment, _path, message}} =
+             Environment.resolve(issue(), settings, route: route("default"), repo_root: root)
+
+    assert message =~ "declares 3 services; the catalog allows at most 2"
+
+    # The default cap is 4.
+    write_repo_file(root, "services:\n" <> Enum.map_join(~w(a b c d e), service))
+
+    assert {:error, {:invalid_repo_environment, _path, message}} =
+             Environment.resolve(issue(), settings, route: route("four"), repo_root: root)
+
+    assert message =~ "at most 4"
+  end
+
+  test "note_rejection reports each distinct rejection once, then at most once per interval" do
+    assert {:report, seen} = Environment.note_rejection(%{}, "issue-1", "bad image", 0)
+    assert {:suppress, ^seen} = Environment.note_rejection(seen, "issue-1", "bad image", 1_000)
+    assert {:report, seen} = Environment.note_rejection(seen, "issue-1", "bad memory", 2_000)
+    assert {:report, seen} = Environment.note_rejection(seen, "issue-2", "bad image", 2_000)
+    assert map_size(seen) == 3
+
+    hour = 60 * 60 * 1_000
+    assert {:suppress, _seen} = Environment.note_rejection(seen, "issue-1", "bad image", hour - 1)
+    assert {:report, seen} = Environment.note_rejection(seen, "issue-1", "bad image", hour)
+    # Entries older than the interval are pruned.
+    assert Map.keys(seen) |> Enum.sort() == [{"issue-1", "bad image"}, {"issue-1", "bad memory"}, {"issue-2", "bad image"}]
+    assert {:report, seen} = Environment.note_rejection(seen, "issue-3", "x", 3 * hour)
+    assert Map.keys(seen) == [{"issue-3", "x"}]
+
+    assert {:report, _seen} = Environment.note_rejection(%{{"a", "m"} => 0}, "a", "m", 10, 10)
   end
 end
