@@ -26,7 +26,7 @@ defmodule SymphonyElixirWeb.Endpoint do
   )
 
   plug(Plug.RequestId)
-  plug(Plug.Telemetry, event_prefix: [:phoenix, :endpoint])
+  plug(Plug.Telemetry, event_prefix: [:phoenix, :endpoint], log: {__MODULE__, :log_level, []})
 
   plug(Plug.Parsers,
     parsers: [:urlencoded, :multipart, :json],
@@ -41,6 +41,14 @@ defmodule SymphonyElixirWeb.Endpoint do
   plug(Plug.Head)
   plug(:session)
   plug(SymphonyElixirWeb.Router)
+
+  @doc """
+  The request log level: `false` for password reset links, whose token is in
+  the path, so the request line never carries it.
+  """
+  @spec log_level(Plug.Conn.t()) :: Logger.level() | false
+  def log_level(%Plug.Conn{path_info: ["reset" | _]}), do: false
+  def log_level(_conn), do: :info
 
   defp proxy_headers(conn, opts), do: SymphonyElixirWeb.RequestGuards.proxy_headers(conn, opts)
   defp local_host_only(conn, opts), do: SymphonyElixirWeb.RequestGuards.local_host_only(conn, opts)

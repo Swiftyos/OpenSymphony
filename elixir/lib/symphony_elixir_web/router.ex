@@ -68,8 +68,9 @@ defmodule SymphonyElixirWeb.Router do
   scope "/", SymphonyElixirWeb do
     pipe_through(:browser)
 
-    get("/reset/:token", AuthController, :reset)
-    post("/reset/:token", AuthController, :do_reset)
+    # The reset token is in the path, which Phoenix's request log would print.
+    get("/reset/:token", AuthController, :reset, log: false)
+    post("/reset/:token", AuthController, :do_reset, log: false)
   end
 
   scope "/", SymphonyElixirWeb do

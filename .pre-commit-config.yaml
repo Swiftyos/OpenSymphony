@@ -1,0 +1,8 @@
+# Install once per clone: `pre-commit install` (https://pre-commit.com).
+# Scans staged changes for secrets and organisation-internal identifiers
+# (rules in .gitleaks.toml) before every commit.
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks

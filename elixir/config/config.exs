@@ -2,6 +2,10 @@ import Config
 
 config :phoenix, :json_library, Jason
 
+# Request logs must never carry credentials: reset links, setup codes and
+# tokens are as sensitive as passwords.
+config :phoenix, :filter_parameters, ["password", "token", "secret", "setup_code", "api_key", "code"]
+
 config :symphony_elixir, SymphonyElixirWeb.Endpoint,
   adapter: Bandit.PhoenixAdapter,
   url: [host: "localhost"],

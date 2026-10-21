@@ -70,6 +70,16 @@ mise install
 mise exec -- elixir --version
 ```
 
+## Secret scanning
+
+This repository is public. A pre-commit hook and CI (`.github/workflows/secret-scan.yml`) scan every change with [gitleaks](https://github.com/gitleaks/gitleaks), using the rules in `../.gitleaks.toml`:
+- gitleaks' default rules for credentials (API keys, tokens, private keys)
+- rules for organisation-internal identifiers that aren't secrets but must not be published: private repository names, Linear workspace URLs, work email addresses and IP-based hostnames
+
+Use neutral placeholders such as `acme/widgets` and `someone@example.com` in code, docs and tests.
+
+To set it up once per clone, install [pre-commit](https://pre-commit.com), then run `pre-commit install` from the repository root. `make secrets` scans the whole history.
+
 ## Run
 
 ```bash

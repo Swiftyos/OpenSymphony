@@ -1,0 +1,41 @@
+# Secret scanning for this repository (gitleaks). Used by the pre-commit hook
+# (.pre-commit-config.yaml) and CI (.github/workflows/secret-scan.yml).
+#
+# On top of gitleaks' default rules (API keys, tokens, private keys...), the
+# rules below catch organisation-internal identifiers that aren't credentials
+# but must not land in this public repository: private repository names,
+# Linear workspace URLs, internal hosts and work email addresses. Use neutral
+# placeholders in code, docs and tests instead (acme/widgets, example.com).
+
+title = "OpenSymphony secret scanning"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "org-private-repository"
+description = "A repository in the n8n-io GitHub organisation (private repo names must not be published). Use acme/<name>."
+regex = '''\bn8n-io/[A-Za-z0-9._-]+'''
+keywords = ["n8n-io/"]
+  [[rules.allowlists]]
+  description = "The public n8n repository"
+  regexTarget = "match"
+  regexes = ['''^n8n-io/n8n(\.git)?$''']
+
+[[rules]]
+id = "org-linear-workspace-url"
+description = "A URL in the organisation's Linear workspace (exposes project ids and names). Use linear.app/acme/..."
+regex = '''linear\.app/n8n/[^\s"')]*'''
+keywords = ["linear.app/n8n/"]
+
+[[rules]]
+id = "org-email-address"
+description = "A work email address. Use someone@example.com."
+regex = '''\b[A-Za-z0-9._%+-]+@n8n\.io\b'''
+keywords = ["@n8n.io"]
+
+[[rules]]
+id = "internal-sslip-host"
+description = "An sslip.io hostname, which embeds a server's public IP address."
+regex = '''\b(?:\d{1,3}[.-]){3}\d{1,3}\.sslip\.io\b'''
+keywords = ["sslip.io"]

@@ -387,6 +387,28 @@ defmodule SymphonyElixir.AuthTest do
       assert html_response(get(build_conn(), "/reset/not-a-token"), 404) =~ "invalid or has expired"
     end
 
+    test "request logs never contain reset tokens or other credentials", %{mia: mia} do
+      {:ok, token} = Users.create_reset_token(mia.id)
+      previous = Logger.level()
+      Logger.configure(level: :debug)
+
+      log =
+        try do
+          capture_log([level: :debug], fn ->
+            get(build_conn(), "/reset/#{token}")
+            post(build_conn(), "/reset/#{token}", %{"password" => "short", "password_confirmation" => "short"})
+            post(build_conn(), "/login", %{"login" => "mia", "password" => @password, "token" => "tok-secret-value"})
+          end)
+        after
+          Logger.configure(level: previous)
+        end
+
+      refute log =~ token
+      refute log =~ "tok-secret-value"
+      assert log =~ "POST /login"
+      assert log =~ ~s("token" => "[FILTERED]")
+    end
+
     test "admins manage users; disabling signs the person out", %{admin: admin, mia: mia} do
       assert {:error, {:redirect, %{to: "/"}}} = live(session_for(mia), "/admin/users")
 
