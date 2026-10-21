@@ -113,3 +113,16 @@ Kubernetes they move behind a tool gateway.
    - **End-to-end test.** It kills the controller mid-run, restarts it, and checks that the run
      is adopted and completes once.
 5. **Kubernetes launcher** (Phase 3): the runner is a pod's entrypoint.
+
+## Rules for Phase 3
+
+- **Runners read no controller state.** A runner pod is untrusted and has no database
+  credentials. Everything it needs, including the resolved Linear project route (routes can be
+  added through MCP, `ProjectRoutes`), is in its run spec or comes from the `/runner/v1`
+  endpoints.
+- **Web and ingest run as several replicas.** Stores that serve requests from a per-node ETS copy
+  loaded at boot (`McpTokens`, `ProjectRoutes`) must re-read `StateStore` on a short TTL. That
+  is at most about 5s, and token verification falls back to the store on a miss. A revoked token
+  then stops working on every replica, including the brief overlap of old and new controllers
+  during a rollout. `StateStore` change notifications (Postgres `NOTIFY` on write) can later
+  replace the TTL.
