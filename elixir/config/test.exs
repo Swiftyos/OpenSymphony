@@ -57,3 +57,7 @@ config :symphony_elixir,
   run_host_remote_retry_sleep_ms: 5,
   runner_command_error_backoff_ms: 50,
   workflow_store_poll_interval_ms: 50
+
+# Dashboard pages re-read the orchestrator at once on every update in tests;
+# the production spacing (1s) is tested explicitly.
+config :symphony_elixir, dashboard_refresh_interval_ms: 0

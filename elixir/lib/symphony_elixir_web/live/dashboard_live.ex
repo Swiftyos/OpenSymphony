@@ -28,6 +28,9 @@ defmodule SymphonyElixirWeb.DashboardLive do
   # Ended sessions change only when a run ends; they're re-read this often
   # rather than on every orchestrator update.
   @ended_refresh_ms 10_000
+  # Orchestrator updates arrive once per agent event; a page re-reads the
+  # snapshot at most this often (`:dashboard_refresh_interval_ms` overrides it).
+  @min_refresh_interval_ms 1_000
   @session_views ["live", "completed", "all"]
   @session_windows [{"day", "Last 24 hours", 86_400_000}, {"week", "Last 7 days", 7 * 86_400_000}, {"month", "Last 30 days", 30 * 86_400_000}]
   @max_ended_rows 200
@@ -41,6 +44,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
       |> assign(:project_filter, nil)
       |> assign(:refreshing, false)
       |> assign(:refresh_again, false)
+      |> assign(:refresh_timer, nil)
+      |> assign(:last_refresh_ms, nil)
       |> assign(:payload_gen, 0)
       |> assign(:sessions_view, "live")
       |> assign(:sessions_window, "day")
@@ -88,7 +93,9 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   @impl true
-  def handle_info(:observability_updated, socket), do: {:noreply, refresh_payload(socket)}
+  def handle_info(:observability_updated, socket), do: {:noreply, request_refresh(socket)}
+
+  def handle_info(:refresh_due, socket), do: {:noreply, socket |> assign(:refresh_timer, nil) |> request_refresh()}
 
   @impl true
   def handle_event("factory_control", %{"team" => team, "stage" => stage, "field" => field} = params, socket) do
@@ -304,12 +311,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
         socket
       end
 
-    {:noreply, if(socket.assigns.refresh_again, do: refresh_payload(socket), else: socket)}
+    {:noreply, if(socket.assigns.refresh_again, do: request_refresh(socket), else: socket)}
   end
 
   def handle_async(:refresh, {:exit, _reason}, socket) do
     socket = assign(socket, :refreshing, false)
-    {:noreply, if(socket.assigns.refresh_again, do: refresh_payload(socket), else: socket)}
+    {:noreply, if(socket.assigns.refresh_again, do: request_refresh(socket), else: socket)}
   end
 
   def handle_async({:assist, ref}, {:ok, {:ok, suggestion}}, socket) do
@@ -663,6 +670,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                 <tbody>
                   <tr
                     :for={entry <- @sessions}
+                    :key={entry.row_key}
                     class={[
                       entry.status == :retrying && "row-retrying",
                       entry.status == :ended && "row-ended",
@@ -814,13 +822,31 @@ defmodule SymphonyElixirWeb.DashboardLive do
   # so they're read off the LiveView process (which stays free for picks and
   # clicks), one at a time, with updates that arrive meanwhile folded into one
   # more read.
-  defp refresh_payload(%{assigns: %{refreshing: true}} = socket), do: assign(socket, :refresh_again, true)
+  # Reads are also spaced at least the refresh interval apart: with a large
+  # fleet a snapshot covers every run and updates never stop, so an update
+  # inside the interval waits for one deferred read.
+  defp request_refresh(%{assigns: %{refreshing: true}} = socket), do: assign(socket, :refresh_again, true)
+  defp request_refresh(%{assigns: %{refresh_timer: timer}} = socket) when is_reference(timer), do: socket
+
+  defp request_refresh(socket) do
+    case refresh_wait_ms(socket.assigns[:last_refresh_ms]) do
+      0 -> refresh_payload(socket)
+      wait_ms -> assign(socket, :refresh_timer, Process.send_after(self(), :refresh_due, wait_ms))
+    end
+  end
+
+  defp refresh_wait_ms(nil), do: 0
+
+  defp refresh_wait_ms(last_refresh_ms) do
+    interval_ms = Application.get_env(:symphony_elixir, :dashboard_refresh_interval_ms, @min_refresh_interval_ms)
+    max(interval_ms - (System.monotonic_time(:millisecond) - last_refresh_ms), 0)
+  end
 
   defp refresh_payload(socket) do
     %{current_user: user, chat_issue: issue, payload_gen: gen} = socket.assigns
 
     socket
-    |> assign(refreshing: true, refresh_again: false)
+    |> assign(refreshing: true, refresh_again: false, last_refresh_ms: System.monotonic_time(:millisecond))
     |> start_async(:refresh, fn ->
       %{gen: gen, snapshot: snapshot(user), pending_accounts: pending_accounts(user), chat: {issue, chat_data(issue)}}
     end)
@@ -888,7 +914,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
     shown_ended = if view in ["completed", "all"], do: Enum.take(matched, @max_ended_rows), else: []
 
     socket
-    |> assign(:sessions, if(view in ["live", "all"], do: matching(live, query), else: []) ++ shown_ended)
+    |> assign(:sessions, with_row_keys(if(view in ["live", "all"], do: matching(live, query), else: []) ++ shown_ended))
     |> assign(:ended_overflow, if(view in ["completed", "all"], do: max(length(matched) - @max_ended_rows, 0), else: 0))
     |> assign(:session_counts, %{"live" => length(live), "completed" => length(ended), "all" => length(live) + length(ended)})
   end
@@ -1296,6 +1322,22 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   defp issue_rows(_payload), do: []
+
+  # A stable, unique key per row, so the keyed comprehension sends only the
+  # rows that changed instead of the whole table on every update.
+  @doc false
+  @spec with_row_keys([map()]) :: [map()]
+  def with_row_keys(rows) do
+    {keyed, _seen} =
+      Enum.map_reduce(rows, %{}, fn row, seen ->
+        base = Enum.map_join([row[:status], row[:issue_identifier], row[:ended_at]], ":", &to_string/1)
+        count = Map.get(seen, base, 0)
+        key = if count == 0, do: base, else: base <> "#" <> Integer.to_string(count)
+        {Map.put(row, :row_key, key), Map.put(seen, base, count + 1)}
+      end)
+
+    keyed
+  end
 
   defp session_windows, do: @session_windows
   defp max_ended_rows, do: @max_ended_rows

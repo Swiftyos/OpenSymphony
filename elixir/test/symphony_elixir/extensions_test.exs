@@ -806,6 +806,49 @@ defmodule SymphonyElixir.ExtensionsTest do
     end)
   end
 
+  test "dashboard liveview re-reads the orchestrator at most once per refresh interval" do
+    previous = Application.get_env(:symphony_elixir, :dashboard_refresh_interval_ms)
+    Application.put_env(:symphony_elixir, :dashboard_refresh_interval_ms, 300)
+    on_exit(fn -> Application.put_env(:symphony_elixir, :dashboard_refresh_interval_ms, previous) end)
+
+    orchestrator_name = Module.concat(__MODULE__, :SpacedRefreshOrchestrator)
+    snapshot = static_snapshot()
+    {:ok, orchestrator_pid} = StaticOrchestrator.start_link(name: orchestrator_name, snapshot: snapshot)
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, view, _html} = live(build_conn(), "/")
+
+    # The first update reads at once.
+    send(view.pid, :observability_updated)
+    render_async(view)
+    assert :sys.get_state(view.pid).socket.assigns.refresh_timer == nil
+
+    renamed = put_in(snapshot.running, Enum.map(snapshot.running, &Map.put(&1, :issue_title, "Spaced refresh title")))
+    :sys.replace_state(orchestrator_pid, fn state -> Keyword.put(state, :snapshot, renamed) end)
+
+    # A burst inside the interval becomes one deferred read.
+    for _ <- 1..50, do: send(view.pid, :observability_updated)
+    assigns = :sys.get_state(view.pid).socket.assigns
+    assert is_reference(assigns.refresh_timer)
+    refute render(view) =~ "Spaced refresh title"
+
+    assert_eventually(fn -> render(view) =~ "Spaced refresh title" end)
+    assert :sys.get_state(view.pid).socket.assigns.refresh_timer == nil
+  end
+
+  test "dashboard session rows get unique, stable keys" do
+    rows = [
+      %{status: :running, issue_identifier: "MT-1"},
+      %{status: :ended, issue_identifier: "MT-1", ended_at: "2026-01-01T00:00:00Z"},
+      %{status: :ended, issue_identifier: "MT-1", ended_at: "2026-01-01T00:00:00Z"},
+      %{status: :retrying, issue_identifier: "MT-2"}
+    ]
+
+    keys = rows |> SymphonyElixirWeb.DashboardLive.with_row_keys() |> Enum.map(& &1.row_key)
+    assert keys == ["running:MT-1:", "ended:MT-1:2026-01-01T00:00:00Z", "ended:MT-1:2026-01-01T00:00:00Z#1", "retrying:MT-2:"]
+    assert keys == rows |> SymphonyElixirWeb.DashboardLive.with_row_keys() |> Enum.map(& &1.row_key)
+  end
+
   test "dashboard liveview renders an unavailable state without crashing" do
     start_test_endpoint(
       orchestrator: Module.concat(__MODULE__, :MissingDashboardOrchestrator),
