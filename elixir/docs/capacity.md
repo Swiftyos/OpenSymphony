@@ -135,7 +135,8 @@ These come from the controller's single pod watch (`agent.launcher: kubernetes`;
 - `symphony_runner_janitor_deletions_total{kind}` (`pod`, `secret`).
 - `symphony_runner_pod_watch_reconnects_total{reason}`. `closed` is the API server's normal
   five-minute watch timeout. `gone` is a 410 and triggers a relist. The others are
-  `http_<status>`, `list_<reason>`, `transport`, `crashed` and `invalid_event`.
+  `http_<status>`, `not_found`, `watch_error` (another `ERROR` event), `invalid_event`,
+  `transport`, `crashed` (the watch task died) and `list_<reason>` for a failed list.
 - `symphony_runner_pod_watch_synced`: 1 while the pod cache is trusted.
 - `symphony_runner_pod_status_checks_total{source}`: where each run watcher's pod check was
   answered. `cache` is the pod cache. `miss` is a GET for a pod the cache does not have, and

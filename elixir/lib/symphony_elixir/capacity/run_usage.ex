@@ -111,18 +111,14 @@ defmodule SymphonyElixir.Capacity.RunUsage do
 
   defp value(data, key), do: Map.get(data, key) || Map.get(data, Atom.to_string(key))
 
+  # The table belongs to this module's process, which runs for the whole
+  # controller; before it starts (or in a runner) there is nothing to record.
   defp write(fun) do
     if :ets.whereis(@table) != :undefined, do: fun.(@table)
     :ok
-  rescue
-    ArgumentError -> :ok
   end
 
-  defp safe_lookup(key) do
-    :ets.lookup(@table, key)
-  rescue
-    ArgumentError -> []
-  end
+  defp safe_lookup(key), do: if(:ets.whereis(@table) == :undefined, do: [], else: :ets.lookup(@table, key))
 
   defp now_ms, do: System.monotonic_time(:millisecond)
 end

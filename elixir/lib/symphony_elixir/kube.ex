@@ -220,9 +220,6 @@ defmodule SymphonyElixir.Kube do
 
   defp dispatch_watch_lines(lines, on_events) do
     case decode_watch_lines(lines) do
-      {:ok, []} ->
-        :ok
-
       {:ok, events} ->
         on_events.(events)
         :ok

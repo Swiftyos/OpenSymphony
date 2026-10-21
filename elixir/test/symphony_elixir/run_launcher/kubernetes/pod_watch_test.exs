@@ -55,6 +55,8 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodWatchTest do
   defp respond(conn, {:list, body}), do: Req.Test.json(conn, body)
   defp respond(conn, {:watch, events}), do: Plug.Conn.send_resp(conn, 200, Enum.map_join(events, "", &(Jason.encode!(&1) <> "\n")))
   defp respond(conn, {:status, status, body}), do: Plug.Conn.send_resp(conn, status, body)
+  defp respond(conn, {:raw, body}), do: Plug.Conn.send_resp(conn, 200, body)
+  defp respond(conn, {:transport, reason}), do: Req.Test.transport_error(conn, reason)
   defp respond(_conn, :crash), do: raise("watch crashed")
 
   defp respond(conn, :block) do
@@ -266,6 +268,85 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodWatchTest do
     assert log =~ "Runner pod watch could not start"
     refute_received {:request, _kind, _path, _params}
     assert :stale = PodWatch.lookup("runs", "a", ctx.table)
+  end
+
+  test "every way a watch or list fails is a bounded reconnect reason", ctx do
+    capture_log(fn ->
+      start_watch!(ctx, [
+        list([], "1"),
+        {:status, 404, ""},
+        {:transport, :econnrefused},
+        {:raw, "not json\n"},
+        {:watch, [%{"type" => "ERROR", "object" => %{"code" => 500}}]},
+        {:watch, [%{"type" => "ERROR", "object" => %{"code" => 410}}]},
+        {:status, 410, "expired"},
+        list([], "2"),
+        :block
+      ])
+
+      assert_receive {:request, :watch, _path, %{"resourceVersion" => "2"}}, 3_000
+    end)
+
+    for reason <- ["not_found", "transport", "invalid_event", "watch_error", "gone", "list_gone"] do
+      assert counter("symphony_runner_pod_watch_reconnects_total", reason: reason) == 1, reason
+    end
+  end
+
+  test "odd events are ignored and odd pods still count", ctx do
+    pending = pod("a", "Pending", %{"metadata" => %{"creationTimestamp" => "2026-10-21T10:00:00Z"}})
+
+    started =
+      pod("a", "Running", %{
+        "status" => %{"startTime" => "2026-10-21T10:00:05Z", "containerStatuses" => [%{"name" => "agent-tools", "state" => %{"terminated" => %{}}}]}
+      })
+
+    bad_time = pod("b", "Pending", %{"metadata" => %{"creationTimestamp" => "not a time"}})
+
+    start_watch!(ctx, [
+      list([pending, bad_time, %{"metadata" => %{"name" => "phaseless"}}, %{"metadata" => %{}}, %{"metadata" => %{"name" => "c"}, "status" => %{"phase" => "Pending"}}], "1"),
+      {:watch,
+       [
+         %{"type" => "ADDED", "object" => %{"metadata" => %{}}},
+         %{"type" => "DELETED", "object" => %{"metadata" => %{}}},
+         %{"type" => "BOOKMARK", "object" => %{"metadata" => %{}}},
+         %{"type" => "SOMETHING", "object" => %{}},
+         # The runner container has not reported yet: the pod's start time counts.
+         event("MODIFIED", started, "5"),
+         # Unparseable times record nothing.
+         event("MODIFIED", pod("b", "Running", %{"metadata" => %{"creationTimestamp" => "not a time"}}), "6"),
+         %{"type" => "MODIFIED", "object" => %{"metadata" => %{"name" => "c", "resourceVersion" => "7"}, "status" => %{"phase" => "Running"}}}
+       ]},
+      :block
+    ])
+
+    assert_receive {:request, :watch, _path, %{"resourceVersion" => "7"}}, 2_000
+    assert [%{count: 1, sum: 5.0}] = Enum.filter(Metrics.snapshot().histograms, &(&1.name == "symphony_runner_pod_start_seconds"))
+    eventually(fn -> gauge("symphony_runner_pods", phase: "unknown") == 1 end)
+    assert gauge("symphony_runner_pods", phase: "running") == 3
+  end
+
+  test "the namespace comes from the config; stopping mid-backoff cancels the retry", ctx do
+    {:ok, enabled} = Agent.start_link(fn -> true end)
+
+    capture_log(fn ->
+      pid =
+        start_watch!(ctx, [{:status, 500, "no"}],
+          namespace: nil,
+          min_backoff_ms: 60_000,
+          enabled: fn -> Agent.get(enabled, & &1) end
+        )
+
+      assert_receive {:request, :list, "/api/v1/namespaces/" <> _configured, _params}
+      Agent.update(enabled, fn _ -> false end)
+      send(pid, :check)
+      eventually(fn -> gauge("symphony_runner_pod_watch_synced", []) == 0 end)
+    end)
+  end
+
+  test "the default table and name are the application's" do
+    assert PodWatch.lookup("runs", "a") in [:stale, :miss] or match?({:ok, _pod}, PodWatch.lookup("runs", "a"))
+    assert is_boolean(PodWatch.synced?("runs"))
+    assert {:error, {:already_started, _pid}} = PodWatch.start_link()
   end
 
   test "lookups before any watch has started are stale" do

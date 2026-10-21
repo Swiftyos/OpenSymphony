@@ -109,9 +109,9 @@ defmodule SymphonyElixir.Capacity.SelfUsage do
   defp descendants([], _children, seen), do: seen
 
   defp descendants([pid | rest], children, seen) do
-    if MapSet.member?(seen, pid),
-      do: descendants(rest, children, seen),
-      else: descendants(Map.get(children, pid, []) ++ rest, children, MapSet.put(seen, pid))
+    # A pid already seen (a cycle) adds no children again.
+    children_of = if MapSet.member?(seen, pid), do: [], else: Map.get(children, pid, [])
+    descendants(children_of ++ rest, children, MapSet.put(seen, pid))
   end
 
   defp read_processes(proc) do

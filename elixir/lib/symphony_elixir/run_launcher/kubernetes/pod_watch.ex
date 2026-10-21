@@ -174,8 +174,6 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodWatch do
       {:ok, enabled} -> enabled == true
       :error -> RunLauncher.launcher() == Kubernetes
     end
-  rescue
-    _error -> false
   end
 
   defp activate(state) do
@@ -199,12 +197,9 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodWatch do
   end
 
   defp namespace(opts) do
-    case Keyword.fetch(opts, :namespace) do
-      {:ok, namespace} ->
-        {:ok, namespace}
-
-      :error ->
-        with {:ok, settings} <- Config.settings(), do: {:ok, settings.agent.kubernetes.namespace}
+    case Keyword.get(opts, :namespace) do
+      namespace when is_binary(namespace) -> {:ok, namespace}
+      nil -> with {:ok, settings} <- Config.settings(), do: {:ok, settings.agent.kubernetes.namespace}
     end
   end
 
@@ -283,8 +278,8 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodWatch do
   defp reason_label({:watch_error, _status}), do: "watch_error"
   defp reason_label({:invalid_watch_event, _line}), do: "invalid_event"
   defp reason_label({:watch_crashed, _reason}), do: "crashed"
-  defp reason_label(%{__exception__: true}), do: "transport"
-  defp reason_label(_reason), do: "error"
+  # A Req exception (connection refused, timeout, closed mid-stream).
+  defp reason_label(_reason), do: "transport"
 
   defp stop_task(%{task: %Task{} = task} = state) do
     Task.shutdown(task, :brutal_kill)
