@@ -42,7 +42,7 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
       name: "get_manual",
       scope: "read",
       description:
-        "Symphony's manual: what Symphony is, its concepts (projects, flows, stages, transitions), an issue's life, what agents are told and where that is configured, projects with several repos and blocking between them, where people step in, every tool here, and recipes. Call it first when asked what this is or how it works.",
+        "Symphony's manual: what Symphony is, its concepts, how to set up a new project, how Symphony picks the repo an issue is worked in, working across repos (blocking issues, unblocking), an issue's life, what agents are told and where that is configured, where people step in, token scopes, every tool here, recipes and troubleshooting. Call it first when asked what this is or how it works.",
       properties: %{
         section: %{
           type: "string",
@@ -70,7 +70,7 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
       name: "get_flow",
       scope: "read",
       description:
-        "A flow's full definition (stages with their Linear state, label, agent instructions, harness, controls; transitions; autopilot) plus the issues in each stage. Pass `version` back to save_flow when you change it.",
+        "A flow's full definition (stages with their Linear state, label, agent instructions, harness, controls; transitions; autopilot) plus the issues in each stage. Pass `version` back to save_flow when you change it (0 for a team or project that still inherits its flow: saving gives it its own).",
       properties: %{scope: %{type: "string", description: "DEFAULT, a team key such as PAY, or project:<slug>."}},
       required: ["scope"]
     },
@@ -196,7 +196,7 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
       name: "add_project",
       scope: "write",
       description:
-        "Admins: make Symphony listen to a Linear project and work its issues in a GitHub repo, from the next poll. Issues follow the project's flow, else its team's, and agents get Symphony's own prompt: the repo needs no Symphony files. Symphony's GitHub access must be able to push to it. Adding an existing slug updates it.",
+        "Admins: make Symphony listen to a Linear project and work its issues in its GitHub repos, from the next poll. `repo` is the primary repo; `repos` are the others. Each issue is worked in exactly one repo: the one its repo/<name> label names, else the primary. Symphony creates the Linear labels. Issues follow the project's flow, else its team's; the repos need no Symphony files, but Symphony's GitHub access must be able to push and open PRs on every one. Adding an existing project replaces its settings, so pass the full repos list.",
       properties: %{
         project: %{type: "string", description: "The Linear project's URL or slug id (e.g. 0a1b2c3d4e5f)."},
         repo: %{type: "string", description: "GitHub repository as owner/name, e.g. acme/widgets."},
@@ -206,7 +206,7 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
         repos: %{
           type: "array",
           description:
-            "Other GitHub repos this project's issues may need work in. Each issue is worked in one repo: the one its repo/<name> label names, else the primary repo. Agents can read the others, and file an issue for the repo that needs a change.",
+            "Other GitHub repos this project's issues may need work in (replaces the stored list). An issue labelled repo/<name> is worked in that repo; a label naming no repo of the project stops the issue with a comment. Agents read the other repos (checked out under .symphony/repos/<name>) and file a blocking issue for the repo that needs a change.",
           items: %{
             type: "object",
             properties: %{
@@ -312,7 +312,7 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
           |> Map.take([:key, :kind, :name, :slug, :teams, :custom])
           |> Map.merge(%{
             uses: definition["source"],
-            version: definition["version"],
+            version: if(definition["inherited"], do: 0, else: definition["version"]),
             stages: Enum.map(definition["stages"] || [], & &1["id"]),
             editable: controls_enabled?() and Auth.can_edit_factory?(ctx.user, entry.key)
           })
@@ -335,7 +335,8 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
          scope: definition["team"],
          uses: definition["source"],
          inherited: definition["inherited"],
-         version: definition["version"],
+         # An inherited flow isn't this scope's yet: its first save is on top of 0.
+         version: if(definition["inherited"], do: 0, else: definition["version"]),
          definition: Map.drop(definition, ["team", "source", "inherited"]),
          issues_by_stage: Map.new(flow.nodes, fn {stage, node} -> {stage, Enum.map(node.issues, &issue_summary/1)} end),
          transitions_observed: flow.edges,
@@ -553,7 +554,8 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
          note:
            "Symphony polls this project from now on. Before filing issues: " <>
              if(route.workflow, do: "#{route.repo} needs #{route.workflow} on #{route.default_branch}, and ", else: "") <>
-             "Symphony's GitHub access needs push and pull-request rights on #{route.repo}."
+             "Symphony's GitHub access needs push and pull-request rights on #{Enum.join([route.repo | Enum.map(route.repos, & &1.repo)], ", ")}." <>
+             repo_label_note(route)
        }}
     end
   end
@@ -744,6 +746,12 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
   defp orchestrator, do: Endpoint.config(:orchestrator) || Orchestrator
 
   defp snapshot_timeout_ms, do: Endpoint.config(:snapshot_timeout_ms) || 15_000
+
+  defp repo_label_note(%{repos: [_ | _] = repos} = route) do
+    " Issues are worked in #{route.repo} unless labelled " <> Enum.map_join(repos, " or ", &"repo/#{&1.name} (#{&1.repo})") <> "."
+  end
+
+  defp repo_label_note(_route), do: ""
 
   defp extra_repos(route) do
     for repo <- Config.project_repos(route), not repo.primary, do: Map.take(repo, [:name, :repo, :default_branch, :description])

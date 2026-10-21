@@ -6,7 +6,7 @@ defmodule SymphonyElixir.McpToolsTest do
 
   alias SymphonyElixir.{AgentInbox, Auth, IssueMoves, McpTokens, Transcript, UsageLedger, Users}
   alias SymphonyElixir.Factory.Store
-  alias SymphonyElixirWeb.Mcp.Tools
+  alias SymphonyElixirWeb.Mcp.{Manual, Tools}
   alias SymphonyElixirWeb.{McpAuth, RateLimit}
 
   @endpoint SymphonyElixirWeb.Endpoint
@@ -289,8 +289,9 @@ defmodule SymphonyElixir.McpToolsTest do
       assert %{"added" => %{"slug" => "0a1b2c3d4e5f", "repo" => "acme/widgets", "workflow" => nil}, "note" => note} =
                ok!(admin, "add_project", %{"project" => url, "repo" => "acme/widgets"})
 
-      assert note =~ "push and pull-request rights on acme/widgets"
+      assert note =~ "push and pull-request rights on acme/widgets."
       refute note =~ "WORKFLOW.md"
+      refute note =~ "labelled"
       # Its name and its teams' labels are looked up in Linear in the background.
       assert_receive {:graphql, "query SymphonyProjectTeams" <> _, %{slugs: ["0a1b2c3d4e5f"]}}, 1_000
       assert eventually(fn -> SymphonyElixir.LabelSync.project_names()["0a1b2c3d4e5f"] == "Project 0a1b2c3d4e5f" end)
@@ -300,6 +301,12 @@ defmodule SymphonyElixir.McpToolsTest do
       assert %{"projects" => projects} = ok!(mia, "list_projects")
 
       assert Enum.any?(projects, &match?(%{"project" => "0a1b2c3d4e5f", "source" => "mcp", "active" => false, "added_by" => "ada via MCP (agent)"}, &1))
+
+      repos = [%{"repo" => "acme/widgets-api", "name" => "api", "description" => "The API"}]
+
+      assert %{"note" => note} = ok!(admin, "add_project", %{"project" => url, "repo" => "acme/widgets", "repos" => repos})
+      assert note =~ "push and pull-request rights on acme/widgets, acme/widgets-api."
+      assert note =~ "Issues are worked in acme/widgets unless labelled repo/api (acme/widgets-api)."
 
       assert error!(mia, "add_project", %{"project" => "abc123def456", "repo" => "acme/app"}) =~ "Only admins"
       assert error!(mia, "remove_project", %{"project" => "0a1b2c3d4e5f"}) =~ "Only admins"
@@ -322,7 +329,41 @@ defmodule SymphonyElixir.McpToolsTest do
     end
   end
 
+  describe "inherited flows" do
+    test "read as version 0, so the first save gives the scope its own flow", %{admin_token: admin, mia_token: mia} do
+      on_exit(fn -> Store.reset() end)
+      %{"version" => 0, "definition" => default} = ok!(admin, "get_flow", %{"scope" => "DEFAULT"})
+      assert %{"version" => 1} = ok!(admin, "save_flow", %{"scope" => "DEFAULT", "base_version" => 0, "definition" => default})
+
+      # PAY still inherits DEFAULT (now at version 1), but has no flow of its own yet.
+      assert %{"version" => 0, "inherited" => true} = ok!(admin, "get_flow", %{"scope" => "PAY"})
+      assert %{"flows" => flows} = ok!(mia, "list_flows")
+      assert %{"version" => 0} = Enum.find(flows, &(&1["key"] == "PAY"))
+      assert %{"version" => 1} = ok!(admin, "save_flow", %{"scope" => "PAY", "base_version" => 0, "definition" => default})
+      assert %{"version" => 1, "inherited" => false} = ok!(admin, "get_flow", %{"scope" => "PAY"})
+    end
+  end
+
   describe "the manual" do
+    test "documents every tool in its tool reference" do
+      assert {:ok, reference} = Manual.section("mcp-tool-reference")
+      names = ["read", "write"] |> Tools.list() |> Enum.map(& &1.name)
+
+      assert length(names) == 18
+      missing = Enum.reject(names, &String.contains?(reference, "| `#{&1}` |"))
+      assert missing == [], "manual.md's tool reference is missing #{Enum.join(missing, ", ")}"
+
+      # And nothing documented there that isn't a tool.
+      documented = Regex.scan(~r/^\| `([a-z_]+)` \|/m, reference, capture: :all_but_first) |> List.flatten()
+      assert Enum.sort(documented) == Enum.sort(names)
+    end
+
+    test "has the sections people are pointed to" do
+      for section <- ~w(set-up-a-new-project how-symphony-picks-the-repo working-across-repos mcp-tool-reference troubleshooting) do
+        assert section in Manual.sections()
+      end
+    end
+
     test "is a tool, and resources, and the server tells clients to use it", %{mia_token: token} do
       assert %{"manual" => manual, "sections" => sections} = ok!(token, "get_manual")
       assert manual =~ "# Symphony manual"

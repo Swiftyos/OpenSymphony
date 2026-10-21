@@ -212,12 +212,18 @@ projects:
         description: Queue consumers; job processing errors usually start here
 ```
 
-- Each issue is worked in one repo, its home repo: the one its `repo/<name>` label names (for
-  example `repo/worker`), else the primary. The workspace is a checkout of the home repo on
-  `symphony/<ID>`, and the commits, branch and PR go there only. Symphony creates the `repo`
-  label group and a label per repo in each project team.
+- Each issue is worked in exactly one repo, its home repo: the one its `repo/<name>` label names
+  (for example `repo/worker`), else the primary. A label naming no repo of the project, or two
+  repo labels, stops the issue: Symphony comments `## Repo label problem` once and starts no
+  agent until it is fixed. The workspace is a checkout of the home repo on `symphony/<ID>`, and
+  the commits, branch and PR go there only; when the label later picks another repo, the next
+  run starts in a fresh checkout of that repo. Symphony creates the `repo` label group and a
+  label per repo in each project team. The MCP manual (`get_manual`, section
+  `how-symphony-picks-the-repo`) has the full rules.
 - The project's other repos are checked out read-only under `.symphony/repos/<name>` at their
-  default branch, refreshed at the start of every run, so the agent can read them.
+  default branch, refreshed at the start of every run (also in Kubernetes runner pods, from the
+  git mirror), so the agent can read them. A repo's `.symphony/environment.yaml` applies to the
+  issues worked in it.
 - When the fix belongs in another repo, the agent (told how in its prompt) files a Linear issue
   for that repo (`repo/<name>`, Todo, same project), links it as blocking its own issue, and moves
   its issue to Blocked. Once every blocker is done, Symphony moves the issue back to Implement and
@@ -763,9 +769,12 @@ caches read-only over git's smart HTTP protocol at
 `owner_name-<digest>`) for a configured project repo, never a filesystem path.
 The run token from the spec authenticates it, either as
 `Authorization: Bearer <token>` or as HTTP basic with the token as the password.
-A run may only read its own issue's project repo: a project slug that matches no
-route with a repo is denied, and a run with no project slug at all may read the
-repo only when exactly one repo is configured. `info/refs` advertises the refs
+A run may only read the repos of its own issue's project (its home repo, which
+the spec's `git_mirror_url` names, and the project's other repos, which the
+runner checks out read-only under `.symphony/repos/<name>` with
+`GitMirror.reference_commands/4`): a project slug that matches no route with a
+repo is denied, and a run with no project slug at all may read only when
+exactly one project has a repo. `info/refs` advertises the refs
 the cache has now, including protocol v2 when the client asks for it, and
 `git-upload-pack` runs git against the cache. `git-receive-pack` is refused, so
 pushes still go to GitHub. If the cache is older than

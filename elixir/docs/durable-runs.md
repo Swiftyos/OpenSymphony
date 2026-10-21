@@ -184,8 +184,8 @@ Kubernetes they move behind a tool gateway.
      project cache read-only at `/git/<run_id>/<repo-key>` over git smart HTTP,
      authenticated by the run token (bearer or HTTP basic with the token as the
      password). The key names a configured repo's cache, never a path. A run may
-     read only its own issue's project repo; a run without a project slug may
-     read it only when exactly one repo is configured. Receive-pack is refused.
+     read only its own issue's project repos; a run without a project slug may
+     read only when exactly one project has a repo. Receive-pack is refused.
      The endpoint serves the cache as it is, never changes it, and asks the
      background refresher to catch up when it is stale; it never fetches from
      GitHub in the request. Responses stream chunked with an idle timeout
@@ -193,7 +193,8 @@ Kubernetes they move behind a tool gateway.
      `git_mirror.max_concurrent` caps concurrent upload-packs (`503` when full).
      At dispatch the controller adds `git_mirror_url` and `target_branch` to
      every run's spec with `RunSpec.attach_git_mirror/2` when it has the
-     cache of the issue's repo. A runner whose host has no cache of that repo
+     cache of the issue's home repo (its `repo/<name>` label, else the
+     primary). A runner whose host has no cache of that repo
      (a pod) builds its workspace with
      `SymphonyElixir.GitMirror.clone_commands/3` from
      `Workspace.create_for_issue(..., git_mirror: spec)`: init, fetch
@@ -202,9 +203,10 @@ Kubernetes they move behind a tool gateway.
      environment (`http.extraHeader`), never in argv or `.git/config`, and
      `origin` is the repo's real remote, so pushes go to GitHub with the
      agent's own credentials. A host with the cache (the VM, a process
-     runner) keeps cloning from it and ignores the mirror. The mirror serves
-     only the issue's home repo, so a mirror workspace gets no reference
-     repos (`.symphony/repos`).
+     runner) keeps cloning from it and ignores the mirror. A mirror workspace
+     also fetches the project's other repos from the mirror into
+     `.symphony/repos/<name>` (`GitMirror.reference_commands/4`), detached at
+     their default branch and refreshed every run, like the cache path.
    - **Controller URL.** A pod cannot use the controller's loopback address.
      The launcher's optional `controller_url/1` callback names the URL its
      runs use: `agent.kubernetes.controller_url` (for example
@@ -380,8 +382,6 @@ Kubernetes they move behind a tool gateway.
    - **Environments on the pod.** The spec's resolved `environment` (image, resources,
      service sidecars, setup) is not rendered into the pod yet; the runner image and
      `agent.kubernetes` resources are used.
-   - **Reference repos in a pod.** The mirror serves only the issue's home repo, so a
-     multi-repo project's other repos are not checked out in a runner pod.
    - **Recovery detail.** A run found dead at boot is retried as interrupted even when
      its pod Failed; the pod's failure reason only reaches the retry when the watcher
      sees it.
