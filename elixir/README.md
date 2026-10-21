@@ -413,6 +413,53 @@ projects:
   [`docs/capacity.md`](docs/capacity.md) for metric meanings, PromQL recipes and the pre-Kubernetes
   sizing checklist.
 
+### Telemetry export and trace context
+
+`telemetry` makes the agent CLIs export OpenTelemetry (traces, logs, metrics) to an OTLP
+collector, and makes Symphony export its own run spans:
+
+```yaml
+telemetry:
+  enabled: true
+  otlp_endpoint: http://localhost:4318
+  otlp_protocol: http/protobuf     # grpc (default), http/protobuf or http/json
+  # otlp_traces_endpoint / otlp_logs_endpoint / otlp_metrics_endpoint (+ _protocol) per signal
+  include_traces: true
+  include_metrics: true
+  include_logs: true
+  log_user_prompts: false
+  log_tool_details: false
+  resource_attributes:
+    environment: production
+  symphony_spans: true             # Symphony's own run spans (default true)
+  span_max_queue_size: 2048        # spans held while the collector is slow; more are dropped
+  span_max_batch_size: 512
+  span_export_interval_ms: 5000
+  span_export_timeout_ms: 5000
+agent:
+  kubernetes:
+    # Where runner pods (the runner and its agents) export; unset, they use otlp_endpoint.
+    otlp_endpoint: http://otel-collector.symphony.svc:4318
+    otlp_protocol: http/protobuf
+```
+
+- **Traces.** Each run is one trace: `symphony.run` (the root), `symphony.dispatch`,
+  `symphony.agent_run`, then the agent CLI's spans. The ids come from the run id, so a
+  controller restart that adopts a live run keeps its trace, and a retry starts a new one.
+- **Agent environment.** Every agent gets `TRACEPARENT` (its parent is `symphony.agent_run`)
+  and the run's resource attributes in `OTEL_RESOURCE_ATTRIBUTES`: `symphony.run.id`,
+  `symphony.run.attempt`, `symphony.run.launcher`, `symphony.project`, `symphony.trace_id`,
+  `linear.issue.identifier` and `symphony.backend`. This works the same for the `local`,
+  `process` and `kubernetes` launchers.
+- **Exporter bounds.** Symphony's exporter speaks OTLP/HTTP (JSON) only and is bounded: a
+  slow or missing collector costs dropped spans, never controller memory or time.
+- **Credentials.** Exporter credentials (Langfuse keys, ClickHouse passwords) belong in the
+  collector. Symphony never renders OTLP headers, and `agent.kubernetes.otlp_endpoint` must
+  be a URL without credentials.
+- **More detail.** See "Tracing runs" in [`docs/durable-runs.md`](docs/durable-runs.md) for
+  how the context crosses the controller/runner split, volume estimates at 1000 agents, and
+  the in-cluster collector spec.
+
 ### Telemetry metrics and traces in the dashboard
 
 When `telemetry` exports agent signals to an OpenTelemetry collector that writes ClickHouse (the

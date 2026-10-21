@@ -343,6 +343,255 @@ Kubernetes they move behind a tool gateway.
      first runs on GKE should check the RBAC above, Kueue admission and the controller
      Service URL.
 
+## Tracing runs
+
+Every run is one trace, from the controller's dispatch through the runner to the
+agent CLI. `SymphonyElixir.RunTrace` holds the context and
+`SymphonyElixir.TraceExporter` sends Symphony's own spans.
+
+### One trace per run
+
+- **Ids.** The trace id and the root span id are SHA-256 prefixes of the run id.
+  A run is one attempt at an issue, so a retry (a new run id) is a new trace. The
+  attempts of an issue are grouped by `langfuse.session.id` (the issue identifier)
+  and by the `linear.issue.identifier` resource attribute.
+- **Adoption.** A controller that restarts and adopts a live run builds the same
+  context from the registry's run id. The root span starts at the registry's
+  `started_at_unix_ms`. Nothing new is written and no second trace is started.
+- **Spans.**
+  - `symphony.run` is the root. The controller emits it when the run leaves
+    `running`: after a finish, crash, stall or stop, and also for a run recovered at
+    boot that had already finished. It is an error for `crashed`/`stalled` and ok
+    otherwise, and `symphony.run.outcome` gives the reason.
+  - `symphony.dispatch` is the controller starting the run through its launcher.
+    It is an error when the launcher refuses.
+  - `symphony.agent_run` is `AgentRunner.run/3` wherever it runs: a controller
+    task for `local`, the runner process for `process` and `kubernetes`. It is a
+    child of the root.
+  - The agent CLI's spans come next. The CLI gets `TRACEPARENT` naming
+    `symphony.agent_run`, so a CLI that reads W3C context from its environment nests
+    under it. A CLI that ignores it keeps its own trace ids. Its spans still carry
+    the run's resource attributes, so they can be joined by `symphony.run.id` or
+    `symphony.trace_id`.
+- **Resource attributes.** Symphony's spans and the agent's
+  `OTEL_RESOURCE_ATTRIBUTES` carry `symphony.run.id`, `symphony.run.attempt`,
+  `symphony.run.launcher` (`local`, `process`, `kubernetes`), `symphony.project`
+  (the Linear project slug), `symphony.trace_id`, `linear.issue.id`,
+  `linear.issue.identifier` and `symphony.backend`. They sit next to the existing
+  `telemetry.resource_attributes`, `symphony.instance` and account attributes.
+- **Across the split.** The run spec's `telemetry` map carries `traceparent` (the
+  root), `launcher`, and `otlp_endpoint`/`otlp_protocol`. The runner continues the
+  spec's `traceparent`. A spec written before this existed (no `telemetry`) gets
+  the context derived from its run id, which is the same one. A local run gets the
+  same context in-process through `AgentRunner.run/3`'s `:trace` option.
+
+### Where runner pods export
+
+A runner pod cannot reach the controller host's collector (on the VM, agents use
+`host.containers.internal:4318`). `agent.kubernetes.otlp_endpoint`, with
+`agent.kubernetes.otlp_protocol` (default `http/protobuf`), names the collector
+that runner pods use, for example an in-cluster Service:
+
+```yaml
+agent:
+  kubernetes:
+    otlp_endpoint: http://otel-collector.symphony.svc:4318
+    otlp_protocol: http/protobuf
+```
+
+- The launcher's optional `otlp_override/1` callback (implemented by the
+  Kubernetes launcher) puts it in the spec.
+- The runner calls `Telemetry.put_otlp_override/1`. From then on that endpoint and
+  protocol replace `telemetry.otlp_endpoint` and every per-signal endpoint, for
+  the agents (`OTEL_EXPORTER_OTLP_*`, Codex's `-c otel.*`) and for Symphony's own
+  spans.
+- The pod's runner container also renders `TRACEPARENT`,
+  `OTEL_RESOURCE_ATTRIBUTES`, `OTEL_EXPORTER_OTLP_ENDPOINT` and
+  `OTEL_EXPORTER_OTLP_PROTOCOL` for anything else in the pod. If no pod
+  collector is set, it renders `telemetry.otlp_endpoint`, and with telemetry off
+  it renders none of them. `OTEL_SERVICE_NAME` is deliberately not rendered,
+  because the agents would inherit it.
+- **No credentials.** The endpoint must be a plain `http(s)` URL; one with
+  `user:pass@` is rejected. Symphony never renders `OTEL_EXPORTER_OTLP_HEADERS`.
+  Langfuse keys and the ClickHouse password exist only in the collector.
+
+### Bounded export from the controller
+
+`TraceExporter` exists so that tracing cannot take the controller down:
+
+- `emit/1` writes to an ETS queue, not to a mailbox, and never blocks or raises.
+- The queue holds at most `telemetry.span_max_queue_size` spans (2048). A span
+  emitted while the queue is full is dropped and counted.
+- Every `telemetry.span_export_interval_ms` (5 s) the exporter posts batches of up
+  to `telemetry.span_max_batch_size` (512) as OTLP/HTTP JSON. Each request is
+  bounded by `telemetry.span_export_timeout_ms` (5 s) and is not retried. A failed
+  batch is dropped and counted.
+- `TraceExporter.stats/0` returns the queued, dropped, exported and failed-batch
+  counts.
+- The runner flushes before it exits.
+- `telemetry.symphony_spans: false` turns Symphony's spans off and leaves the
+  agents' export alone.
+- The exporter speaks OTLP/HTTP only. With a `grpc` protocol and no HTTP
+  `otlp_traces_endpoint`, its spans are dropped and a warning is logged once.
+
+At 1000 concurrent runs averaging 30 minutes, about 0.6 runs end per second. Each
+run makes three Symphony spans, so the total is under 2 spans/s. The queue holds
+more than 15 minutes of them while a collector is down.
+
+### Volume at 1000 agents
+
+These figures are planning estimates. The assumptions are listed so they can be
+replaced with measurements (see the queries below).
+
+| Per agent turn (about 4 min, 25 model requests, 25 tool calls) | Claude Code | Codex |
+| --- | --- | --- |
+| spans | ~75 (interaction, llm_request, tool, tool.execution) | ~100-300 (session_loop and handlers) |
+| log events | ~75 (api_request, tool_result, tool_decision, user_prompt) | ~50 |
+| metric points | ~30 per 60 s export | ~30 per 60 s export |
+
+- Per agent: about 0.3-1 span/s and about 0.3 log records/s. Size is about 1 KB
+  per span or record on the wire with `log_user_prompts` and `log_tool_details`
+  off, and 5-20 KB with them on.
+- At 1000 agents, using 1 span/s and 0.5 logs/s per agent as the planning figure:
+  - About **1,000 spans/s, 500 log records/s and 500 metric points/s**.
+  - About **1.5-2 MB/s** of OTLP, roughly 150 GB/day uncompressed. ClickHouse
+    compresses this about 10x, so that is about 15 GB/day, or about 1.4 TB at the
+    90-day TTL.
+  - Waves of pod starts and prompt/tool logging can push it 3-10x higher: plan for
+    **5,000 items/s and 10-15 MB/s** peaks.
+- **Requests.** Each CLI batches on its own. Claude Code is the Node SDK: traces
+  in batches of up to 512 every 5 s from a 2048-span queue, logs every 5 s
+  (`OTEL_LOGS_EXPORT_INTERVAL`), metrics every 60 s
+  (`OTEL_METRIC_EXPORT_INTERVAL`). Codex is the Rust SDK, with similar batch
+  defaults. Each queue is bounded and drops when full, so a slow collector cannot
+  grow an agent's memory. 1000 agents make about 400 export requests/s (traces and
+  logs every 5 s, metrics every 60 s). Keep the defaults. Raising the batch delay
+  saves requests, but agents that are killed mid-run then lose more.
+- **Keep everything; do not tail-sample.**
+  - A run's trace lasts as long as the run (minutes to `active_deadline_seconds`,
+    6 h), and its root span only arrives at the end. A `tail_sampling` processor
+    would have to hold every live run's spans for hours, behind a
+    trace-id-sharded load-balancing tier. Langfuse would then see nothing until a
+    run ended.
+  - ClickHouse absorbs everything cheaply. Keep all of it there.
+  - If Langfuse ingestion cannot keep up, sample its pipeline alone with the
+    `probabilistic_sampler` processor (it hashes the trace id, so a run is kept or
+    dropped whole) or `filter` out tool-internal spans. The dashboard falls back to
+    ClickHouse for a trace Langfuse does not have.
+
+To measure instead of estimating, run against the collector's ClickHouse (database `otel`):
+
+```sql
+-- spans per second by service over the last day
+SELECT ServiceName, count() / 86400 AS spans_per_s FROM otel_traces
+WHERE Timestamp > now() - INTERVAL 1 DAY GROUP BY ServiceName;
+-- spans per run (needs the run attributes above)
+SELECT quantiles(0.5, 0.9)(n) FROM (SELECT ResourceAttributes['symphony.run.id'] AS run, count() AS n
+  FROM otel_traces WHERE run != '' AND Timestamp > now() - INTERVAL 1 DAY GROUP BY run);
+-- stored bytes per table
+SELECT table, formatReadableSize(sum(data_compressed_bytes)) AS stored,
+  formatReadableSize(sum(data_uncompressed_bytes)) AS raw
+FROM system.parts WHERE database = 'otel' AND active GROUP BY table;
+```
+
+Divide by the average number of running agents (`symphony_running_agents` on
+`/metrics`) to get per-agent rates.
+
+### In-cluster collector (infrastructure spec)
+
+On Kubernetes, the controller and the runner pods export to a collector in the
+controller's namespace (`symphony`). It has the same pipelines as the VM
+collector: traces to Langfuse and ClickHouse, and logs and metrics to ClickHouse.
+
+- **Deployment** `otel-collector` in `symphony`:
+  - Image `otel/opentelemetry-collector-contrib`, pinned by digest to the VM's
+    version.
+  - Two replicas (HPA 2-4 on 70% CPU), a PodDisruptionBudget of `minAvailable: 1`,
+    and anti-affinity across nodes.
+  - Each replica requests `cpu: 1, memory: 2Gi` with limits `cpu: 2, memory: 3Gi`.
+    That covers the 5,000 items/s peak with headroom: one core handles about
+    10,000 spans/s through batch plus the ClickHouse exporter.
+  - Non-root (`runAsUser: 10001`), read-only root filesystem, all capabilities
+    dropped, `RuntimeDefault` seccomp.
+  - `automountServiceAccountToken: false`, with no RBAC.
+  - Probes on the `health_check` extension at `:13133`.
+  - Credentials come from a CSI-mounted secret volume at
+    `/var/run/secrets/otel` (`langfuse-otlp-auth` holding
+    `Basic base64(public:secret)`, and `clickhouse-password`). Config reads them
+    with `${file:...}`, so they are never in a ConfigMap, a pod spec or a run
+    spec.
+- **Config:**
+
+```yaml
+receivers:
+  otlp:
+    protocols:
+      grpc: {endpoint: 0.0.0.0:4317}
+      http: {endpoint: 0.0.0.0:4318}
+extensions:
+  health_check: {endpoint: 0.0.0.0:13133}
+processors:
+  memory_limiter: {check_interval: 1s, limit_mib: 2400, spike_limit_mib: 500}
+  batch: {send_batch_size: 2048, send_batch_max_size: 4096, timeout: 2s}
+exporters:
+  otlphttp/langfuse:
+    traces_endpoint: ${env:LANGFUSE_URL}/api/public/otel/v1/traces
+    headers:
+      Authorization: ${file:/var/run/secrets/otel/langfuse-otlp-auth}
+      x-langfuse-ingestion-version: "4"
+    retry_on_failure: {enabled: true, max_elapsed_time: 300s}
+    sending_queue: {enabled: true, queue_size: 100}
+  clickhouse:
+    endpoint: ${env:CLICKHOUSE_ENDPOINT}   # tcp://host:9000?dial_timeout=10s
+    database: otel
+    username: otel
+    password: ${file:/var/run/secrets/otel/clickhouse-password}
+    create_schema: true
+    ttl: 2160h
+    timeout: 10s
+    retry_on_failure: {enabled: true, max_elapsed_time: 300s}
+    sending_queue: {enabled: true, queue_size: 100}
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:  {receivers: [otlp], processors: [memory_limiter, batch], exporters: [otlphttp/langfuse, clickhouse]}
+    logs:    {receivers: [otlp], processors: [memory_limiter, batch], exporters: [clickhouse]}
+    metrics: {receivers: [otlp], processors: [memory_limiter, batch], exporters: [clickhouse]}
+```
+
+  - `queue_size` counts batches. 100 batches of up to 4096 items bound each
+    exporter's queue to about 400 MB, and `memory_limiter` refuses data
+    (receivers return 503/`RESOURCE_EXHAUSTED`, and the SDKs drop) before the
+    limit is reached.
+  - Only one collector replica creates the ClickHouse schema in practice. It is
+    idempotent.
+- **Service** `otel-collector` in `symphony`: ClusterIP, ports `otlp-grpc`
+  4317 and `otlp-http` 4318, selecting
+  `app.kubernetes.io/name: otel-collector`.
+- **NetworkPolicy:**
+  - Add an egress rule to `symphony-runs-default-deny`: to the `symphony`
+    namespace, pods `app.kubernetes.io/name: otel-collector`, TCP 4317 and 4318.
+    Runner pods then reach only DNS, the controller on 4000, the collector, and
+    the internet on 443.
+  - Add an ingress policy `otel-collector-ingress` in `symphony` for those pods:
+    from pods in `symphony` (the controller) and from `symphony-runs` pods
+    `app.kubernetes.io/name: symphony-runner`, on TCP 4317 and 4318. The
+    namespace's default deny covers everything else, including the health port.
+  - The collector's egress needs to reach Langfuse (HTTPS or HTTP on its port) and
+    ClickHouse (native 9000). If those stay on the VM, that means a firewall rule
+    from the cluster's pod range to the VM on those ports, and ClickHouse 9000
+    published on the VM's internal address (today only Langfuse 3000 and OTLP are
+    published).
+  - The simpler interim option is a gateway: the in-cluster collector's only
+    exporter is `otlphttp` to the VM collector on 4318, which needs one firewall
+    port. The VM collector's `memory_limiter` (800 MiB) and queues must then be
+    raised to the sizes above.
+- **Symphony config** on the controller:
+  - `telemetry.otlp_endpoint: http://otel-collector.symphony.svc:4318` and
+    `otlp_protocol: http/protobuf`, used by the controller's own spans.
+  - `agent.kubernetes.otlp_endpoint: http://otel-collector.symphony.svc:4318`,
+    which only needs setting when it differs from `telemetry.otlp_endpoint`.
+
 ## GitHub App token hardening
 
 With `github_app` configured, a runner gets a short-lived installation token
