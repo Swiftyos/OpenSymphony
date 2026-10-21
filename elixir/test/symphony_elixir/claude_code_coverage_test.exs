@@ -167,6 +167,11 @@ defmodule SymphonyElixir.ClaudeCodeCoverageTest do
     printf 'ARGV:%s\\n' "$*" >> "#{trace}"
     turn=0
     while IFS= read -r line; do
+      # Env values arrive on stdin before the protocol (see SSH.start_port/3).
+      case "$line" in
+        "{"*) ;;
+        *) printf 'STDIN_ENV:%s\\n' "$line" >> "#{trace}"; continue ;;
+      esac
       turn=$((turn + 1))
       printf '%s\\n' '{"type":"system","subtype":"init"}'
       printf '%s\\n' '#{assistant}'
@@ -222,7 +227,8 @@ defmodule SymphonyElixir.ClaudeCodeCoverageTest do
     assert argv =~ "-T worker-9 bash -lc"
     assert argv =~ "cd '"
     assert argv =~ "/srv/ws/MT-1"
-    assert argv =~ "export SYMPHONY_LINEAR_API_KEY="
+    refute argv =~ "export SYMPHONY_LINEAR_API_KEY="
+    assert argv =~ "IFS= read -r SYMPHONY_LINEAR_API_KEY"
     assert argv =~ "exec remote-claude -p"
     assert argv =~ "--model "
     assert argv =~ "--effort "

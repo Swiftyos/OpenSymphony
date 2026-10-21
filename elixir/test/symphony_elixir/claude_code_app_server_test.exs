@@ -346,7 +346,9 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
         workspace_root: "/remote/workspaces",
         claude_command: "fake-remote-claude",
         claude_model: "haiku",
-        claude_permission_mode: "dontAsk"
+        claude_permission_mode: "dontAsk",
+        tracker_api_token: "lin_api_remote_secret_value",
+        providers_openrouter_api_key: "openrouter-remote-secret"
       )
 
       assert {:ok, result} =
@@ -360,12 +362,20 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
       assert result.turn_id == "remote-result-1"
 
       trace = File.read!(trace_file)
+      [argv] = for "ARGV:" <> argv <- String.split(trace, "\n"), do: argv
       assert trace =~ "ARGV:-T -p 2200 worker-01 bash -lc"
       assert trace =~ "cd "
       assert trace =~ "/remote/workspaces/MT-CLAUDE-REMOTE"
-      assert trace =~ "SYMPHONY_LINEAR_API_KEY"
-      assert trace =~ "SYMPHONY_LINEAR_ENDPOINT"
-      assert trace =~ "https://api.linear.app/graphql"
+      assert argv =~ "IFS= read -r SYMPHONY_LINEAR_API_KEY"
+      assert argv =~ "IFS= read -r SYMPHONY_LINEAR_ENDPOINT"
+      assert argv =~ "IFS= read -r OPENROUTER_API_KEY"
+      # Values travel on stdin, never in the ssh command line.
+      refute argv =~ "https://api.linear.app/graphql"
+      refute argv =~ "lin_api_remote_secret_value"
+      refute argv =~ "openrouter-remote-secret"
+      assert trace =~ "STDIN_ENV:https://api.linear.app/graphql"
+      assert trace =~ "STDIN_ENV:lin_api_remote_secret_value"
+      assert trace =~ "STDIN_ENV:openrouter-remote-secret"
       assert trace =~ "exec fake-remote-claude -p --output-format stream-json --input-format stream-json --verbose"
       assert trace =~ ".symphony/claude/mcp.json"
       assert trace =~ "--permission-mode "
@@ -588,6 +598,11 @@ defmodule SymphonyElixir.ClaudeCodeAppServerTest do
       case "$last_arg" in
         *"--input-format stream-json"*)
           while IFS= read -r line; do
+            # Env values arrive on stdin before the protocol (see SSH.start_port/3).
+            case "$line" in
+              "{"*) ;;
+              *) printf 'STDIN_ENV:%s\\n' "$line" >> "#{trace_file}"; continue ;;
+            esac
             printf 'JSON:%s\\n' "$line" >> "#{trace_file}"
             printf '%s\\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"Remote worker"}],"usage":{"input":5,"output":2,"reasoning":1}}}'
             printf '%s\\n' '{"type":"result","subtype":"success","uuid":"remote-result-1","usage":{"input":5,"output":2,"reasoning":1,"total":8}}'

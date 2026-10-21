@@ -1,3 +1,4 @@
+# credo:disable-for-this-file Credo.Check.Readability.StringSigils
 defmodule SymphonyElixir.SSHTest do
   use ExUnit.Case, async: false
 
@@ -103,6 +104,152 @@ defmodule SymphonyElixir.SSHTest do
     System.put_env("PATH", test_root)
 
     assert {:error, :ssh_not_found} = SSH.run("localhost", "printf ok")
+  end
+
+  test "run_with_env/4 sends the environment over stdin, not ssh argv" do
+    test_root = Path.join(System.tmp_dir!(), "symphony-ssh-env-test-#{System.unique_integer([:positive])}")
+    trace_file = Path.join(test_root, "ssh.trace")
+    stdin_file = Path.join(test_root, "ssh.stdin")
+    previous_path = System.get_env("PATH")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      File.rm_rf(test_root)
+    end)
+
+    install_fake_ssh!(test_root, trace_file, """
+    #!/bin/sh
+    printf 'ARGV:%s\\n' "$*" >> "#{trace_file}"
+    head -n 3 > "#{stdin_file}"
+    printf 'remote output\\n'
+    exit 7
+    """)
+
+    token = "ghs_" <> String.duplicate("a", 36)
+
+    assert {:ok, {"remote output\n", 7}} =
+             SSH.run_with_env("localhost", "printf '%s' \"$GH_TOKEN\"", [{"GH_TOKEN", token}], stderr_to_stdout: true)
+
+    assert File.read!(trace_file) =~ "bash -lc"
+    refute File.read!(trace_file) =~ token
+    stdin = File.read!(stdin_file)
+    assert stdin =~ "export GH_TOKEN='#{token}'"
+    assert stdin =~ "printf '%s'"
+  end
+
+  test "run_with_env/4 times out" do
+    test_root = Path.join(System.tmp_dir!(), "symphony-ssh-env-timeout-test-#{System.unique_integer([:positive])}")
+    trace_file = Path.join(test_root, "ssh.trace")
+    previous_path = System.get_env("PATH")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      File.rm_rf(test_root)
+    end)
+
+    install_fake_ssh!(test_root, trace_file, """
+    #!/bin/sh
+    sleep 1
+    exit 0
+    """)
+
+    assert {:error, :ssh_timeout} = SSH.run_with_env("localhost", "true", [], timeout: 10)
+  end
+
+  test "run_with_env/4 returns an error when ssh is unavailable" do
+    test_root = Path.join(System.tmp_dir!(), "symphony-ssh-env-missing-test-#{System.unique_integer([:positive])}")
+    previous_path = System.get_env("PATH")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      File.rm_rf(test_root)
+    end)
+
+    File.mkdir_p!(test_root)
+    System.put_env("PATH", test_root)
+
+    assert {:error, :ssh_not_found} = SSH.run_with_env("localhost", "true", [])
+  end
+
+  test "start_port/3 sends env values escaped on stdin, ahead of anything else" do
+    test_root = Path.join(System.tmp_dir!(), "symphony-ssh-env-port-test-#{System.unique_integer([:positive])}")
+    trace_file = Path.join(test_root, "ssh.trace")
+    stdin_file = Path.join(test_root, "ssh.stdin")
+    previous_path = System.get_env("PATH")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      File.rm_rf(test_root)
+    end)
+
+    install_fake_ssh!(test_root, trace_file, """
+    #!/bin/sh
+    printf 'ARGV:%s\\n' "$*" >> "#{trace_file}"
+    head -n 2 > "#{stdin_file}.tmp" && mv "#{stdin_file}.tmp" "#{stdin_file}"
+    exit 0
+    """)
+
+    assert {:ok, port} = SSH.start_port("localhost", "printf ok", env: [{"GREETING", "line1\nline2\r\\end"}, {:TOKEN, "plain"}])
+    assert is_port(port)
+    wait_for_trace!(stdin_file)
+    assert File.read!(stdin_file) == "line1\\nline2\\r\\\\end\nplain\n"
+
+    trace = File.read!(trace_file)
+    assert trace =~ "IFS= read -r GREETING"
+    assert trace =~ "IFS= read -r TOKEN"
+    refute trace =~ "plain"
+    refute trace =~ "line1"
+  end
+
+  test "start_port/3 env reaches the remote command, and protocol bytes after it reach the agent" do
+    test_root = Path.join(System.tmp_dir!(), "symphony-ssh-env-exec-test-#{System.unique_integer([:positive])}")
+    trace_file = Path.join(test_root, "ssh.trace")
+    out_dir = Path.join(test_root, "out")
+    previous_path = System.get_env("PATH")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      File.rm_rf(test_root)
+    end)
+
+    File.mkdir_p!(out_dir)
+
+    # Runs the remote command the way sshd would, minus the login shell.
+    install_fake_ssh!(test_root, trace_file, """
+    #!/bin/sh
+    printf 'ARGV:%s\\n' "$*" >> "#{trace_file}"
+    for arg in "$@"; do last_arg="$arg"; done
+    eval "$(printf '%s' "$last_arg" | sed 's/^bash -lc /bash -c /')"
+    """)
+
+    token = "ghs_" <> String.duplicate("t", 36)
+    tricky = "multi\nline 'quoted' \\n \\\\ $HOME `x` \r\\c \\0101 end"
+    header = "Authorization: Basic " <> Base.encode64("x-access-token:" <> token)
+
+    agent =
+      "printf '%s' \"$GH_TOKEN\" > #{out_dir}/token && printf '%s' \"$TRICKY\" > #{out_dir}/tricky && " <>
+        "printf '%s' \"$GIT_CONFIG_VALUE_0\" > #{out_dir}/header && IFS= read -r line && printf '%s' \"$line\" > #{out_dir}/protocol"
+
+    assert {:ok, port} =
+             SSH.start_port("localhost", agent, env: [{"GH_TOKEN", token}, {"TRICKY", tricky}, {"GIT_CONFIG_VALUE_0", header}])
+
+    true = Port.command(port, ~s({"jsonrpc":"2.0","id":1}\n))
+    assert_receive {^port, {:exit_status, 0}}, 10_000
+
+    assert File.read!(Path.join(out_dir, "token")) == token
+    assert File.read!(Path.join(out_dir, "tricky")) == tricky
+    assert File.read!(Path.join(out_dir, "header")) == header
+    assert File.read!(Path.join(out_dir, "protocol")) == ~s({"jsonrpc":"2.0","id":1})
+
+    argv = File.read!(trace_file)
+    refute argv =~ token
+    refute argv =~ Base.encode64("x-access-token:" <> token)
+    refute argv =~ "multi"
+  end
+
+  test "start_port/3 rejects invalid remote environment names and values" do
+    assert {:error, {:invalid_remote_env, ["bad-name", "NUL"]}} =
+             SSH.start_port("localhost", "printf ok", env: [{"bad-name", "x"}, {"NUL", <<0>>}, {"OK", "fine"}])
   end
 
   test "start_port/3 supports binary output without line mode" do

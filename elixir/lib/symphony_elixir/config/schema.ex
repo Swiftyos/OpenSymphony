@@ -319,6 +319,61 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule GitHubApp do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    alias SymphonyElixir.Config.Schema
+
+    @type t :: %__MODULE__{}
+
+    @primary_key false
+    @default_permissions %{
+      "contents" => "write",
+      "pull_requests" => "write",
+      "metadata" => "read"
+    }
+
+    embedded_schema do
+      field(:app_id, :integer)
+      field(:private_key, :string)
+      # Optional: without it, the installation is discovered per repository.
+      field(:installation_id, :integer)
+      field(:base_url, :string, default: "https://api.github.com")
+      field(:permissions, :map, default: @default_permissions)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:app_id, :private_key, :installation_id, :base_url, :permissions], empty_values: [])
+      |> update_change(:base_url, &Schema.normalize_optional_string/1)
+      |> validate_change(:permissions, fn :permissions, permissions ->
+        case SymphonyElixir.GitHubApp.validate_permissions(permissions) do
+          {:ok, _permissions} -> []
+          {:error, reason} -> [permissions: permissions_error(reason)]
+        end
+      end)
+      |> then(fn changeset ->
+        if get_field(changeset, :app_id) || get_field(changeset, :private_key) do
+          validate_required(changeset, [:app_id, :private_key])
+        else
+          changeset
+        end
+      end)
+    end
+
+    defp permissions_error({:forbidden_permissions, keys}) do
+      allowed = Enum.join(SymphonyElixir.GitHubApp.allowed_permissions(), ", ")
+      "must not include #{Enum.join(keys, ", ")} (allowed: #{allowed})"
+    end
+
+    defp permissions_error({:invalid_permissions, :empty}), do: "must not be empty (GitHub grants every permission for an empty map)"
+    # The field is cast as :map, so validate_permissions/1 never sees a non-map here.
+    defp permissions_error({:invalid_permissions, keys}), do: "must use read or write for #{Enum.join(keys, ", ")}"
+  end
+
   defmodule Providers do
     @moduledoc false
     use Ecto.Schema
@@ -1100,6 +1155,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:worker, Worker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:providers, Providers, on_replace: :update, defaults_to_struct: true)
     embeds_one(:sandbox, Sandbox, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:github_app, GitHubApp, on_replace: :update, defaults_to_struct: true)
     embeds_one(:accounts, Accounts, on_replace: :update, defaults_to_struct: true)
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
@@ -1230,6 +1286,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:worker, with: &Worker.changeset/2)
     |> cast_embed(:providers, with: &Providers.changeset/2)
     |> cast_embed(:sandbox, with: &Sandbox.changeset/2)
+    |> cast_embed(:github_app, with: &GitHubApp.changeset/2)
     |> cast_embed(:accounts, with: &Accounts.changeset/2)
     |> cast_embed(:agent, with: &Agent.changeset/2)
     |> cast_embed(:codex, with: &Codex.changeset/2)
@@ -1417,6 +1474,16 @@ defmodule SymphonyElixir.Config.Schema do
         file_name: normalize_optional_string(settings.log.file_name) || "symphony.log"
     }
 
+    github_app = %{
+      settings.github_app
+      | private_key:
+          resolve_secret_setting(
+            settings.github_app.private_key,
+            System.get_env("GITHUB_APP_PRIVATE_KEY")
+          ),
+        base_url: resolve_optional_setting(settings.github_app.base_url) || "https://api.github.com"
+    }
+
     %{
       settings
       | tracker: tracker,
@@ -1431,7 +1498,8 @@ defmodule SymphonyElixir.Config.Schema do
         observability: observability,
         log: log,
         environments: normalize_environments(settings.environments),
-        teams: normalize_teams(settings.teams)
+        teams: normalize_teams(settings.teams),
+        github_app: github_app
     }
   end
 

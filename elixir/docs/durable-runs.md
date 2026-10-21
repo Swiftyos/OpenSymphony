@@ -248,6 +248,37 @@ Kubernetes they move behind a tool gateway.
    - **Dispatch wiring.** `RunLauncher.Kubernetes` is self-contained against the current
      behaviour; selecting it for dispatch is left until both branches merge.
 
+## GitHub App token hardening
+
+With `github_app` configured, a runner gets a short-lived installation token
+limited to its issue's repository. The controller writes only the run's normal
+spec; the token is not persisted in `spec.json`, logs, or transcripts.
+
+- The token is delivered in the agent's process environment (`GH_TOKEN`, plus
+  a `GIT_CONFIG_*` `http.<host>.extraHeader`). It is never put in argv,
+  `.git/config`, or workspace scripts, and token-shaped strings (`ghs_`,
+  `ghp_`, `github_pat_`, JWTs, PEM private keys, `Basic`/`Bearer`
+  authorization values) are redacted from logger output and transcripts.
+- On an ssh worker host the agent's environment (the token, the Linear API key,
+  account credentials) is not in the ssh command line: the remote shell reads
+  one escaped line per variable from ssh stdin (`IFS= read -r NAME`), exports
+  it, and then `exec`s the agent, which reads its protocol from the rest of
+  stdin. Repo cache syncs on worker hosts send their script and env over ssh
+  stdin too.
+- Agents get a token with at least 50 minutes left (a cached token closer to
+  expiry is replaced); workspace syncs accept one with five minutes left.
+- `SymphonyElixir.GitHubApp.token_for_run/2` resolves a fresh token from a run
+  spec. **TODO:** expose it as a `/runner/v1/runs/:run_id/github-token`
+  endpoint, authenticated like the other runner endpoints, so a run that
+  outlives its token can refresh the environment for later turns. Until then a
+  run that outlives its token fails its authenticated git/`gh` operations and
+  is retried; the retry mints a fresh token.
+- Permissions are an allowlist (`contents`, `pull_requests`, `metadata`,
+  `issues`, `checks`, `statuses`; `read` or `write`), checked at config load
+  and again for every token request, so a compromised run cannot change CI
+  definitions, secrets, or the app installation. An empty map is refused
+  because GitHub would grant every installation permission.
+
 ## Controller responsiveness
 
 The orchestrator does no tracker (Linear) I/O in its own callbacks. Polls,

@@ -596,6 +596,11 @@ defmodule SymphonyElixir.CodexAppServerTest do
       printf 'ARGV:%s\\n' "$*" >> "$trace_file"
 
       while IFS= read -r line; do
+        # Env values arrive on stdin before the protocol (see SSH.start_port/3).
+        case "$line" in
+          "{"*) ;;
+          *) printf 'STDIN_ENV:%s\\n' "$line" >> "$trace_file"; continue ;;
+        esac
         count=$((count + 1))
         printf 'JSON:%s\\n' "$line" >> "$trace_file"
 
@@ -648,8 +653,10 @@ defmodule SymphonyElixir.CodexAppServerTest do
       assert argv_line =~ remote_workspace
       assert argv_line =~ "exec "
       assert argv_line =~ "fake-remote-codex app-server"
-      assert argv_line =~ "OPENROUTER_API_KEY"
-      assert argv_line =~ "openrouter-remote-token"
+      assert argv_line =~ "IFS= read -r OPENROUTER_API_KEY"
+      # The value travels on stdin, never in the ssh command line.
+      refute argv_line =~ "openrouter-remote-token"
+      assert "STDIN_ENV:openrouter-remote-token" in lines
 
       expected_turn_policy = %{
         "type" => "workspaceWrite",

@@ -21,6 +21,7 @@ defmodule SymphonyElixir.Application do
 
   @impl true
   def start(_type, _args) do
+    :ok = SymphonyElixir.Redaction.configure()
     :ok = SymphonyElixir.LogFile.configure()
 
     config_store =
@@ -63,6 +64,7 @@ defmodule SymphonyElixir.Application do
       SymphonyElixir.Auth,
       SymphonyElixir.McpTokens,
       SymphonyElixir.ProjectRoutes,
+      SymphonyElixir.GitHubApp.Cache,
       # Creates any missing Linear labels the flows need, once, in the background.
       SymphonyElixir.LabelSync,
       # Serializes repo cache syncs; the refresher below uses the same lock.
@@ -117,6 +119,7 @@ defmodule SymphonyElixir.Application do
       SymphonyElixir.Factory.Store,
       # The runner creates its workspace from the repo cache, under the cache lock.
       SymphonyElixir.RepoCacheLock,
+      SymphonyElixir.GitHubApp.Cache,
       SymphonyElixir.RunOutbox,
       {Registry, keys: :unique, name: SymphonyElixir.RunnerCommandPoller.registry()}
     ]

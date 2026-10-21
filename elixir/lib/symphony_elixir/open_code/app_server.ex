@@ -5,7 +5,7 @@ defmodule SymphonyElixir.OpenCode.AppServer do
 
   require Logger
 
-  alias SymphonyElixir.{Config, OsProcess, PathSafety, Telemetry}
+  alias SymphonyElixir.{Config, GitHubApp, OsProcess, PathSafety, Telemetry}
 
   @allowed_unattended_permissions MapSet.new([
                                     "read",
@@ -240,6 +240,7 @@ defmodule SymphonyElixir.OpenCode.AppServer do
     |> maybe_put_env("SYMPHONY_LINEAR_ENDPOINT", tracker.kind == "linear" && tracker.endpoint)
     |> maybe_put_env("OPENROUTER_API_KEY", settings.providers.openrouter_api_key)
     |> Kernel.++(Telemetry.env_pairs("opencode", issue))
+    |> Kernel.++(GitHubApp.env_pairs(issue, settings: settings, base_env: System.get_env()))
     |> Enum.map(fn {key, value} ->
       {String.to_charlist(key), String.to_charlist(to_string(value))}
     end)

@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   """
 
   require Logger
-  alias SymphonyElixir.{Accounts, Config, OsProcess, RunHost, Sandbox, SSH, Telemetry}
+  alias SymphonyElixir.{Accounts, Config, GitHubApp, OsProcess, RunHost, Sandbox, SSH, Telemetry}
   alias SymphonyElixir.Codex.{DynamicTool, TraceLog}
 
   @initialize_id 1
@@ -241,36 +241,28 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp start_port(workspace, worker_host, command, issue, account, _run_settings) when is_binary(worker_host) do
-    remote_command = remote_launch_command(workspace, command, issue, account)
-    SSH.start_port(worker_host, remote_command, line: @port_line_bytes)
+    remote_command = remote_launch_command(workspace, command)
+    # Secrets (Linear key, account credentials, GitHub App token) go on stdin, not argv.
+    SSH.start_port(worker_host, remote_command, line: @port_line_bytes, env: env_pairs(issue, account))
   end
 
   defp maybe_put_cd(port_opts, nil), do: port_opts
   defp maybe_put_cd(port_opts, cd), do: Keyword.put(port_opts, :cd, String.to_charlist(cd))
 
-  defp remote_launch_command(workspace, command, issue, account) when is_binary(workspace) do
-    [
-      "cd #{shell_escape(workspace)}",
-      remote_environment_exports(issue, account),
-      "exec #{command}"
-    ]
-    |> Enum.reject(&(&1 in [nil, ""]))
-    |> Enum.join(" && ")
+  defp remote_launch_command(workspace, command) when is_binary(workspace) do
+    "cd #{shell_escape(workspace)} && exec #{command}"
   end
 
-  defp remote_environment_exports(issue, account) do
-    env_pairs(issue, account)
-    |> Enum.map_join(" && ", fn {key, value} -> "export #{key}=#{shell_escape(to_string(value))}" end)
-  end
-
+  # Local agents inherit this node's environment, so an existing GIT_CONFIG_COUNT
+  # there is extended rather than replaced.
   defp port_environment(issue, account) do
-    env_pairs(issue, account)
+    env_pairs(issue, account, System.get_env())
     |> Enum.map(fn {key, value} ->
       {String.to_charlist(key), String.to_charlist(to_string(value))}
     end)
   end
 
-  defp env_pairs(issue, account) do
+  defp env_pairs(issue, account, base_env \\ %{}) do
     settings = Config.settings!()
     tracker = settings.tracker
 
@@ -280,6 +272,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     |> maybe_put_env("OPENROUTER_API_KEY", settings.providers.openrouter_api_key)
     |> Kernel.++(Accounts.credential_env(account))
     |> Kernel.++(Telemetry.env_pairs("codex", issue, account))
+    |> Kernel.++(GitHubApp.env_pairs(issue, settings: settings, base_env: base_env))
   end
 
   defp maybe_put_env(entries, _key, nil), do: entries

@@ -5,7 +5,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
 
   require Logger
 
-  alias SymphonyElixir.{Accounts, Config, OsProcess, Sandbox, SSH, Telemetry}
+  alias SymphonyElixir.{Accounts, Config, GitHubApp, OsProcess, Sandbox, SSH, Telemetry}
   alias SymphonyElixir.ClaudeCode.Tooling
 
   @poll_interval_ms 250
@@ -195,8 +195,10 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
   end
 
   defp start_port(workspace, worker_host, session_id, settings, issue, account, _opts) when is_binary(worker_host) do
-    command = remote_launch_command(workspace, session_id, settings, issue, account)
-    SSH.start_port(worker_host, command, line: @port_line_bytes)
+    command = remote_launch_command(workspace, session_id, settings)
+    env = tracker_env_pairs(Config.settings!().tracker, issue, account)
+    # Secrets (Linear key, account credentials, GitHub App token) go on stdin, not argv.
+    SSH.start_port(worker_host, command, line: @port_line_bytes, env: env)
   end
 
   defp maybe_put_cd(port_opts, nil), do: port_opts
@@ -236,31 +238,21 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
 
   defp maybe_append_effort(parts, _effort), do: parts
 
-  defp remote_launch_command(workspace, session_id, settings, issue, account) when is_binary(workspace) do
-    [
-      "cd #{shell_escape(workspace)}",
-      remote_environment_exports(issue, account),
-      "exec #{launch_command(session_id, settings)}"
-    ]
-    |> Enum.reject(&(&1 in [nil, ""]))
-    |> Enum.join(" && ")
+  defp remote_launch_command(workspace, session_id, settings) when is_binary(workspace) do
+    "cd #{shell_escape(workspace)} && exec #{launch_command(session_id, settings)}"
   end
 
-  defp remote_environment_exports(issue, account) do
-    Config.settings!().tracker
-    |> tracker_env_pairs(issue, account)
-    |> Enum.map_join(" && ", fn {key, value} -> "export #{key}=#{shell_escape(value)}" end)
-  end
-
+  # Local agents inherit this node's environment, so an existing GIT_CONFIG_COUNT
+  # there is extended rather than replaced.
   defp port_environment(issue, account) do
     Config.settings!().tracker
-    |> tracker_env_pairs(issue, account)
+    |> tracker_env_pairs(issue, account, System.get_env())
     |> Enum.map(fn {key, value} ->
       {String.to_charlist(key), String.to_charlist(value)}
     end)
   end
 
-  defp tracker_env_pairs(tracker, issue, account) do
+  defp tracker_env_pairs(tracker, issue, account, base_env \\ %{}) do
     settings = Config.settings!()
 
     []
@@ -269,6 +261,7 @@ defmodule SymphonyElixir.ClaudeCode.AppServer do
     |> maybe_put_env("OPENROUTER_API_KEY", settings.providers.openrouter_api_key)
     |> Kernel.++(Accounts.credential_env(account))
     |> Kernel.++(Telemetry.env_pairs("claude", issue, account))
+    |> Kernel.++(GitHubApp.env_pairs(issue, settings: settings, base_env: base_env))
   end
 
   defp maybe_put_env(entries, _key, nil), do: entries

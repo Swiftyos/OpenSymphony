@@ -5,7 +5,7 @@ defmodule SymphonyElixir.Workspace do
 
   require Logger
   alias SymphonyElixir.Capacity.Metrics
-  alias SymphonyElixir.{Config, IssueConfig, PathSafety, ProjectWorkflow, RepoCacheLock, Sandbox, SSH}
+  alias SymphonyElixir.{Config, GitHubApp, IssueConfig, PathSafety, ProjectWorkflow, RepoCacheLock, Sandbox, SSH}
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixirWeb.PrometheusMetrics
 
@@ -712,11 +712,15 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp run_remote_command(worker_host, script, timeout_ms)
+  defp run_remote_command(worker_host, script, timeout_ms, env \\ [])
        when is_binary(worker_host) and is_binary(script) and is_integer(timeout_ms) and timeout_ms > 0 do
     task =
       Task.async(fn ->
-        SSH.run(worker_host, script, stderr_to_stdout: true)
+        if env == [] do
+          SSH.run(worker_host, script, stderr_to_stdout: true)
+        else
+          SSH.run_with_env(worker_host, script, env, timeout: timeout_ms)
+        end
       end)
 
     case Task.yield(task, timeout_ms) do
@@ -891,16 +895,19 @@ defmodule SymphonyElixir.Workspace do
     [
       max_age_ms: max_age_ms,
       issue_branch: Keyword.get(opts, :issue_branch),
-      metric_reason: Keyword.get(opts, :metric_reason)
+      metric_reason: Keyword.get(opts, :metric_reason),
+      settings: settings
     ]
   end
 
   defp sync_local_repo_cache(workspace_root, repo_source, target_branch, issue_context, cache_repo, timeout_ms, sync_opts) do
     Logger.info("Preparing workspace repo cache #{issue_log_context(issue_context)} workspace_root=#{workspace_root} repo=#{repo_source.display} cache_repo=#{cache_repo} worker_host=local")
 
+    {github_env, github_host} = github_app_env(repo_source, sync_opts, System.get_env())
+    sync_opts = Keyword.put(sync_opts, :github_auth, github_host)
     sync_script = build_repo_cache_sync_script(cache_repo, repo_source, target_branch, sync_opts)
 
-    case instrument_git_operation("cache_clone_or_fetch", fn -> run_local_script(sync_script, timeout_ms) end) do
+    case instrument_git_operation("cache_clone_or_fetch", fn -> run_local_script(sync_script, timeout_ms, github_env) end) do
       {:ok, {output, 0}} ->
         record_repo_cache_outcome(repo_source, output, issue_context, sync_opts)
         :ok
@@ -933,9 +940,12 @@ defmodule SymphonyElixir.Workspace do
        ) do
     Logger.info("Preparing workspace repo cache #{issue_log_context(issue_context)} workspace_root=#{workspace_root} repo=#{repo_source.display} cache_repo=#{cache_repo} worker_host=#{worker_host}")
 
+    # The remote host's own environment is unknown here, so no GIT_CONFIG_COUNT merge.
+    {github_env, github_host} = github_app_env(repo_source, sync_opts, %{})
+    sync_opts = Keyword.put(sync_opts, :github_auth, github_host)
     sync_script = build_remote_repo_cache_sync_script(cache_repo, repo_source, target_branch, sync_opts)
 
-    case instrument_git_operation("cache_clone_or_fetch", fn -> run_remote_command(worker_host, sync_script, timeout_ms) end) do
+    case instrument_git_operation("cache_clone_or_fetch", fn -> run_remote_command(worker_host, sync_script, timeout_ms, github_env) end) do
       {:ok, {output, 0}} ->
         record_repo_cache_outcome(repo_source, output, issue_context, sync_opts)
         :ok
@@ -1187,8 +1197,9 @@ defmodule SymphonyElixir.Workspace do
   defp build_repo_cache_sync_script(cache_repo, repo_source, target_branch, opts, assign) do
     max_age_ms = Keyword.get(opts, :max_age_ms, 60_000)
     issue_branch = Keyword.get(opts, :issue_branch) || ""
-    clone_setup_lines = repo_cache_clone_setup_lines(repo_source)
-    clone_command = repo_cache_clone_command(repo_source)
+    github_host = Keyword.get(opts, :github_auth, false)
+    clone_setup_lines = repo_cache_clone_setup_lines(repo_source, github_host, assign)
+    clone_command = repo_cache_clone_command(repo_source, github_host != false)
 
     preamble_lines =
       repo_cache_preamble_lines(
@@ -1289,30 +1300,69 @@ defmodule SymphonyElixir.Workspace do
     |> Enum.join("\n")
   end
 
-  defp repo_cache_clone_setup_lines(%{kind: :github_slug} = repo_source) do
-    [
-      "if ! command -v gh >/dev/null 2>&1; then",
-      "  echo \"GitHub CLI (gh) is required to prepare #{repo_source.display}\" >&2",
-      "  exit 44",
-      "fi",
-      "if ! gh auth status >/dev/null 2>&1; then",
-      "  echo \"GitHub CLI is not authenticated for #{repo_source.display}\" >&2",
-      "  exit 45",
-      "fi",
-      "protocol=\"$(gh config get git_protocol -h github.com 2>/dev/null || true)\"",
-      "if [ -z \"$protocol\" ]; then",
-      "  protocol=ssh",
-      "fi",
-      "if [ \"$protocol\" = \"https\" ]; then",
-      "  remote_url=\"https://github.com/$repo_slug.git\"",
-      "else",
-      "  remote_url=\"git@github.com:$repo_slug.git\"",
-      "fi",
-      "repo_cache_remote_url=\"$remote_url\""
-    ]
+  # `github_host` is the git web host of the configured GitHub App (a GHE host,
+  # say), or false without a GitHub App token, when `gh` decides the protocol
+  # and the remote is github.com.
+  defp repo_cache_clone_setup_lines(%{kind: :github_slug} = repo_source, github_host, assign) do
+    auth_lines =
+      if github_host do
+        ["protocol=https", assign.("github_host", github_host)]
+      else
+        [
+          "github_host=github.com",
+          "if ! command -v gh >/dev/null 2>&1; then",
+          "  echo \"GitHub CLI (gh) is required to prepare #{repo_source.display}\" >&2",
+          "  exit 44",
+          "fi",
+          "if ! gh auth status >/dev/null 2>&1; then",
+          "  echo \"GitHub CLI is not authenticated for #{repo_source.display}\" >&2",
+          "  exit 45",
+          "fi",
+          "protocol=\"$(gh config get git_protocol -h github.com 2>/dev/null || true)\"",
+          "if [ -z \"$protocol\" ]; then",
+          "  protocol=ssh",
+          "fi"
+        ]
+      end
+
+    auth_lines ++
+      [
+        "if [ \"$protocol\" = \"https\" ]; then",
+        "  remote_url=\"https://$github_host/$repo_slug.git\"",
+        "else",
+        "  remote_url=\"git@github.com:$repo_slug.git\"",
+        "fi",
+        "repo_cache_remote_url=\"$remote_url\""
+      ]
   end
 
-  defp repo_cache_clone_setup_lines(_repo_source), do: ["repo_cache_remote_url=\"$clone_url\""]
+  defp repo_cache_clone_setup_lines(_repo_source, _github_host, _assign), do: ["repo_cache_remote_url=\"$clone_url\""]
+
+  # Returns the env for the sync script and the git host its remote must use
+  # (false without a GitHub App token). The extraHeader and the remote URL are
+  # built from the same host, so a GHE token is never sent to github.com.
+  defp github_app_env(repo_source, opts, base_env) do
+    settings = Keyword.fetch!(opts, :settings)
+
+    cond do
+      not GitHubApp.configured?(settings) ->
+        {[], false}
+
+      repo_source.kind != :github_slug ->
+        {[], false}
+
+      true ->
+        case GitHubApp.installation_token(repo_source, settings: settings) do
+          {:ok, %{token: token}} ->
+            host = GitHubApp.git_host(settings.github_app)
+            {GitHubApp.git_env(token, host: host, base_env: base_env), host}
+
+          {:error, reason} ->
+            Logger.warning("GitHub App token unavailable repo=#{repo_source.display} reason=#{inspect(reason, limit: 5)}")
+            {[], false}
+        end
+    end
+  end
 
   defp repo_cache_preamble_lines(repo_source, cache_repo, target_branch, issue_branch, max_age_ms, assign) do
     common = [
@@ -1335,8 +1385,11 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp repo_cache_clone_command(%{kind: :github_slug}), do: "gh repo clone \"$repo_slug\" \"$cache_repo\""
-  defp repo_cache_clone_command(_repo_source), do: "git clone \"$clone_url\" \"$cache_repo\""
+  # With a GitHub App token, git authenticates from the environment (GitHubApp.git_env/2),
+  # so the clone needs neither `gh` nor its configured protocol.
+  defp repo_cache_clone_command(%{kind: :github_slug}, true), do: "git clone \"$repo_cache_remote_url\" \"$cache_repo\""
+  defp repo_cache_clone_command(%{kind: :github_slug}, false), do: "gh repo clone \"$repo_slug\" \"$cache_repo\""
+  defp repo_cache_clone_command(_repo_source, _github_auth?), do: "git clone \"$clone_url\" \"$cache_repo\""
 
   defp build_remote_workflow_validation_script(workflow_path) do
     [
@@ -1500,10 +1553,11 @@ defmodule SymphonyElixir.Workspace do
   defp git_operation_outcome({:ok, {_output, 0}}), do: "ok"
   defp git_operation_outcome(_result), do: "error"
 
-  defp run_local_script(script, timeout_ms) when is_binary(script) and is_integer(timeout_ms) and timeout_ms > 0 do
+  defp run_local_script(script, timeout_ms, env \\ []) when is_binary(script) and is_integer(timeout_ms) and timeout_ms > 0 do
     task =
       Task.async(fn ->
-        System.cmd("sh", ["-lc", script], stderr_to_stdout: true)
+        opts = [stderr_to_stdout: true] ++ if(env == [], do: [], else: [env: env])
+        System.cmd("sh", ["-lc", script], opts)
       end)
 
     case Task.yield(task, timeout_ms) do

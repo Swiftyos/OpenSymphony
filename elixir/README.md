@@ -520,6 +520,55 @@ Default terminal states recognized by Symphony are:
 - `Duplicate`
 - `Done`
 
+## GitHub App tokens
+
+By default every run uses the host's `gh` login or a shared `GH_TOKEN`. For
+unattended fleets, opt in to per-run GitHub App installation tokens instead:
+
+1. Create a GitHub App with **Contents: write**, **Pull requests: write**, and
+   **Metadata: read**. Symphony only ever requests `contents`, `pull_requests`,
+   `metadata`, `issues`, `checks`, and `statuses` (each `read` or `write`);
+   any other permission, or an empty map (which GitHub treats as "everything
+   the installation has"), is refused in config.
+2. Install the app on the repositories your projects use.
+3. Add the app to `symphony.yml` (or a legacy `WORKFLOW.md` front matter):
+
+```yaml
+github_app:
+  app_id: 123456
+  private_key: $GITHUB_APP_PRIVATE_KEY # PEM contents (literal \n line breaks are fine), not a file path
+  # installation_id: 987654            # optional: discovered per repository
+  # base_url: https://github.example.com/api/v3  # GitHub Enterprise
+  # permissions:                       # default shown; allowlist above
+  #   contents: write
+  #   pull_requests: write
+  #   metadata: read
+```
+
+When configured, Symphony signs a short-lived app JWT, discovers the
+installation for the issue's repository if needed, and mints an installation
+token scoped to that one repository. The token is cached per repository:
+workspace syncs reuse it until five minutes before expiry, while agents always
+start with a token that has at least 50 minutes left. Workspace cache sync
+(local, or over ssh stdin on a worker host) and agent `git`/`gh` commands use it
+through the environment only: `GH_TOKEN` for `gh`, and an
+`http.https://<host>/.extraHeader` (the GitHub Enterprise host when `base_url`
+points at one) passed as `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`
+for git (needs git 2.31+), appended after any `GIT_CONFIG_*` entries a local
+process already inherits. It is never written to `.git/config`, a remote URL, or
+any process's arguments: agents on ssh worker hosts read their secret
+environment from ssh stdin before the agent starts. With a token, the repo cache clones with plain `git clone`
+over https, so the host needs no `gh` login. If minting fails, Symphony logs the
+reason and falls back to the host's `gh` login as before.
+
+Runs that outlive a token can get a fresh one from
+`SymphonyElixir.GitHubApp.token_for_run/2`; the runner-side refresh endpoint is
+still a documented hook in `docs/durable-runs.md`.
+
+Without `github_app`, behaviour is unchanged. Token-shaped strings are redacted
+(including `Authorization: Basic`/`Bearer` values) from logs, structured log
+reports and metadata, and transcripts either way.
+
 ## Workspace isolation
 
 Each issue gets its own standalone git clone, made from a shared per-repo cache

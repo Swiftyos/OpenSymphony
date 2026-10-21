@@ -37,6 +37,8 @@ defmodule SymphonyElixir.Transcript do
   use GenServer
   require Logger
 
+  alias SymphonyElixir.Redaction
+
   @table :symphony_transcripts
   @max_entries 400
   @max_text 8_000
@@ -284,7 +286,14 @@ defmodule SymphonyElixir.Transcript do
 
   defp finalize(entry) do
     text = entry_text(entry) || ""
-    %{entry | text: String.slice(String.trim(text), 0, @max_text)}
+
+    %{
+      entry
+      | text: text |> Redaction.redact() |> String.trim() |> String.slice(0, @max_text),
+        title: Redaction.redact(entry.title),
+        body: Redaction.redact(entry.body),
+        command: Redaction.redact(entry.command)
+    }
   end
 
   defp entry_text(%{kind: "command"} = entry) do

@@ -15,6 +15,18 @@ defmodule SymphonyElixir.TranscriptTest do
   defp part(part),
     do: %{event: "message.part.updated", payload: %{"payload" => %{"type" => "message.part.updated", "properties" => %{"part" => part}}}}
 
+  test "token-shaped strings never reach transcript entries" do
+    token = "ghs_" <> String.duplicate("f", 36)
+
+    Transcript.record("PAY-9", codex(%{"type" => "commandExecution", "command" => "echo #{token}", "exitCode" => 0, "aggregatedOutput" => "#{token}\n"}))
+    Transcript.record("PAY-9", codex(%{"type" => "agentMessage", "text" => "GH_TOKEN=#{token}"}))
+
+    entries = Transcript.entries("PAY-9")
+    assert length(entries) == 2
+    refute inspect(entries) =~ token
+    assert Enum.all?(entries, &(&1.text =~ "[REDACTED]"))
+  end
+
   test "Codex items become readable entries; streaming noise is skipped" do
     Transcript.record("PAY-1", codex(%{"type" => "agentMessage", "text" => "Reading the spec."}))
     Transcript.record("PAY-1", codex(%{"type" => "commandExecution", "command" => "go test ./...", "exitCode" => 1, "aggregatedOutput" => "FAIL x\n"}))
