@@ -261,7 +261,8 @@ Notes:
 - `workspace.repo_cache.max_age_ms` is how old the last successful fetch may get before a
   workspace start fetches the project repo again. Default: `60000`. `0` fetches on every start.
 - `workspace.repo_cache.refresh_interval_ms` is how often the background repo cache refresher
-  warms each project repo on the local host. Default: `60000`. `0` turns the refresher off.
+  warms each project repo on the local host. Default: `30000` (half the default `max_age_ms`, so
+  agent starts usually reuse a fresh cache). `0` turns the refresher off.
 - For path values, `~` is expanded to the home directory.
 - For env-backed path values, use `$VAR`. `workspace.root` resolves `$VAR` before path handling,
   while `opencode.command` stays a shell command string and any `$VAR` expansion there happens in the
@@ -472,15 +473,20 @@ A clone counts as the first fetch; a failed fetch leaves the marker alone so the
 next start retries.
 
 `SymphonyElixir.RepoCacheRefresher` syncs every configured project repo on the
-local host every `workspace.repo_cache.refresh_interval_ms` (default `60000`; `0`
-turns it off), one repo at a time and under the same per-cache lock as the
-workspace flow. Concurrent agent starts for one repo therefore coalesce into at
-most one remote fetch, and GitHub traffic stays around one fetch per repo per
-minute regardless of how many agents start. When a fresh cache is reused,
-Symphony still fetches the issue's `symphony/<ISSUE>` branch if it exists
-remotely, so a branch pushed by a previous run in another workspace is resumed.
-A future Kubernetes runner will have runner pods clone from a controller-served
-mirror instead of the local cache clone.
+local host every `workspace.repo_cache.refresh_interval_ms` (default `30000`,
+half the default freshness window; `0` turns it off), one repo at a time and
+under the same per-cache lock as the workspace flow. The schedule is fixed-rate:
+the interval is measured from the start of the previous pass, so an overrunning
+pass starts the next one immediately afterwards and passes never overlap.
+Concurrent agent starts for one repo therefore coalesce into at most one remote
+fetch, and GitHub traffic stays around one fetch per repo per interval regardless
+of how many agents start. When a fresh cache is reused, Symphony still fetches
+the issue's `symphony/<ISSUE>` branch with a single remote round trip (and
+removes the stale local ref if the branch no longer exists), so a branch pushed
+by a previous run in another workspace is resumed. Caches on remote SSH workers
+are not refreshed in the background: their first start after the freshness
+window does a full fetch. A future Kubernetes runner will have runner pods clone
+from a controller-served mirror instead of the local cache clone.
 
 ### Scheduling
 

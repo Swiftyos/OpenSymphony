@@ -1092,59 +1092,18 @@ defmodule SymphonyElixir.Workspace do
   defp build_repo_cache_sync_script(cache_repo, repo_source, target_branch, opts, assign) do
     max_age_ms = Keyword.get(opts, :max_age_ms, 60_000)
     issue_branch = Keyword.get(opts, :issue_branch) || ""
+    clone_setup_lines = repo_cache_clone_setup_lines(repo_source)
+    clone_command = repo_cache_clone_command(repo_source)
 
     preamble_lines =
-      case repo_source.kind do
-        :github_slug ->
-          [
-            "set -eu",
-            "export GH_PROMPT_DISABLED=1",
-            "export GIT_TERMINAL_PROMPT=0",
-            assign.("cache_repo", cache_repo),
-            assign.("repo_slug", repo_source.raw),
-            assign.("target_branch", target_branch || ""),
-            assign.("issue_branch", issue_branch),
-            assign.("max_age_ms", Integer.to_string(max_age_ms)),
-            "mkdir -p \"$(dirname \"$cache_repo\")\"",
-            "if ! command -v gh >/dev/null 2>&1; then",
-            "  echo \"GitHub CLI (gh) is required to prepare #{repo_source.display}\" >&2",
-            "  exit 44",
-            "fi",
-            "if ! gh auth status >/dev/null 2>&1; then",
-            "  echo \"GitHub CLI is not authenticated for #{repo_source.display}\" >&2",
-            "  exit 45",
-            "fi",
-            "protocol=\"$(gh config get git_protocol -h github.com 2>/dev/null || true)\"",
-            "if [ -z \"$protocol\" ]; then",
-            "  protocol=ssh",
-            "fi",
-            "if [ \"$protocol\" = \"https\" ]; then",
-            "  remote_url=\"https://github.com/$repo_slug.git\"",
-            "else",
-            "  remote_url=\"git@github.com:$repo_slug.git\"",
-            "fi",
-            "repo_cache_remote_url=\"$remote_url\""
-          ]
-
-        _ ->
-          [
-            "set -eu",
-            "export GIT_TERMINAL_PROMPT=0",
-            assign.("cache_repo", cache_repo),
-            assign.("clone_url", repo_source.clone_url),
-            assign.("target_branch", target_branch || ""),
-            assign.("issue_branch", issue_branch),
-            assign.("max_age_ms", Integer.to_string(max_age_ms)),
-            "mkdir -p \"$(dirname \"$cache_repo\")\"",
-            "repo_cache_remote_url=\"$clone_url\""
-          ]
-      end
-
-    clone_lines =
-      case repo_source.kind do
-        :github_slug -> ["  gh repo clone \"$repo_slug\" \"$cache_repo\""]
-        _ -> ["  git clone \"$clone_url\" \"$cache_repo\""]
-      end
+      repo_cache_preamble_lines(
+        repo_source,
+        cache_repo,
+        target_branch,
+        issue_branch,
+        max_age_ms,
+        assign
+      )
 
     freshness_lines =
       [
@@ -1155,11 +1114,11 @@ defmodule SymphonyElixir.Workspace do
         "if ! git -C \"$cache_repo\" rev-parse --is-inside-work-tree >/dev/null 2>&1; then",
         "  rm -rf \"$cache_repo\""
       ] ++
-        clone_lines ++
+        clone_setup_lines ++
         [
+          "  #{clone_command}",
           "  first_clone=1",
           "fi",
-          "git -C \"$cache_repo\" remote set-url origin \"$repo_cache_remote_url\"",
           # A clone already fetched every ref, so it counts as the first fetch.
           "fetched_at_file=\"$cache_repo/.git/#{@repo_cache_fetched_at_file}\"",
           "action=skip",
@@ -1167,12 +1126,18 @@ defmodule SymphonyElixir.Workspace do
           "if [ \"$first_clone\" = \"1\" ]; then",
           "  action=fetch",
           "  reason=first_clone",
+          "  git -C \"$cache_repo\" remote set-url origin \"$repo_cache_remote_url\"",
           "  date +%s > \"$fetched_at_file\"",
           "elif [ \"$max_age_ms\" -eq 0 ]; then",
           "  action=fetch",
-          "  reason=stale",
+          "  reason=stale"
+        ] ++
+        clone_setup_lines ++
+        [
+          "  git -C \"$cache_repo\" remote set-url origin \"$repo_cache_remote_url\"",
           "  git -C \"$cache_repo\" fetch --prune origin",
           "  date +%s > \"$fetched_at_file\"",
+          "  git -C \"$cache_repo\" remote set-head origin --auto >/dev/null 2>&1 || true",
           "else",
           "  fetched_at=0",
           "  if [ -f \"$fetched_at_file\" ]; then",
@@ -1181,23 +1146,40 @@ defmodule SymphonyElixir.Workspace do
           "  fi",
           "  if [ $(( ($(date +%s) - fetched_at) * 1000 )) -lt \"$max_age_ms\" ]; then",
           # Within the window the cache is good enough; still refresh just the
-          # issue branch so a PR branch pushed by a different workspace is visible.
+          # issue branch with a single remote round trip so a PR branch pushed by
+          # a different workspace is visible.
           "    action=skip",
           "    reason=fresh",
           "    if [ -n \"$issue_branch\" ]; then",
-          "      if git -C \"$cache_repo\" ls-remote --exit-code --heads origin \"refs/heads/$issue_branch\" >/dev/null 2>&1; then",
-          "        git -C \"$cache_repo\" fetch --no-tags origin \"refs/heads/$issue_branch:refs/remotes/origin/$issue_branch\"",
+          "      set +e",
+          "      fetch_output=\"$(LC_ALL=C git -C \"$cache_repo\" fetch --no-tags origin \"+refs/heads/$issue_branch:refs/remotes/origin/$issue_branch\" 2>&1)\"",
+          "      fetch_status=$?",
+          "      set -e",
+          "      if [ \"$fetch_status\" -ne 0 ]; then",
+          "        case \"$fetch_output\" in",
+          "          *\"couldn't find remote ref\"*)",
+          "            git -C \"$cache_repo\" update-ref -d \"refs/remotes/origin/$issue_branch\" >/dev/null 2>&1 || true",
+          "            ;;",
+          "          *)",
+          "            printf '%s\\n' \"$fetch_output\" >&2",
+          "            exit \"$fetch_status\"",
+          "            ;;",
+          "        esac",
           "      fi",
           "    fi",
           "  else",
           "    action=fetch",
-          "    reason=stale",
+          "    reason=stale"
+        ] ++
+        clone_setup_lines ++
+        [
+          "    git -C \"$cache_repo\" remote set-url origin \"$repo_cache_remote_url\"",
           "    git -C \"$cache_repo\" fetch --prune origin",
           "    date +%s > \"$fetched_at_file\"",
+          "    git -C \"$cache_repo\" remote set-head origin --auto >/dev/null 2>&1 || true",
           "  fi",
           "fi",
-          "printf '%s\\t%s\\t%s\\n' '#{@repo_cache_sync_marker}' \"$action\" \"$reason\"",
-          "git -C \"$cache_repo\" remote set-head origin --auto >/dev/null 2>&1 || true"
+          "printf '%s\\t%s\\t%s\\n' '#{@repo_cache_sync_marker}' \"$action\" \"$reason\""
         ]
 
     (preamble_lines ++
@@ -1211,6 +1193,55 @@ defmodule SymphonyElixir.Workspace do
        ])
     |> Enum.join("\n")
   end
+
+  defp repo_cache_clone_setup_lines(%{kind: :github_slug} = repo_source) do
+    [
+      "if ! command -v gh >/dev/null 2>&1; then",
+      "  echo \"GitHub CLI (gh) is required to prepare #{repo_source.display}\" >&2",
+      "  exit 44",
+      "fi",
+      "if ! gh auth status >/dev/null 2>&1; then",
+      "  echo \"GitHub CLI is not authenticated for #{repo_source.display}\" >&2",
+      "  exit 45",
+      "fi",
+      "protocol=\"$(gh config get git_protocol -h github.com 2>/dev/null || true)\"",
+      "if [ -z \"$protocol\" ]; then",
+      "  protocol=ssh",
+      "fi",
+      "if [ \"$protocol\" = \"https\" ]; then",
+      "  remote_url=\"https://github.com/$repo_slug.git\"",
+      "else",
+      "  remote_url=\"git@github.com:$repo_slug.git\"",
+      "fi",
+      "repo_cache_remote_url=\"$remote_url\""
+    ]
+  end
+
+  defp repo_cache_clone_setup_lines(_repo_source), do: ["repo_cache_remote_url=\"$clone_url\""]
+
+  defp repo_cache_preamble_lines(repo_source, cache_repo, target_branch, issue_branch, max_age_ms, assign) do
+    common = [
+      "set -eu",
+      "export GIT_TERMINAL_PROMPT=0",
+      assign.("cache_repo", cache_repo),
+      assign.("target_branch", target_branch || ""),
+      assign.("issue_branch", issue_branch),
+      assign.("max_age_ms", Integer.to_string(max_age_ms)),
+      "mkdir -p \"$(dirname \"$cache_repo\")\""
+    ]
+
+    case repo_source.kind do
+      :github_slug ->
+        List.insert_at(common, 1, "export GH_PROMPT_DISABLED=1") ++
+          [assign.("repo_slug", repo_source.raw)]
+
+      _ ->
+        common ++ [assign.("clone_url", repo_source.clone_url)]
+    end
+  end
+
+  defp repo_cache_clone_command(%{kind: :github_slug}), do: "gh repo clone \"$repo_slug\" \"$cache_repo\""
+  defp repo_cache_clone_command(_repo_source), do: "git clone \"$clone_url\" \"$cache_repo\""
 
   defp build_remote_workflow_validation_script(workflow_path) do
     [

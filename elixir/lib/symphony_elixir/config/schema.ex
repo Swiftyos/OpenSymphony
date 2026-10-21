@@ -164,8 +164,10 @@ defmodule SymphonyElixir.Config.Schema do
       # How old the last successful fetch may get before a workspace start
       # fetches from the remote again. 0 = fetch on every start.
       field(:max_age_ms, :integer, default: 60_000)
-      # How often the background refresher warms each project cache. 0 = off.
-      field(:refresh_interval_ms, :integer, default: 60_000)
+      # How often the background refresher warms each project cache. The
+      # default is half the freshness window, so a fresh start usually skips
+      # its own remote fetch. 0 = off.
+      field(:refresh_interval_ms, :integer, default: 30_000)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()

@@ -2,9 +2,10 @@ defmodule SymphonyElixir.RepoCacheLock do
   @moduledoc """
   Serializes repo cache syncs per cache path on this host.
 
-  `:global.trans/4` does not provide local mutual exclusion on a non-distributed
-  node (the default for Symphony), so this GenServer owns the locks instead. It
-  monitors holders and waiters: a crashed process releases its lock and is
+  The previous implementation used `:global.trans/4` with a fixed requester id
+  (`{__MODULE__, key}`), so every caller looked like the same requester and the
+  lock was re-entrant for all of them. This GenServer owns the locks instead.
+  It monitors holders and waiters: a crashed process releases its lock and is
   dropped from the wait queue.
   """
 
@@ -20,12 +21,12 @@ defmodule SymphonyElixir.RepoCacheLock do
   @doc "Runs `fun` while holding the lock for `key`."
   @spec with_lock(key(), (-> result)) :: result when result: var
   def with_lock(key, fun) when is_function(fun, 0) do
-    :ok = GenServer.call(__MODULE__, {:acquire, key}, :infinity)
+    {:ok, monitor_ref} = GenServer.call(__MODULE__, {:acquire, key}, :infinity)
 
     try do
       fun.()
     after
-      GenServer.cast(__MODULE__, {:release, key})
+      GenServer.cast(__MODULE__, {:release, key, monitor_ref})
     end
   end
 
@@ -49,13 +50,20 @@ defmodule SymphonyElixir.RepoCacheLock do
 
       {:noreply, %{state | waiters: waiters}}
     else
-      {:reply, :ok, %{state | owners: Map.put(state.owners, key, {pid, monitor_ref})}}
+      {:reply, {:ok, monitor_ref}, %{state | owners: Map.put(state.owners, key, {pid, monitor_ref})}}
     end
   end
 
   @impl true
-  def handle_cast({:release, key}, state) do
-    {:noreply, release(key, state)}
+  def handle_cast({:release, key, monitor_ref}, state) do
+    case Map.get(state.owners, key) do
+      {_pid, ^monitor_ref} ->
+        Process.demonitor(monitor_ref, [:flush])
+        {:noreply, release(key, state)}
+
+      _stale_or_absent ->
+        {:noreply, state}
+    end
   end
 
   @impl true
@@ -68,7 +76,7 @@ defmodule SymphonyElixir.RepoCacheLock do
 
     case pop_waiter(state.waiters, key) do
       {:ok, {from, monitor_ref}, waiters} ->
-        GenServer.reply(from, :ok)
+        GenServer.reply(from, {:ok, monitor_ref})
 
         %{
           state

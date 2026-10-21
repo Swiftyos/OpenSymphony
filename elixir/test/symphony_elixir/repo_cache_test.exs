@@ -91,6 +91,169 @@ defmodule SymphonyElixir.RepoCacheTest do
     end
   end
 
+  test "a force-pushed issue branch is resumed inside the freshness window" do
+    test_root = temp_root!("force-push")
+    origin = Path.join(test_root, "origin.git")
+    agent_repo = Path.join(test_root, "agent")
+    workspace_root = Path.join(test_root, "workspaces")
+
+    try do
+      init_bare_origin!(origin, agent_repo, "base\n")
+      write_repo_workflow!(workspace_root, origin)
+
+      issue = fn identifier -> %Issue{identifier: identifier, project_slug: "project-a"} end
+
+      # Populate the cache (and its fresh marker) before the PR branch exists.
+      assert {:ok, _workspace} = Workspace.create_for_issue(issue.("PI-OTHER"))
+
+      assert :ok = force_push_issue_branch!(agent_repo, "symphony/PI-7", "v1.txt", "v1\n", "v1")
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue.("PI-7"))
+      assert File.read!(Path.join(workspace, "v1.txt")) == "v1\n"
+
+      # The next start rebuilds the workspace while the cache is still inside its
+      # freshness window, so only the targeted issue-branch fetch runs.
+      assert :ok = Workspace.remove_issue_workspaces(issue.("PI-7"))
+      assert :ok = force_push_issue_branch!(agent_repo, "symphony/PI-7", "v2.txt", "v2\n", "v2")
+
+      assert {:ok, rewritten_workspace} = Workspace.create_for_issue(issue.("PI-7"))
+      assert File.read!(Path.join(rewritten_workspace, "v2.txt")) == "v2\n"
+      refute File.exists?(Path.join(rewritten_workspace, "v1.txt"))
+
+      {upstream, 0} =
+        System.cmd("git", ["-C", rewritten_workspace, "rev-parse", "--abbrev-ref", "@{upstream}"])
+
+      assert String.trim(upstream) == "origin/symphony/PI-7"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "a fresh start makes exactly one remote git operation" do
+    test_root = temp_root!("one-remote-op")
+    source_repo = Path.join(test_root, "source")
+    workspace_root = Path.join(test_root, "workspaces")
+    git_log = Path.join(test_root, "git-invocations.log")
+
+    try do
+      init_repo!(source_repo, "base\n")
+      write_repo_workflow!(workspace_root, source_repo)
+
+      # Populate the cache before the issue branch exists.
+      assert {:ok, _workspace} =
+               Workspace.create_for_issue(%Issue{identifier: "PI-OTHER", project_slug: "project-a"})
+
+      System.cmd("git", ["-C", source_repo, "checkout", "-q", "-b", "symphony/PI-8"])
+      commit_file!(source_repo, "feature.txt", "pr work\n", "pr work")
+      System.cmd("git", ["-C", source_repo, "checkout", "-q", "main"])
+
+      old_git_trace = System.get_env("GIT_TRACE")
+      System.put_env("GIT_TRACE", git_log)
+
+      try do
+        assert {:ok, workspace} =
+                 Workspace.create_for_issue(%Issue{identifier: "PI-8", project_slug: "project-a"})
+
+        assert File.read!(Path.join(workspace, "feature.txt")) == "pr work\n"
+      after
+        if old_git_trace,
+          do: System.put_env("GIT_TRACE", old_git_trace),
+          else: System.delete_env("GIT_TRACE")
+      end
+
+      invocations = git_log |> File.read!() |> String.split("\n", trim: true)
+      remote_operations = Enum.filter(invocations, &remote_git_operation?/1)
+
+      assert length(remote_operations) == 1
+      [operation] = remote_operations
+      assert operation =~ "fetch"
+      assert operation =~ "+refs/heads/symphony/PI-8:refs/remotes/origin/symphony/PI-8"
+      refute Enum.any?(invocations, &String.contains?(&1, "ls-remote"))
+      refute Enum.any?(invocations, &String.contains?(&1, "set-head"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "a fresh start aborts and leaves the ref alone when the issue branch fetch fails" do
+    test_root = temp_root!("fresh-fetch-failure")
+    source_repo = Path.join(test_root, "source")
+    workspace_root = Path.join(test_root, "workspaces")
+
+    try do
+      init_repo!(source_repo, "base\n")
+      write_repo_workflow!(workspace_root, source_repo)
+
+      issue = fn identifier -> %Issue{identifier: identifier, project_slug: "project-a"} end
+
+      assert {:ok, _workspace} = Workspace.create_for_issue(issue.("PI-OTHER"))
+
+      System.cmd("git", ["-C", source_repo, "checkout", "-q", "-b", "symphony/PI-9"])
+      commit_file!(source_repo, "feature.txt", "pr work\n", "pr work")
+      System.cmd("git", ["-C", source_repo, "checkout", "-q", "main"])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue.("PI-9"))
+      assert File.read!(Path.join(workspace, "feature.txt")) == "pr work\n"
+
+      assert :ok = Workspace.remove_issue_workspaces(issue.("PI-9"))
+
+      cache_repo = cache_repo_for(issue.("PI-9"))
+      {old_ref, 0} = System.cmd("git", ["-C", cache_repo, "rev-parse", "refs/remotes/origin/symphony/PI-9"])
+      missing_origin = Path.join(test_root, "missing-origin.git")
+      System.cmd("git", ["-C", cache_repo, "remote", "set-url", "origin", missing_origin])
+
+      assert {:error, {:workspace_repo_cache_failed, _display, status, output}} =
+               Workspace.create_for_issue(issue.("PI-9"))
+
+      refute status == 0
+      assert output =~ "missing-origin"
+
+      {new_ref, 0} = System.cmd("git", ["-C", cache_repo, "rev-parse", "refs/remotes/origin/symphony/PI-9"])
+      assert new_ref == old_ref
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "a fresh start drops a local issue branch ref when the remote branch was deleted" do
+    test_root = temp_root!("deleted-issue-branch")
+    source_repo = Path.join(test_root, "source")
+    workspace_root = Path.join(test_root, "workspaces")
+
+    try do
+      init_repo!(source_repo, "base\n")
+      write_repo_workflow!(workspace_root, source_repo)
+
+      issue = fn identifier -> %Issue{identifier: identifier, project_slug: "project-a"} end
+
+      assert {:ok, _workspace} = Workspace.create_for_issue(issue.("PI-OTHER"))
+
+      System.cmd("git", ["-C", source_repo, "checkout", "-q", "-b", "symphony/PI-10"])
+      commit_file!(source_repo, "feature.txt", "pr work\n", "pr work")
+      System.cmd("git", ["-C", source_repo, "checkout", "-q", "main"])
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue.("PI-10"))
+      assert File.read!(Path.join(workspace, "feature.txt")) == "pr work\n"
+
+      assert :ok = Workspace.remove_issue_workspaces(issue.("PI-10"))
+      System.cmd("git", ["-C", source_repo, "branch", "-q", "-D", "symphony/PI-10"])
+
+      assert {:ok, recreated_workspace} = Workspace.create_for_issue(issue.("PI-10"))
+      refute File.exists?(Path.join(recreated_workspace, "feature.txt"))
+
+      cache_repo = cache_repo_for(issue.("PI-10"))
+
+      assert {_output, 1} =
+               System.cmd(
+                 "git",
+                 ["-C", cache_repo, "show-ref", "--verify", "--quiet", "refs/remotes/origin/symphony/PI-10"],
+                 stderr_to_stdout: true
+               )
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "concurrent workspace starts for one repo fetch only once" do
     test_root = temp_root!("coalesced")
     source_repo = Path.join(test_root, "source")
@@ -405,10 +568,112 @@ defmodule SymphonyElixir.RepoCacheTest do
     assert :ok = Task.await(waiter, 1_000)
   end
 
+  test "repo cache lock demonitors the holder on release" do
+    key = {:lock_demonitor, System.unique_integer([:positive])}
+    server = Process.whereis(RepoCacheLock)
+    assert is_pid(server)
+
+    assert :ok = RepoCacheLock.with_lock(key, fn -> :ok end)
+
+    {:monitors, monitors} = Process.info(server, :monitors)
+    refute Enum.any?(monitors, fn {pid, _ref} -> pid == self() end)
+  end
+
+  test "repo cache lock ignores a stale release after the lock server restarts" do
+    key = {:lock_stale_release, System.unique_integer([:positive])}
+    parent = self()
+
+    on_exit(fn ->
+      if is_nil(Process.whereis(RepoCacheLock)) do
+        Supervisor.restart_child(SymphonyElixir.Supervisor, RepoCacheLock)
+      end
+    end)
+
+    old_holder =
+      spawn(fn ->
+        RepoCacheLock.with_lock(key, fn ->
+          send(parent, :old_holder_acquired)
+
+          receive do
+            :release_old_holder -> :ok
+          end
+        end)
+      end)
+
+    assert_receive :old_holder_acquired, 1_000
+
+    assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, RepoCacheLock)
+    assert {:ok, _pid} = Supervisor.restart_child(SymphonyElixir.Supervisor, RepoCacheLock)
+
+    new_holder =
+      spawn(fn ->
+        RepoCacheLock.with_lock(key, fn ->
+          send(parent, :new_holder_acquired)
+
+          receive do
+            :release_new_holder -> :ok
+          end
+        end)
+      end)
+
+    assert_receive :new_holder_acquired, 1_000
+
+    # The old holder still finishes its `with_lock` after the restart. Its stale
+    # release must not free the new holder's lock.
+    send(old_holder, :release_old_holder)
+    Process.sleep(50)
+
+    third = Task.async(fn -> RepoCacheLock.with_lock(key, fn -> send(parent, :third_acquired) end) end)
+    refute_receive :third_acquired, 200
+
+    send(new_holder, :release_new_holder)
+    assert_receive :third_acquired, 1_000
+    assert :third_acquired = Task.await(third, 1_000)
+  end
+
+  test "refresher uses a fixed-rate schedule and starts immediately after an overrun" do
+    test_root = temp_root!("refresher-fixed-rate")
+    repo = Path.join(test_root, "repo")
+    workspace_root = Path.join(test_root, "workspaces")
+    parent = self()
+
+    try do
+      init_repo!(repo, "fixed rate\n")
+      write_repo_workflow!(workspace_root, repo)
+
+      settings = put_in(Config.settings!().workspace.repo_cache.refresh_interval_ms, 500)
+      name = :"repo_cache_refresher_fixed_rate_#{System.unique_integer([:positive])}"
+
+      sync_fun = fn _route, _settings ->
+        send(parent, {:synced, System.monotonic_time(:millisecond)})
+        Process.sleep(300)
+        :ok
+      end
+
+      start_refresher!(name, fn -> {:ok, settings} end, sync_fun)
+
+      send(Process.whereis(name), :refresh)
+      assert_receive {:synced, first_started_at}, 2_000
+
+      # Wait for the overrunning pass to finish, then inspect the next timer. A
+      # fixed-rate schedule leaves ~200ms of the 500ms interval; scheduling from
+      # the end of the pass would leave the full 500ms.
+      %{timer_ref: timer_ref} = :sys.get_state(name)
+      remaining_ms = Process.read_timer(timer_ref)
+      assert is_integer(remaining_ms)
+      assert remaining_ms < 400
+
+      assert_receive {:synced, second_started_at}, 1_000
+      assert second_started_at - first_started_at < 700
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "schema validates repo cache settings and defaults to a one-minute window" do
     assert {:ok, settings} = Schema.parse(%{})
     assert settings.workspace.repo_cache.max_age_ms == 60_000
-    assert settings.workspace.repo_cache.refresh_interval_ms == 60_000
+    assert settings.workspace.repo_cache.refresh_interval_ms == 30_000
 
     assert {:ok, settings} =
              Schema.parse(%{
@@ -425,6 +690,36 @@ defmodule SymphonyElixir.RepoCacheTest do
 
     assert message =~ "max_age_ms"
     assert message =~ "refresh_interval_ms"
+  end
+
+  defp init_bare_origin!(origin, agent_repo, readme_contents) do
+    System.cmd("git", ["init", "--bare", "-q", "-b", "main", origin])
+    File.mkdir_p!(agent_repo)
+    File.write!(Path.join(agent_repo, "README.md"), readme_contents)
+    System.cmd("git", ["-C", agent_repo, "init", "-q", "-b", "main"])
+    System.cmd("git", ["-C", agent_repo, "config", "user.name", "Test User"])
+    System.cmd("git", ["-C", agent_repo, "config", "user.email", "test@example.com"])
+    System.cmd("git", ["-C", agent_repo, "add", "README.md"])
+    System.cmd("git", ["-C", agent_repo, "commit", "-q", "-m", "initial"])
+    System.cmd("git", ["-C", agent_repo, "remote", "add", "origin", origin])
+    System.cmd("git", ["-C", agent_repo, "push", "-q", "-u", "origin", "main"])
+    :ok
+  end
+
+  defp force_push_issue_branch!(repo, branch, relative_path, contents, message) do
+    System.cmd("git", ["-C", repo, "checkout", "-q", "-B", branch, "main"])
+    File.write!(Path.join(repo, relative_path), contents)
+    System.cmd("git", ["-C", repo, "add", "-A"])
+    System.cmd("git", ["-C", repo, "commit", "-q", "-m", message])
+    System.cmd("git", ["-C", repo, "push", "-q", "-f", "origin", branch])
+    System.cmd("git", ["-C", repo, "checkout", "-q", "main"])
+    :ok
+  end
+
+  defp remote_git_operation?(line) do
+    (String.contains?(line, " fetch ") and String.contains?(line, " origin")) or
+      String.contains?(line, "ls-remote") or
+      String.contains?(line, "set-head")
   end
 
   defp start_refresher!(name, settings_fun, sync_fun, opts \\ []) do

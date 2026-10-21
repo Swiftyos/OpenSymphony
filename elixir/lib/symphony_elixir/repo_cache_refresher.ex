@@ -4,10 +4,16 @@ defmodule SymphonyElixir.RepoCacheRefresher do
 
   Every `workspace.repo_cache.refresh_interval_ms` it syncs the configured
   project repos on the local host, one at a time, using the same cache lock as
-  the workspace flow. Agent starts then find the cache inside its
-  `workspace.repo_cache.max_age_ms` window and skip their own remote fetch, so
-  GitHub traffic stays around one fetch per repo per interval no matter how
+  the workspace flow. The interval is fixed-rate: it is measured from the start
+  of the previous pass, so a pass that overruns starts the next one immediately
+  afterwards and passes never overlap. Agent starts then find the cache inside
+  its `workspace.repo_cache.max_age_ms` window and skip their own remote fetch,
+  so GitHub traffic stays around one fetch per repo per interval no matter how
   many agents start. `refresh_interval_ms: 0` turns the refresher off.
+
+  Only local-host caches are refreshed. Caches on remote SSH workers are not
+  refreshed in the background: the first start after the freshness window does
+  a full fetch there.
 
   Disabled in tests (`:repo_cache_refresher_enabled`), like the other
   background boot tasks.
@@ -70,10 +76,12 @@ defmodule SymphonyElixir.RepoCacheRefresher do
   end
 
   defp run_refresh(state) do
+    started_at = System.monotonic_time(:millisecond)
+
     case state.settings_fun.() do
       {:ok, %Schema{} = settings} ->
         refresh_repos(settings, state.sync_fun)
-        schedule_after_refresh(state, settings)
+        schedule_after_refresh(state, settings, started_at)
 
       {:error, reason} ->
         Logger.warning("Repo cache refresh skipped: could not load settings reason=#{inspect(reason)}")
@@ -115,19 +123,24 @@ defmodule SymphonyElixir.RepoCacheRefresher do
 
   defp repo_label(route), do: Map.get(route, :repo) || "unknown"
 
-  defp schedule_after_refresh(state, %Schema{workspace: %{repo_cache: %{refresh_interval_ms: interval_ms}}})
+  defp schedule_after_refresh(
+         state,
+         %Schema{workspace: %{repo_cache: %{refresh_interval_ms: interval_ms}}},
+         started_at
+       )
        when is_integer(interval_ms) and interval_ms > 0 do
-    schedule_next(state, interval_ms)
+    elapsed_ms = System.monotonic_time(:millisecond) - started_at
+    schedule_next(state, interval_ms - elapsed_ms)
   end
 
-  defp schedule_after_refresh(state, _settings) do
+  defp schedule_after_refresh(state, _settings, _started_at) do
     cancel_timer(state.timer_ref)
     %{state | timer_ref: nil}
   end
 
   defp schedule_next(state, delay_ms) do
     cancel_timer(state.timer_ref)
-    timer_ref = Process.send_after(self(), :refresh, max(delay_ms, 1_000))
+    timer_ref = Process.send_after(self(), :refresh, max(delay_ms, 0))
     %{state | timer_ref: timer_ref}
   end
 
