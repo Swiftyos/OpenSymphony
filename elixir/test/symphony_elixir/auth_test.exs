@@ -285,7 +285,7 @@ defmodule SymphonyElixir.AuthTest do
 
       post(build_conn(), "/signup", %{"username" => "lee", "email" => "lee@acme.test", "password" => @password, "password_confirmation" => @password})
       send(view.pid, :observability_updated)
-      assert render(view) =~ "Pending accounts"
+      assert render_async(view) =~ "Pending accounts"
       [%{id: lee_id}] = Users.list("pending")
       view |> element(~s(button[phx-click="reject_account"][phx-value-id="#{lee_id}"])) |> render_click()
       assert Users.get(lee_id) == nil

@@ -3421,8 +3421,45 @@ a.brand:hover {
 
 .topbar {
   display: grid;
-  grid-template-columns: auto 1fr auto auto;
+  /* Fixed areas, packed from the left: the status items on the right change
+     every second, and only their own column may absorb that. A missing team
+     picker (other pages) leaves its area empty instead of reflowing. */
+  grid-template-columns: auto auto auto minmax(0, 1fr);
+  grid-template-areas: "brand nav picker meta";
   gap: 12px;
+}
+
+.topbar > .brand {
+  grid-area: brand;
+}
+
+.topbar > .topnav {
+  grid-area: nav;
+}
+
+.topbar > .team-picker {
+  grid-area: picker;
+  margin: 0;
+}
+
+.topbar > .topbar-meta {
+  grid-area: meta;
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+
+/* Status text that changes on its own gets a fixed width (the font is mono). */
+.topbar-meta .meta-agents,
+.topbar-meta .meta-poll {
+  flex: none;
+  min-width: calc(15ch + 20px);
+  white-space: nowrap;
+}
+
+.topbar-meta .status-badge {
+  flex: none;
+  justify-content: center;
+  min-width: calc(10ch + 30px);
 }
 
 .brand-logo {
@@ -3440,7 +3477,7 @@ a.brand:hover {
 
 .topnav {
   display: flex;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 2px;
   min-width: 0;
 }
@@ -3471,21 +3508,29 @@ a.brand:hover {
 }
 
 .team-picker-select {
+  /* Fixed, so a new team in the list never resizes the bar. */
+  width: 170px;
+  min-width: 0;
   padding: 7px 30px 7px 12px;
   border-radius: 999px;
   font-size: 0.8rem;
+  text-overflow: ellipsis;
 }
 
-@media (max-width: 1180px) {
+@media (max-width: 1400px) {
   .topbar {
-    grid-template-columns: auto 1fr auto;
+    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-areas:
+      "brand meta"
+      "nav picker";
   }
 
   .topnav {
-    order: 4;
-    grid-column: 1 / -1;
-    justify-content: flex-start;
     overflow-x: auto;
+  }
+
+  .topbar > .team-picker {
+    justify-self: end;
   }
 
   .team-picker-label {
@@ -3495,12 +3540,21 @@ a.brand:hover {
 
 @media (max-width: 700px) {
   .topbar {
-    grid-template-columns: 1fr auto;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "brand meta"
+      "picker picker"
+      "nav nav";
     border-radius: 18px;
   }
 
-  .team-picker {
-    grid-column: 1 / -1;
+  .topbar > .team-picker {
+    justify-self: stretch;
+  }
+
+  .team-picker-select {
+    flex: 1 1 0;
+    width: auto;
   }
 
   .topbar-meta .meta-item {
