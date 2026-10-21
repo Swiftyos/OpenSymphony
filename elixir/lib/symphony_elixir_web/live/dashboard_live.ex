@@ -3,9 +3,11 @@ defmodule SymphonyElixirWeb.DashboardLive do
   Live observability dashboard for Symphony.
 
   Layout follows the questions an operator asks, in order: is the factory
-  healthy, what needs a human, where is work flowing, what are agents doing,
-  and what does it cost. Interactive parts (diagram, cost explorer) render
-  client-side from one JSON payload so interactions never wait on the server.
+  working and is any agent stuck or blocked, where is work flowing and what
+  needs a human, and which sessions ran. The top bar's team and project
+  pickers scope all of it except the agent count, which is Symphony-wide. The
+  flow diagram renders client-side from one JSON payload so interactions never
+  wait on the server. Cost and traces live on the traces and metrics page.
   """
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
@@ -15,13 +17,16 @@ defmodule SymphonyElixirWeb.DashboardLive do
   import SymphonyElixirWeb.Topbar
   require Logger
 
-  alias SymphonyElixir.{AgentInbox, Auth, Config, FactoryControls, IssueMoves, IssueStage, Transcript}
+  alias SymphonyElixir.{AgentInbox, Auth, Config, FactoryControls, IssueMoves, IssueStage, SessionHistory, Transcript}
   alias SymphonyElixir.Factory.{Assistant, Definition, Store}
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.UsageLedger
   alias SymphonyElixir.Users
   alias SymphonyElixirWeb.{Endpoint, FactoryPresenter, ObservabilityPubSub, Presenter, UserAuth, Visibility}
   @runtime_tick_ms 1_000
+  @session_views ["live", "completed", "all"]
+  @session_windows [{"day", "Last 24 hours", 86_400_000}, {"week", "Last 7 days", 7 * 86_400_000}, {"month", "Last 30 days", 30 * 86_400_000}]
+  @max_ended_rows 200
 
   @impl true
   def mount(_params, _session, socket) do
@@ -29,6 +34,10 @@ defmodule SymphonyElixirWeb.DashboardLive do
       socket
       |> assign(:instance_name, SymphonyElixir.Config.instance_name())
       |> assign(:team_filter, nil)
+      |> assign(:project_filter, nil)
+      |> assign(:sessions_view, "live")
+      |> assign(:sessions_window, "day")
+      |> assign(:sessions_query, "")
       |> assign(:approval_error, nil)
       |> assign(:bell_open, false)
       |> assign(:chat_issue, nil)
@@ -47,11 +56,18 @@ defmodule SymphonyElixirWeb.DashboardLive do
     {:ok, socket}
   end
 
-  # `?team=PAY` narrows the whole dashboard to one team's work and projects.
+  # `?team=PAY` narrows the whole dashboard to one team's work and projects;
+  # `?project=checkout` to one project's.
   @impl true
   def handle_params(params, _uri, socket) do
     team = params |> Map.get("team") |> then(&(is_binary(&1) && String.upcase(String.trim(&1))))
-    {:noreply, socket |> assign(:team_filter, team || nil) |> assign_payload()}
+    project = params |> Map.get("project") |> then(&(is_binary(&1) && String.trim(&1)))
+
+    {:noreply,
+     socket
+     |> assign(:team_filter, team || nil)
+     |> assign(:project_filter, if(project in [false, "", "all"], do: nil, else: project))
+     |> assign_payload()}
   end
 
   @impl true
@@ -230,9 +246,24 @@ defmodule SymphonyElixirWeb.DashboardLive do
   def handle_event("toggle_bell", _params, socket), do: {:noreply, assign(socket, :bell_open, !socket.assigns.bell_open)}
   def handle_event("close_bell", _params, socket), do: {:noreply, assign(socket, :bell_open, false)}
 
-  def handle_event("pick_team", %{"team" => team}, socket) do
-    to = if team in ["", "all"], do: "/", else: "/?" <> URI.encode_query(%{"team" => team})
-    {:noreply, push_patch(socket, to: to)}
+  # A new team starts from all of its projects.
+  def handle_event("pick_team", %{"team" => team} = params, socket) do
+    team = if team in ["", "all"], do: nil, else: team
+    project = if params["project"] in [nil, "", "all"], do: nil, else: params["project"]
+    project = if team == socket.assigns.team_filter, do: project, else: nil
+    query = URI.encode_query(Enum.reject([{"team", team}, {"project", project}], &is_nil(elem(&1, 1))))
+    {:noreply, push_patch(socket, to: if(query == "", do: "/", else: "/?" <> query))}
+  end
+
+  def handle_event("sessions_view", %{"view" => view}, socket) when view in @session_views do
+    {:noreply, socket |> assign(:sessions_view, view) |> assign_payload()}
+  end
+
+  # The window select is disabled while it doesn't apply, and then not sent.
+  def handle_event("sessions_filter", params, socket) do
+    window = if Enum.any?(@session_windows, &(elem(&1, 0) == params["window"])), do: params["window"], else: socket.assigns.sessions_window
+    query = params |> Map.get("query", socket.assigns.sessions_query) |> to_string() |> String.trim() |> String.slice(0, 120)
+    {:noreply, socket |> assign(sessions_window: window, sessions_query: query) |> assign_payload()}
   end
 
   def handle_event("approve_account", %{"id" => id}, socket) do
@@ -317,7 +348,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   # Per-user view of the factory payload: what this person may change, and
   # team names from their Linear memberships.
-  defp factory_json(factory, user) do
+  defp factory_json(factory, user, scope) do
     enabled? = FactoryPresenter.controls_enabled?(Config.settings!())
     names = Map.new(user.teams, &{&1.key, &1.name})
     editable = Map.new(factory.teams, &{&1.key, enabled? and Auth.can_edit_factory?(user, &1.key)})
@@ -329,6 +360,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
     |> Map.put(:movable_projects, if(enabled?, do: Auth.movable_projects(user), else: []))
     |> Map.put(:can_edit, editable)
     |> Map.put(:can_control, editable)
+    # The flow the top bar's team or project picks.
+    |> Map.put(:scope, scope)
     |> Jason.encode!()
   end
 
@@ -338,7 +371,14 @@ defmodule SymphonyElixirWeb.DashboardLive do
   def render(assigns) do
     ~H"""
     <section class="dashboard-shell">
-      <.topbar instance_name={@instance_name} current_user={@current_user} teams={@team_choices} team={@team_filter}>
+      <.topbar
+        instance_name={@instance_name}
+        current_user={@current_user}
+        teams={@team_choices}
+        team={@team_filter}
+        projects={@project_choices}
+        project={@project_filter}
+      >
         <span class="status-badge status-badge-live">
           <span class="status-badge-dot"></span>
           Live
@@ -347,8 +387,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <span class="status-badge-dot"></span>
           Offline
         </span>
-        <span :if={!@payload[:error]} class="meta-item numeric">
-          <%= @payload.counts.running %>/<%= @payload.capacity.max_concurrent_agents %> agents
+        <span :if={!@payload[:error]} class="meta-item numeric" title="Agents running across all of Symphony / agent slots">
+          <%= @symphony_counts.running %>/<%= @payload.capacity.max_concurrent_agents %> agents
         </span>
         <span class="meta-item numeric"><%= polling_label(@payload[:polling]) %></span>
         <span :if={get_in(@payload, [:delayed_restart, :pending])} class="meta-item status-badge-offline" title="No new agent runs start until Symphony restarts">
@@ -406,13 +446,22 @@ defmodule SymphonyElixirWeb.DashboardLive do
           id="factory-data"
           phx-hook="FactoryData"
           data-target="factory"
-          data-json={factory_json(@payload.factory, @current_user)}
+          data-json={factory_json(@payload.factory, @current_user, @flow_scope)}
           hidden
         >
         </div>
 
         <section id="factory" class="factory" aria-label="Agent factory">
-          <div id="fx-stats" class="fx-stats" data-fx="stats" phx-update="ignore"></div>
+          <div id="health" class="fx-stats health-strip" aria-label="Is the factory working">
+            <%= for tile <- health_tiles(@payload, @symphony_counts, @pending_accounts, @now) do %>
+              <a :if={tile[:href]} class={["fx-stat", "health-#{tile.tone}"]} href={tile.href}>
+                <.health_tile tile={tile} />
+              </a>
+              <div :if={!tile[:href]} class={["fx-stat", "health-#{tile.tone}"]}>
+                <.health_tile tile={tile} />
+              </div>
+            <% end %>
+          </div>
 
           <div class="factory-main">
             <section class="panel flow-panel">
@@ -423,7 +472,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
               <div id="fx-diagram" data-fx="diagram" phx-update="ignore"></div>
             </section>
 
-            <aside class="panel attention-panel" aria-label="Needs you">
+            <aside id="needs-you" class="panel attention-panel" aria-label="Needs you">
               <div id="fx-drawer" class="fx-drawer-slot" data-fx="drawer" phx-update="ignore"></div>
               <div class="panel-head">
                 <h2 class="panel-title">Needs you</h2>
@@ -519,14 +568,50 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
         <section id="sessions" class="panel">
           <div class="panel-head">
-            <h2 class="panel-title">Live sessions</h2>
+            <h2 class="panel-title">Sessions</h2>
             <span class="panel-hint numeric">
               <%= @payload.counts.running %> running · <%= @payload.counts.retrying %> retrying · Runtime <%= format_runtime_seconds(total_runtime_seconds(@payload, @now)) %>
             </span>
           </div>
 
-          <%= if issue_rows(@payload) == [] do %>
-            <p class="empty-state">No agents are working right now.</p>
+          <form id="sessions-filter" class="sessions-controls" phx-change="sessions_filter" phx-submit="sessions_filter">
+            <div class="fx-seg" role="radiogroup" aria-label="Which sessions">
+              <button
+                :for={{value, label} <- [{"live", "Live"}, {"completed", "Completed"}, {"all", "All"}]}
+                type="button"
+                class={["fx-seg-btn", @sessions_view == value && "is-active"]}
+                role="radio"
+                aria-checked={to_string(@sessions_view == value)}
+                phx-click="sessions_view"
+                phx-value-view={value}
+              >
+                <%= label %>
+                <span class="muted numeric"><%= session_count(@payload, value) %></span>
+              </button>
+            </div>
+            <select
+              name="window"
+              class="sessions-window"
+              aria-label="Completed in"
+              disabled={@sessions_view == "live" or @sessions_query != ""}
+              title={if @sessions_query != "", do: "Search covers every kept session"}
+            >
+              <option :for={{value, label, _ms} <- session_windows()} value={value} selected={value == @sessions_window}><%= label %></option>
+            </select>
+            <input
+              type="search"
+              name="query"
+              class="fx-search"
+              value={@sessions_query}
+              placeholder="Search by title or ID, e.g. PAY-142"
+              aria-label="Search sessions by issue title or ID"
+              autocomplete="off"
+              phx-debounce="250"
+            />
+          </form>
+
+          <%= if session_rows(@payload, @sessions_view, @sessions_query) == [] do %>
+            <p class="empty-state"><%= empty_sessions_copy(@sessions_view, @sessions_query, @sessions_window) %></p>
           <% else %>
             <div class="table-wrap">
               <table class="data-table sessions-table">
@@ -549,7 +634,14 @@ defmodule SymphonyElixirWeb.DashboardLive do
                   </tr>
                 </thead>
                 <tbody>
-                  <tr :for={entry <- issue_rows(@payload)} class={entry.status == :retrying && "row-retrying"}>
+                  <tr
+                    :for={entry <- session_rows(@payload, @sessions_view, @sessions_query)}
+                    class={[
+                      entry.status == :retrying && "row-retrying",
+                      entry.status == :ended && "row-ended",
+                      stuck?(entry, @now) && "row-stuck"
+                    ]}
+                  >
                     <td>
                       <div class="issue-cell">
                         <a class="issue-id" href={safe_url(entry.issue_url) || "/api/v1/#{entry.issue_identifier}"}>
@@ -558,7 +650,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                         <span class="issue-title" title={entry.issue_title}><%= entry.issue_title || "Untitled issue" %></span>
                         <span class="issue-project"><%= project_label(entry) %></span>
                         <button type="button" class="chat-open" phx-click="open_chat" phx-value-id={entry.issue_identifier}>
-                          💬 Watch the agent
+                          <%= if entry.status == :ended, do: "💬 Transcript", else: "💬 Watch the agent" %>
                         </button>
                       </div>
                     </td>
@@ -573,7 +665,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                       </div>
                       <div :if={entry[:model] && entry[:model] != "default"} class="muted model-cell" title="Model"><%= entry[:model] %></div>
                       <div class="session-cell">
-                        <span class="muted"><%= account_label(entry) %></span>
+                        <span :if={entry.status != :ended} class="muted"><%= account_label(entry) %></span>
                         <button
                           :if={entry[:session_id]}
                           type="button"
@@ -589,13 +681,18 @@ defmodule SymphonyElixirWeb.DashboardLive do
                     <td class="num numeric"><%= row_runtime(entry, @now) %></td>
                     <td>
                       <div class="update-cell">
-                        <span class="update-text" title={entry[:error] || entry[:last_message] || to_string(entry[:last_event] || "n/a")}>
-                          <%= entry[:error] || entry[:last_message] || to_string(entry[:last_event] || "n/a") %>
+                        <span class="update-text" title={update_text(entry)}>
+                          <span class={"outcome-chip outcome-#{outcome_class(entry, @now)}"}><%= outcome_label(entry, @now) %></span><%= update_text(entry) %>
                         </span>
+                        <span :if={stuck?(entry, @now)} class="stuck-note">No update for <%= quiet_for(entry, @now) %></span>
                         <span class="muted update-meta">
-                          <%= entry[:last_event] || "n/a" %>
-                          <%= if entry[:last_event_at] do %>
-                            · <%= relative_time(entry.last_event_at, @now) %>
+                          <%= if entry.status == :ended do %>
+                            Ended <%= relative_time(entry.ended_at, @now) %>
+                          <% else %>
+                            <%= entry[:last_event] || "n/a" %>
+                            <%= if entry[:last_event_at] do %>
+                              · <%= relative_time(entry.last_event_at, @now) %>
+                            <% end %>
                           <% end %>
                         </span>
                       </div>
@@ -612,15 +709,10 @@ defmodule SymphonyElixirWeb.DashboardLive do
                 </tbody>
               </table>
             </div>
+            <p :if={ended_overflow(@payload, @sessions_view, @sessions_query) > 0} class="sessions-note">
+              Showing the newest <%= max_ended_rows() %> ended sessions; <%= ended_overflow(@payload, @sessions_view, @sessions_query) %> more. Search to find one.
+            </p>
           <% end %>
-        </section>
-
-        <section id="spend" class="panel">
-          <div class="panel-head">
-            <h2 class="panel-title">Spend</h2>
-            <p class="panel-hint">By project, team, or task, split by harness. Hover a bar for input and output tokens.</p>
-          </div>
-          <div id="fx-explorer" data-fx="explorer" phx-update="ignore"></div>
         </section>
 
         <footer class="ops-footer">
@@ -675,19 +767,28 @@ defmodule SymphonyElixirWeb.DashboardLive do
     """
   end
 
-  # The team picker offers the teams this person can see; an unknown or
-  # hidden team in the URL falls back to all teams.
+  # The pickers offer the teams and projects this person can see (a chosen
+  # team's projects only); an unknown or hidden one in the URL falls back to
+  # all. The agent count stays Symphony-wide: slots are shared by everyone.
   defp assign_payload(socket) do
     user = socket.assigns[:current_user]
     teams = if user, do: Enum.map(user.teams, & &1.key), else: []
+    raw = Presenter.state_payload(orchestrator(), snapshot_timeout_ms(), teams: teams)
 
     visible =
-      orchestrator()
-      |> Presenter.state_payload(snapshot_timeout_ms(), teams: teams)
+      raw
+      |> then(&if(&1[:error], do: &1, else: Map.put(&1, :completed, ended_sessions(socket.assigns))))
       |> Visibility.filter_payload(user)
 
     choices = team_choices(visible, user)
     team = if Enum.any?(choices, &(&1.key == socket.assigns.team_filter)), do: socket.assigns.team_filter
+    projects = project_choices(visible, team)
+    project = if Enum.any?(projects, &(&1.slug == socket.assigns.project_filter)), do: socket.assigns.project_filter
+
+    payload =
+      if project,
+        do: Visibility.scope_to_project(visible, project),
+        else: Visibility.scope_to_team(visible, team)
 
     socket
     |> assign_chat()
@@ -696,7 +797,22 @@ defmodule SymphonyElixirWeb.DashboardLive do
     |> assign(:pending_accounts, pending_accounts(user))
     |> assign(:team_choices, choices)
     |> assign(:team_filter, team)
-    |> assign(:payload, Visibility.scope_to_team(visible, team))
+    |> assign(:project_choices, projects)
+    |> assign(:project_filter, project)
+    |> assign(:flow_scope, if(project, do: Store.project_scope(project), else: team))
+    |> assign(:symphony_counts, raw[:counts] || %{running: 0, retrying: 0})
+    |> assign(:payload, payload)
+  end
+
+  # Ended sessions in the chosen window (counted even on the live view); a
+  # search looks through all of them.
+  defp ended_sessions(%{sessions_query: query, sessions_window: window}) do
+    if query != "" do
+      SessionHistory.list()
+    else
+      {_value, _label, ms} = Enum.find(@session_windows, &(elem(&1, 0) == window))
+      SessionHistory.list(since_ms: System.system_time(:millisecond) - ms)
+    end
   end
 
   defp assign_chat(socket) do
@@ -740,6 +856,14 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp team_choices(_payload, _user), do: []
 
+  defp project_choices(%{factory: %{teams: entries}}, team) do
+    entries
+    |> Enum.filter(&(&1[:kind] == "project" and (is_nil(team) or team in (&1[:teams] || []))))
+    |> Enum.map(&%{slug: &1.slug, name: &1.name || &1.slug})
+  end
+
+  defp project_choices(_payload, _team), do: []
+
   defp orchestrator do
     Endpoint.config(:orchestrator) || SymphonyElixir.Orchestrator
   end
@@ -748,10 +872,153 @@ defmodule SymphonyElixirWeb.DashboardLive do
     Endpoint.config(:snapshot_timeout_ms) || 15_000
   end
 
+  # ------------------------------------------------------------- health
+
+  attr(:tile, :map, required: true)
+
+  defp health_tile(assigns) do
+    ~H"""
+    <span class="fx-stat-label"><span class="health-dot" aria-hidden="true"></span><%= @tile.label %></span>
+    <strong :if={@tile[:word]} class="fx-stat-value health-word"><%= @tile.word %></strong>
+    <strong :if={!@tile[:word]} class="fx-stat-value" id={"health-#{@tile.id}"} phx-hook="DotMatrix" data-value={@tile.value} aria-label={@tile.value}></strong>
+    <span class="fx-stat-detail"><%= @tile.detail %></span>
+    """
+  end
+
+  # Is the factory working, and is any agent stuck or blocked. Agents counts
+  # every running agent; the rest follows the team and project pickers.
+  defp health_tiles(payload, symphony_counts, pending_accounts, now) do
+    stuck = stuck_entries(payload, now)
+    parked = issues_in_kind(payload, "parked")
+    retrying = Enum.reject(payload.retrying, &stalled_retry?/1)
+    troubled = troubled_accounts(payload)
+    approvals = approvals(payload, now)
+    waiting = issues_in_kind(payload, "human")
+    blocked = length(parked) + length(retrying) + length(troubled)
+    needs_you = length(approvals) + length(waiting) + length(pending_accounts)
+
+    [
+      system_tile(payload, troubled),
+      %{
+        id: "agents",
+        label: "Agents",
+        tone: if(symphony_counts.running > 0, do: "good", else: "idle"),
+        value: "#{symphony_counts.running}/#{payload.capacity.max_concurrent_agents}",
+        detail: "running across Symphony · #{symphony_counts.retrying} retrying"
+      },
+      %{
+        id: "stuck",
+        label: "Stuck",
+        tone: if(stuck == [], do: "good", else: "bad"),
+        value: to_string(length(stuck)),
+        detail: if(stuck == [], do: "every agent is reporting in", else: Enum.map_join(Enum.take(stuck, 3), ", ", & &1.id)),
+        href: "#needs-you"
+      },
+      %{
+        id: "blocked",
+        label: "Blocked",
+        tone: if(blocked == 0, do: "good", else: "warn"),
+        value: to_string(blocked),
+        detail: if(blocked == 0, do: "nothing parked or retrying", else: blocked_detail(parked, retrying, troubled)),
+        href: "#needs-you"
+      },
+      %{
+        id: "needs-you",
+        label: "Needs you",
+        tone: if(needs_you == 0, do: "good", else: "warn"),
+        value: to_string(needs_you),
+        detail: if(needs_you == 0, do: "nothing waiting on a person", else: "#{length(approvals)} to approve · #{length(waiting)} waiting on people"),
+        href: "#needs-you"
+      }
+    ]
+  end
+
+  defp system_tile(payload, troubled) do
+    accounts = payload.accounts
+    restart? = get_in(payload, [:delayed_restart, :pending])
+
+    {tone, word, detail} =
+      cond do
+        accounts != [] and length(troubled) == length(accounts) -> {"bad", "Down", "no agent account can run"}
+        restart? -> {"warn", "Restarting", "waiting for #{payload.delayed_restart.waiting_for} agent(s) to finish"}
+        troubled != [] -> {"warn", "Degraded", "#{length(troubled)} agent account(s) limited or failing"}
+        is_nil(payload[:polling]) -> {"warn", "Unknown", "no poll has run yet"}
+        true -> {"good", "Working", poll_detail(payload.polling)}
+      end
+
+    %{id: "system", label: "System", tone: tone, word: word, detail: detail}
+  end
+
+  defp poll_detail(%{poll_interval_ms: interval} = polling) when is_integer(interval),
+    do: "polls Linear every #{format_age(interval)} · #{String.downcase(polling_label(polling))}"
+
+  defp poll_detail(polling), do: polling_label(polling)
+
+  defp blocked_detail(parked, retrying, troubled) do
+    [{length(parked), "parked"}, {length(retrying), "retrying"}, {length(troubled), "account trouble"}]
+    |> Enum.reject(&(elem(&1, 0) == 0))
+    |> Enum.map_join(" · ", fn {n, what} -> "#{n} #{what}" end)
+  end
+
+  defp troubled_accounts(payload), do: Enum.filter(payload.accounts, &(state_class_suffix(&1.state) in ["limited", "danger", "paused"]))
+
+  # An agent is stuck once it has been quiet for half its harness's stall
+  # timeout (Symphony restarts it at the full timeout), or Symphony restarted
+  # it for stalling and it is waiting to retry.
+  defp stuck_entries(payload, now) do
+    quiet =
+      payload.running
+      |> Enum.map(&Map.put(&1, :status, :running))
+      |> Enum.filter(&stuck?(&1, now))
+      |> Enum.map(&%{id: &1.issue_identifier, text: "No update for #{quiet_for(&1, now)} · #{update_text(&1)}", age: quiet_for(&1, now), entry: &1})
+
+    stalled =
+      for entry <- payload.retrying, stalled_retry?(entry) do
+        %{id: entry.issue_identifier, text: "Restarted after stalling; retry #{entry[:attempt]}", age: "#{entry[:attempt]}×", entry: entry}
+      end
+
+    quiet ++ stalled
+  end
+
+  defp stalled_retry?(entry), do: is_binary(entry[:error]) and String.starts_with?(entry[:error], "stalled")
+
+  defp stuck?(%{status: :running} = entry, now) do
+    case quiet_ms(entry, now) do
+      ms when is_integer(ms) -> ms > stuck_after_ms(entry[:backend])
+      _ -> false
+    end
+  end
+
+  defp stuck?(_entry, _now), do: false
+
+  defp stuck_after_ms(backend) do
+    case Config.agent_stall_timeout_ms(backend) do
+      ms when is_integer(ms) and ms > 0 -> div(ms, 2)
+      _ -> 600_000
+    end
+  end
+
+  defp quiet_ms(entry, now) do
+    with iso when is_binary(iso) <- entry[:last_event_at] || entry[:started_at],
+         {:ok, at, _offset} <- DateTime.from_iso8601(iso) do
+      DateTime.diff(now, at, :millisecond)
+    else
+      _ -> nil
+    end
+  end
+
+  defp quiet_for(entry, now), do: entry |> quiet_ms(now) |> then(&if(is_integer(&1), do: format_age(&1), else: "a while"))
+
   # ------------------------------------------------------------- needs you
 
   defp attention_groups(payload, now) do
     [
+      %{
+        title: "Stuck",
+        tone: "critical",
+        icon: "⧗",
+        items: payload |> stuck_entries(now) |> Enum.map(&stuck_item/1)
+      },
       %{
         title: "Waiting on people",
         tone: "review",
@@ -768,16 +1035,13 @@ defmodule SymphonyElixirWeb.DashboardLive do
         title: "Retrying",
         tone: "warning",
         icon: "↻",
-        items: Enum.map(payload.retrying, &retry_item/1)
+        items: payload.retrying |> Enum.reject(&stalled_retry?/1) |> Enum.map(&retry_item/1)
       },
       %{
         title: "Account trouble",
         tone: "critical",
         icon: "!",
-        items:
-          payload.accounts
-          |> Enum.filter(&(state_class_suffix(&1.state) in ["limited", "danger", "paused"]))
-          |> Enum.map(&account_item/1)
+        items: payload |> troubled_accounts() |> Enum.map(&account_item/1)
       }
     ]
     |> Enum.reject(&(&1.items == []))
@@ -850,6 +1114,16 @@ defmodule SymphonyElixirWeb.DashboardLive do
       age: age_from_ms(issue.since_ms, now),
       href: safe_url(issue[:url]) || "/api/v1/#{issue.issue}",
       external: is_binary(safe_url(issue[:url]))
+    }
+  end
+
+  defp stuck_item(%{id: id, text: text, age: age, entry: entry}) do
+    %{
+      id: id,
+      text: text,
+      age: age,
+      href: safe_url(entry[:issue_url]) || "/api/v1/#{id}",
+      external: is_binary(safe_url(entry[:issue_url]))
     }
   end
 
@@ -959,6 +1233,69 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp issue_rows(_payload), do: []
 
+  defp ended_rows(payload), do: payload |> Map.get(:completed, []) |> Enum.map(&Map.put(&1, :status, :ended))
+
+  defp session_windows, do: @session_windows
+  defp max_ended_rows, do: @max_ended_rows
+
+  # Live sessions first, then ended ones newest first; a search matches the
+  # issue ID or title.
+  defp session_rows(payload, view, query) do
+    live = if view in ["live", "all"], do: issue_rows(payload), else: []
+    ended = if view in ["completed", "all"], do: payload |> ended_rows() |> matching(query) |> Enum.take(@max_ended_rows), else: []
+    matching(live, query) ++ ended
+  end
+
+  defp ended_overflow(payload, view, query) do
+    if view in ["completed", "all"], do: max(length(matching(ended_rows(payload), query)) - @max_ended_rows, 0), else: 0
+  end
+
+  defp session_count(payload, "live"), do: length(issue_rows(payload))
+  defp session_count(payload, "completed"), do: length(Map.get(payload, :completed, []))
+  defp session_count(payload, "all"), do: session_count(payload, "live") + session_count(payload, "completed")
+
+  defp matching(rows, ""), do: rows
+
+  defp matching(rows, query) do
+    q = String.downcase(query)
+    Enum.filter(rows, fn row -> Enum.any?([row.issue_identifier, row[:issue_title]], &(is_binary(&1) and String.contains?(String.downcase(&1), q))) end)
+  end
+
+  defp empty_sessions_copy(_view, query, _window) when query != "", do: "No sessions match “#{query}”."
+  defp empty_sessions_copy("live", _query, _window), do: "No agents are working right now."
+
+  defp empty_sessions_copy(_view, _query, window) do
+    {_value, label, _ms} = Enum.find(@session_windows, &(elem(&1, 0) == window))
+    "No sessions in the #{String.downcase(label)}."
+  end
+
+  defp update_text(entry), do: entry[:error] || entry[:last_message] || to_string(entry[:last_event] || "n/a")
+
+  defp outcome_class(%{status: :ended} = entry, _now), do: entry.outcome
+  defp outcome_class(%{status: :retrying}, _now), do: "retrying"
+  defp outcome_class(entry, now), do: if(stuck?(entry, now), do: "stuck", else: "running")
+
+  defp outcome_label(%{status: :ended} = entry, _now) do
+    case entry.outcome do
+      "finished" -> "Finished"
+      "crashed" -> "Crashed"
+      "stalled" -> "Stalled"
+      "closed" -> "Issue closed"
+      "paused" -> "Paused"
+      "moved" -> "Issue moved on"
+      "missing" -> "Issue gone"
+      other -> other
+    end
+  end
+
+  defp outcome_label(%{status: :retrying}, _now), do: "Retrying"
+  defp outcome_label(entry, now), do: if(stuck?(entry, now), do: "Stuck", else: "Running")
+
+  defp row_runtime(%{status: :ended} = entry, _now) do
+    runtime = format_runtime_seconds(entry.runtime_seconds || 0)
+    if (entry[:turn_count] || 0) > 0, do: "#{runtime} · #{entry.turn_count} turns", else: runtime
+  end
+
   defp row_runtime(%{status: :retrying} = entry, _now) do
     "retry #{Map.get(entry, :attempt) || 0}"
   end
@@ -968,6 +1305,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   defp stage_of(%{status: :retrying}), do: "retrying"
+  defp stage_of(%{status: :ended} = entry), do: entry[:stage_id] || "ended"
 
   defp stage_of(entry) do
     case session_stage(entry) do
@@ -988,6 +1326,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   defp stage_label(%{status: :retrying}), do: "Retrying"
+  defp stage_label(%{status: :ended} = entry), do: entry[:stage] || entry[:state] || "–"
 
   defp stage_label(entry) do
     case session_stage(entry) do

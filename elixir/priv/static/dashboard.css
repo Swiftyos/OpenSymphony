@@ -4483,3 +4483,159 @@ a.brand:hover {
   padding: 0;
   border: 0;
 }
+
+/* ------------------------------------------------------------------ health
+   The first question: is the factory working, and is any agent stuck or
+   blocked. The dot shows the tile's state; the label always says it too. */
+
+.health-strip .fx-stat-label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.health-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.health-good .health-dot {
+  background: var(--good);
+}
+
+.health-warn .health-dot {
+  background: var(--warning);
+}
+
+.health-bad .health-dot {
+  background: var(--critical);
+}
+
+.health-bad .dot-matrix .dm-on {
+  fill: var(--critical-ink);
+}
+
+.health-word {
+  font-size: 1.7rem;
+  font-weight: 650;
+  line-height: 38px;
+  letter-spacing: -0.01em;
+}
+
+.health-good .health-word {
+  color: var(--good-ink);
+}
+
+.health-warn .health-word {
+  color: var(--warning);
+}
+
+.health-bad .health-word {
+  color: var(--critical-ink);
+}
+
+a.fx-stat:hover {
+  text-decoration: none;
+  box-shadow: var(--shadow-pop);
+}
+
+/* ------------------------------------------------------------------ sessions */
+
+.sessions-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 12px;
+}
+
+.sessions-controls .fx-search {
+  flex: 1 1 240px;
+  max-width: 380px;
+}
+
+.sessions-window {
+  padding: 5px 26px 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--well);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.82rem;
+}
+
+.sessions-window:disabled {
+  opacity: 0.5;
+}
+
+.sessions-note {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.row-stuck td:first-child {
+  box-shadow: inset 2px 0 0 var(--critical);
+}
+
+.row-ended td {
+  color: var(--ink-2);
+}
+
+.stuck-note {
+  color: var(--critical-ink);
+  font-size: 0.76rem;
+  font-weight: 650;
+}
+
+.outcome-chip {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 1px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  color: var(--ink-2);
+  font-size: 0.72rem;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.outcome-running,
+.outcome-finished,
+.outcome-closed {
+  border-color: rgba(31, 157, 85, 0.5);
+  color: var(--good-ink);
+}
+
+.outcome-retrying,
+.outcome-paused {
+  border-color: rgba(201, 138, 0, 0.5);
+  color: var(--warning);
+}
+
+.outcome-crashed,
+.outcome-stalled,
+.outcome-stuck {
+  border-color: rgba(208, 59, 59, 0.55);
+  color: var(--critical-ink);
+}
+
+/* ------------------------------------------------------------------ cinema pop-out
+   In cinema mode the stage drawer floats over the canvas beside the stage. */
+
+.fx-drawer.is-popout {
+  inset: auto;
+  z-index: 6;
+  width: min(380px, calc(100% - 20px));
+  max-height: calc(100% - 20px);
+  animation: fx-fade 120ms ease-out;
+}
+
+@media (max-width: 700px) {
+  .sessions-controls .fx-search {
+    max-width: none;
+  }
+}

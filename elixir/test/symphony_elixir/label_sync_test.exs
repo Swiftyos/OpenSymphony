@@ -24,6 +24,7 @@ defmodule SymphonyElixir.LabelSyncTest do
     on_exit(fn ->
       Store.reset()
       :persistent_term.erase({LabelSync, :project_names})
+      :persistent_term.erase({LabelSync, :project_teams})
 
       Enum.each(saved, fn
         {key, nil} -> Application.delete_env(:symphony_elixir, key)

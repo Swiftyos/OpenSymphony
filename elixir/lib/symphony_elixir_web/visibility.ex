@@ -45,11 +45,29 @@ defmodule SymphonyElixirWeb.Visibility do
     visible? = visible_fun(teams, [])
 
     payload
-    |> Map.update(:running, [], &Enum.filter(&1, fn e -> visible?.(e.issue_identifier, nil) end))
-    |> Map.update(:retrying, [], &Enum.filter(&1, fn e -> visible?.(e.issue_identifier, nil) end))
+    |> update_sessions(&Enum.filter(&1, fn e -> visible?.(e.issue_identifier, nil) end))
     |> Map.update(:projects, [], &team_projects(&1, visible?))
     |> Map.update(:factory, nil, &restrict_factory(&1, visible?, teams, []))
-    |> then(fn p -> Map.put(p, :counts, %{running: length(p.running), retrying: length(p.retrying)}) end)
+    |> put_counts()
+  end
+
+  @doc """
+  Narrows an already-filtered payload to one project's work: its sessions,
+  spend and flow, whichever teams its issues belong to. A view choice, like
+  `scope_to_team/2`.
+  """
+  @spec scope_to_project(map(), String.t() | nil) :: map()
+  def scope_to_project(%{error: _} = payload, _slug), do: payload
+  def scope_to_project(payload, nil), do: payload
+
+  def scope_to_project(payload, slug) when is_binary(slug) do
+    in_project? = fn e -> Map.get(e, :project_slug) == slug end
+
+    payload
+    |> update_sessions(&Enum.filter(&1, in_project?))
+    |> Map.update(:projects, [], &Enum.filter(&1, fn project -> project[:slug] == slug end))
+    |> Map.update(:factory, nil, &project_factory(&1, slug))
+    |> put_counts()
   end
 
   @spec filter_issue(map(), Auth.User.t() | nil, String.t()) :: {:ok, map()} | :hidden
@@ -76,13 +94,23 @@ defmodule SymphonyElixirWeb.Visibility do
     entry_visible? = fn e -> visible?.(e.issue_identifier, Map.get(e, :project_slug)) end
 
     payload
-    |> Map.update(:running, [], &(&1 |> Enum.filter(entry_visible?) |> Enum.map(fn e -> drop_host_fields(e) end)))
-    |> Map.update(:retrying, [], &(&1 |> Enum.filter(entry_visible?) |> Enum.map(fn e -> drop_host_fields(e) end)))
+    |> update_sessions(&(&1 |> Enum.filter(entry_visible?) |> Enum.map(fn e -> drop_host_fields(e) end)))
     |> Map.update(:projects, [], fn list -> Enum.map(list, &restrict_project_issues(&1, visible?)) end)
     |> Map.put(:accounts, [])
     |> Map.update(:factory, nil, &restrict_factory(&1, visible?, teams, projects))
-    |> then(fn p -> Map.put(p, :counts, %{running: length(p.running), retrying: length(p.retrying)}) end)
+    |> put_counts()
   end
+
+  # Live sessions, and ended ones when the payload carries them (the dashboard
+  # adds `completed`; the state API doesn't).
+  defp update_sessions(payload, fun) do
+    payload
+    |> Map.update(:running, [], fun)
+    |> Map.update(:retrying, [], fun)
+    |> then(fn p -> if Map.has_key?(p, :completed), do: Map.update!(p, :completed, fun), else: p end)
+  end
+
+  defp put_counts(payload), do: Map.put(payload, :counts, %{running: length(payload.running), retrying: length(payload.retrying)})
 
   # Projects with work but none of it this team's are left out.
   defp team_projects(projects, visible?) do
@@ -110,6 +138,23 @@ defmodule SymphonyElixirWeb.Visibility do
         team: keep |> Enum.find(&(Map.get(&1, :kind) != "project")) |> then(&(&1 && &1.key)),
         definitions: Map.take(factory.definitions, keys),
         flows: factory.flows |> Map.take(keys) |> Map.new(fn {key, flow} -> {key, restrict_flow(flow, visible?)} end)
+    }
+  end
+
+  # Only the project's own entry; its flow already holds only its issues.
+  defp project_factory(nil, _slug), do: nil
+
+  defp project_factory(factory, slug) do
+    keep = Enum.filter(factory.teams, &(Map.get(&1, :kind) == "project" and &1.slug == slug))
+    keys = Enum.map(keep, & &1.key)
+
+    %{
+      factory
+      | usage: Enum.filter(factory.usage, &(&1[:project] == slug)),
+        teams: keep,
+        team: List.first(keys),
+        definitions: Map.take(factory.definitions, keys),
+        flows: Map.take(factory.flows, keys)
     }
   end
 

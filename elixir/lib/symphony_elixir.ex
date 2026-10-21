@@ -53,6 +53,7 @@ defmodule SymphonyElixir.Application do
       SymphonyElixir.UsageLedger,
       SymphonyElixir.SessionStore,
       SymphonyElixir.Transcript,
+      SymphonyElixir.SessionHistory,
       {Registry, keys: :unique, name: SymphonyElixir.AgentInbox.Registry},
       SymphonyElixir.AgentInbox,
       SymphonyElixir.Pricing,
@@ -97,7 +98,7 @@ defmodule SymphonyElixir.Application do
   #     for an issue.
   #
   # Deliberately absent: Orchestrator, HttpServer, StatusDashboard,
-  # UsageLedger, SessionStore, Transcript, AgentInbox and Pricing (their work
+  # UsageLedger, SessionStore, Transcript, SessionHistory, AgentInbox and Pricing (their work
   # happens in the controller through RunHost.Remote), Users/Auth/McpTokens
   # (the runner authenticates with its run token), LabelSync and
   # RateLimitPoller.

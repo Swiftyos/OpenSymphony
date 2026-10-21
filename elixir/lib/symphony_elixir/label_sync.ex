@@ -13,8 +13,9 @@ defmodule SymphonyElixir.LabelSync do
   Labels that already exist in the team or workspace are left alone. It runs
   once at startup, and for each project added through MCP (`sync_projects/1`);
   saving a flow in the dashboard syncs that flow's labels too.
-  The project names Linear returns are kept (`project_names/0`) so the
-  dashboard can name projects before it has seen any of their issues.
+  The project names and teams Linear returns are kept (`project_names/0`,
+  `project_teams/0`) so the dashboard can name projects, and list them under
+  their teams, before it has seen any of their issues.
   """
 
   require Logger
@@ -82,9 +83,18 @@ defmodule SymphonyElixir.LabelSync do
   @spec project_names() :: %{String.t() => String.t()}
   def project_names, do: :persistent_term.get({__MODULE__, :project_names}, %{})
 
+  @doc """
+  The teams each project belongs to, by slug, as Linear reported them at the
+  last sync.
+  """
+  @spec project_teams() :: %{String.t() => [String.t()]}
+  def project_teams, do: :persistent_term.get({__MODULE__, :project_teams}, %{})
+
   defp remember_names(info) do
     names = for {slug, %{name: name}} <- info, is_binary(name), into: project_names(), do: {slug, name}
+    teams = for {slug, %{teams: teams}} <- info, is_list(teams), into: project_teams(), do: {slug, teams}
     :persistent_term.put({__MODULE__, :project_names}, names)
+    :persistent_term.put({__MODULE__, :project_teams}, teams)
   end
 
   # Each team needs the stage labels of every flow its issues can follow.

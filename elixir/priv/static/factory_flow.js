@@ -8,7 +8,7 @@
 //
 // window.SymphonyFlow.create(opts) -> flow
 //   opts: { slot, drawerSlot, tip: {show, move, hide}, push(event, payload, cb),
-//           toast(msg, tone), onFilter(stageId|null, label) }
+//           toast(msg, tone) }
 (function () {
   "use strict";
 
@@ -421,6 +421,20 @@
     var teams = (data.teams || []).map(function (t) {
       return t.key;
     });
+    // The top bar's team or project picks the flow whenever it changes; the
+    // flow picker can still switch among that team's projects.
+    var first = this.scope === undefined;
+    if (data.scope !== this.scope) {
+      this.scope = data.scope;
+      if (data.scope && teams.indexOf(data.scope) !== -1 && this.mode !== "edit") {
+        this.team = data.scope;
+        this.selected = null;
+        this.view = null;
+      }
+    }
+    // A linked stage (#stage=...) opens once, on the first payload.
+    var linked = first && /stage=([a-z0-9-]+)/.exec(window.location.hash || "");
+    if (linked) this.selected = { type: "stage", id: linked[1] };
     if (!this.team || teams.indexOf(this.team) === -1) {
       var hash = /team=([^&]+)/.exec(window.location.hash || "");
       if (hash) {
@@ -435,8 +449,6 @@
       this.team = [hash && hash[1], saved, busiest(data), data.team, teams[0]].filter(function (t) {
         return t && teams.indexOf(t) !== -1;
       })[0];
-      var stageHash = /stage=([a-z0-9-]+)/.exec(window.location.hash || "");
-      if (stageHash) this.selected = { type: "stage", id: stageHash[1] };
     }
     // Server updates never clobber an unsaved draft.
     var key = JSON.stringify([this.team, this.mode, this.definition(), this.flow()]);
@@ -712,6 +724,7 @@
 
     var flow = this.flow();
     var routes = routeAll(definition);
+    this.routes = routes;
     var box = bounds(definition, routes);
     this.fit = box;
     this.applyView();
@@ -1144,6 +1157,7 @@
     // The canvas changed shape: start again from the whole flow.
     this.view = null;
     if (this.canvas && this.fit) this.applyView();
+    if (this.drawer) this.renderDrawer();
     if (this.cinemaButton) {
       this.cinemaButton.textContent = on ? "⤡" : "⤢";
       this.cinemaButton.setAttribute("aria-label", on ? "Exit cinema mode (T)" : "Cinema mode (T)");
@@ -1183,6 +1197,7 @@
     var zoom = this.fit ? Math.round((this.fitView().w / v.w) * 100) : 100;
     if (this.zoomLabel) this.zoomLabel.textContent = this.view ? zoom + "%" : "Fit";
     this.canvas.classList.toggle("is-zoomed", !!this.view);
+    if (this.drawer) this.placePopout();
   };
 
   // factor < 1 zooms in. `at` is a diagram point that stays under the pointer.
@@ -1295,7 +1310,6 @@
     this.baseVersion = this.draft.version;
     this.errors = [];
     this.lastKey = null;
-    this.opts.onFilter(null);
     this.render();
   };
 
@@ -1421,6 +1435,12 @@
     var drawer = this.drawer;
     var sel = this.selected;
     var definition = this.definition();
+    // In cinema mode Needs you sits below the flow, so the drawer pops out
+    // over the canvas next to what was clicked instead.
+    var cinema = document.documentElement.classList.contains("fx-cinema");
+    var home = cinema ? this.canvas : this.opts.drawerSlot;
+    if (drawer.parentNode !== home) home.appendChild(drawer);
+    drawer.classList.toggle("is-popout", cinema);
     if (!sel || !definition) {
       drawer.hidden = true;
       return;
@@ -1440,6 +1460,63 @@
       if (!t) return void (drawer.hidden = true);
       this.edgeView(drawer, t);
     }
+    this.placePopout();
+  };
+
+  // The selection's box in canvas pixels: a stage's rectangle, or a point at
+  // the middle of a connection.
+  Flow.prototype.selectionBox = function () {
+    var sel = this.selected;
+    var ctm = this.svg.getScreenCTM();
+    if (!sel || !ctm) return null;
+    var box;
+    if (sel.type === "stage") {
+      var stage = this.stageById(sel.id);
+      if (!stage) return null;
+      var r = rectOf(stage);
+      box = { x: r.x, y: r.y, w: r.w, h: r.h };
+    } else {
+      var route = this.routes && this.routes[sel.id];
+      if (!route) return null;
+      box = { x: route.mid.x, y: route.mid.y, w: 0, h: 0 };
+    }
+    var canvas = this.canvas.getBoundingClientRect();
+    var a = this.svg.createSVGPoint();
+    a.x = box.x;
+    a.y = box.y;
+    var b = this.svg.createSVGPoint();
+    b.x = box.x + box.w;
+    b.y = box.y + box.h;
+    a = a.matrixTransform(ctm);
+    b = b.matrixTransform(ctm);
+    return { left: a.x - canvas.left, top: a.y - canvas.top, right: b.x - canvas.left, bottom: b.y - canvas.top };
+  };
+
+  // Beside the selection: to its right when there's room, else its left, else
+  // over it; kept inside the canvas.
+  Flow.prototype.placePopout = function () {
+    var drawer = this.drawer;
+    if (!drawer.classList.contains("is-popout") || drawer.hidden) return;
+    var box = this.selectionBox();
+    var cw = this.canvas.clientWidth;
+    var ch = this.canvas.clientHeight;
+    var w = drawer.offsetWidth;
+    var h = drawer.offsetHeight;
+    var gap = 14;
+    var margin = 10;
+    var left;
+    var top;
+    if (!box) {
+      left = cw - w - margin;
+      top = margin;
+    } else {
+      if (box.right + gap + w <= cw - margin) left = box.right + gap;
+      else if (box.left - gap - w >= margin) left = box.left - gap - w;
+      else left = cw - w - margin;
+      top = box.top;
+    }
+    drawer.style.left = Math.max(margin, Math.min(left, cw - w - margin)) + "px";
+    drawer.style.top = Math.max(margin, Math.min(top, ch - h - margin)) + "px";
   };
 
   Flow.prototype.drawerHead = function (drawer, title, subtitle) {
@@ -1468,11 +1545,6 @@
 
     var listHead = el("div", "fx-drawer-subhead");
     listHead.appendChild(el("span", null, info.count + (info.count === 1 ? " issue" : " issues")));
-    listHead.appendChild(
-      button("Show its spend", "fx-link-btn", function () {
-        self.opts.onFilter(stage.id, stage.name, info.issues);
-      })
-    );
     drawer.appendChild(listHead);
 
     // Moves come from the flow: every human-moved connection out of here. An

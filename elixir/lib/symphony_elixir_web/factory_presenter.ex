@@ -82,6 +82,7 @@ defmodule SymphonyElixirWeb.FactoryPresenter do
   defp project_entries(settings) do
     seen = UsageLedger.projects()
     linear_names = SymphonyElixir.LabelSync.project_names()
+    linear_teams = SymphonyElixir.LabelSync.project_teams()
 
     settings.tracker.projects
     |> List.wrap()
@@ -94,7 +95,9 @@ defmodule SymphonyElixirWeb.FactoryPresenter do
       info = Map.get(seen, slug, %{name: nil, teams: []})
       key = Store.project_scope(slug)
       name = info.name || linear_names[slug] || slug
-      %{key: key, kind: "project", slug: slug, name: name, teams: info.teams, custom: Store.custom?(key)}
+      # Teams whose issues it holds, then the teams Linear says it belongs to.
+      teams = Enum.uniq(info.teams ++ Map.get(linear_teams, slug, []))
+      %{key: key, kind: "project", slug: slug, name: name, teams: teams, custom: Store.custom?(key)}
     end)
     |> Enum.sort_by(&String.downcase(&1.name))
   end

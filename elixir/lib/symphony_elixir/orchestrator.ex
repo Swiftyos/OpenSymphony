@@ -18,6 +18,7 @@ defmodule SymphonyElixir.Orchestrator do
     RetryStore,
     RunLauncher,
     RunRegistry,
+    SessionHistory,
     StatusDashboard,
     Tracker,
     UsageLedger,
@@ -220,6 +221,11 @@ defmodule SymphonyElixir.Orchestrator do
         {running_entry, state} = pop_running_entry(state, issue_id)
         state = record_session_completion_totals(state, running_entry)
         record_account_completion(running_entry, reason)
+
+        if reason == :normal,
+          do: record_session_history(issue_id, running_entry, :finished),
+          else: record_session_history(issue_id, running_entry, :crashed, "agent exited: #{inspect(reason)}")
+
         session_id = running_entry_session_id(running_entry)
 
         state =
@@ -589,17 +595,17 @@ defmodule SymphonyElixir.Orchestrator do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
 
-        terminate_running_issue(state, issue.id, true)
+        terminate_running_issue(state, issue.id, true, :closed)
 
       !issue_routable_to_worker?(issue) ->
         Logger.info("Issue no longer routed to this worker: #{issue_context(issue)} assignee=#{inspect(issue.assignee_id)}; stopping active agent")
 
-        terminate_running_issue(state, issue.id, false)
+        terminate_running_issue(state, issue.id, false, :moved)
 
       active_issue_state?(issue.state, active_states) and IssueStage.paused?(issue) ->
         Logger.info("Issue moved to paused stage: #{issue_context(issue)} state=#{issue.state} stage=#{IssueStage.stage(issue)}; stopping active agent")
 
-        terminate_running_issue(state, issue.id, false)
+        terminate_running_issue(state, issue.id, false, :paused)
 
       active_issue_state?(issue.state, active_states) ->
         refresh_running_issue_state(state, issue)
@@ -607,7 +613,7 @@ defmodule SymphonyElixir.Orchestrator do
       true ->
         Logger.info("Issue moved to non-active state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
 
-        terminate_running_issue(state, issue.id, false)
+        terminate_running_issue(state, issue.id, false, :moved)
     end
   end
 
@@ -628,7 +634,7 @@ defmodule SymphonyElixir.Orchestrator do
         state_acc
       else
         log_missing_running_issue(state_acc, issue_id)
-        terminate_running_issue(state_acc, issue_id, false)
+        terminate_running_issue(state_acc, issue_id, false, :missing)
       end
     end)
   end
@@ -657,13 +663,14 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp terminate_running_issue(%State{} = state, issue_id, cleanup_workspace) do
+  defp terminate_running_issue(%State{} = state, issue_id, cleanup_workspace, outcome, error \\ nil) do
     case Map.get(state.running, issue_id) do
       nil ->
         release_issue_claim(state, issue_id)
 
       %{pid: pid, ref: ref, identifier: identifier} = running_entry ->
         state = record_session_completion_totals(state, running_entry)
+        record_session_history(issue_id, running_entry, outcome, error)
         worker_host = Map.get(running_entry, :worker_host)
 
         if is_pid(pid) do
@@ -720,15 +727,16 @@ defmodule SymphonyElixir.Orchestrator do
       Logger.warning("Issue stalled: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms}; restarting with backoff")
 
       next_attempt = next_retry_attempt_from_running(running_entry)
+      error = "stalled for #{elapsed_ms}ms without #{stall_activity_label(running_entry)} activity"
 
       state
-      |> terminate_running_issue(issue_id, false)
+      |> terminate_running_issue(issue_id, false, :stalled, error)
       |> schedule_issue_retry(
         issue_id,
         next_attempt,
         %{
           identifier: identifier,
-          error: "stalled for #{elapsed_ms}ms without #{stall_activity_label(running_entry)} activity",
+          error: error,
           worker_host: Map.get(running_entry, :worker_host),
           workspace_path: Map.get(running_entry, :workspace_path)
         }
@@ -2499,6 +2507,23 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp record_session_completion_totals(state, _running_entry), do: state
+
+  # The ended session, for the dashboard's session list. Best effort: a
+  # partial running entry is skipped rather than stopping the orchestrator.
+  defp record_session_history(issue_id, running_entry, outcome, error \\ nil)
+
+  defp record_session_history(issue_id, running_entry, outcome, error) when is_map(running_entry) do
+    issue_id
+    |> snapshot_running_entry(running_entry, DateTime.utc_now())
+    |> Map.put(:model, Map.get(running_entry, :model))
+    |> SessionHistory.record(outcome, error)
+  rescue
+    exception ->
+      Logger.debug("Session history skipped issue_id=#{issue_id} reason=#{Exception.message(exception)}")
+      :ok
+  end
+
+  defp record_session_history(_issue_id, _running_entry, _outcome, _error), do: :ok
 
   defp initialize_backend_totals(%State{} = state, _config) do
     %{

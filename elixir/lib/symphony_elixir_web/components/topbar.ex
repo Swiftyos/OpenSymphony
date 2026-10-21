@@ -11,6 +11,8 @@ defmodule SymphonyElixirWeb.Topbar do
   attr(:current_user, :any, required: true)
   attr(:teams, :list, default: [], doc: "team picker choices (%{key, name}); none hides the picker")
   attr(:team, :string, default: nil)
+  attr(:projects, :list, default: [], doc: "project picker choices (%{slug, name}), the chosen team's when one is")
+  attr(:project, :string, default: nil)
   attr(:current, :string, default: "factory", doc: "the nav item for this page")
   slot(:inner_block)
 
@@ -46,6 +48,11 @@ defmodule SymphonyElixirWeb.Topbar do
           <option :for={t <- @teams} value={t.key} selected={t.key == @team}>
             {t.key}{if t.name, do: " · #{t.name}"}
           </option>
+        </select>
+        <label :if={@projects != []} class="team-picker-label" for="project-picker-select">Project</label>
+        <select :if={@projects != []} id="project-picker-select" name="project" class="team-picker-select">
+          <option value="all" selected={is_nil(@project)}>All projects</option>
+          <option :for={p <- @projects} value={p.slug} selected={p.slug == @project}>{p.name}</option>
         </select>
       </form>
 
@@ -98,7 +105,6 @@ defmodule SymphonyElixirWeb.Topbar do
     [
       %{key: "factory", label: "Factory", href: "/"},
       %{key: "sessions", label: "Sessions", href: "/#sessions"},
-      %{key: "spend", label: "Spend", href: "/#spend"},
       %{key: "insights", label: "Traces & metrics", href: "/insights"},
       Auth.can_manage_access?(user) && %{key: "users", label: "Users", href: "/admin/users"}
     ]

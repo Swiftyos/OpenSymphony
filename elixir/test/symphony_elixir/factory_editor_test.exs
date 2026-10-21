@@ -4,7 +4,7 @@ defmodule SymphonyElixir.FactoryEditorTest do
   import Phoenix.ConnTest
   import Phoenix.LiveViewTest
 
-  alias SymphonyElixir.{Auth, FactoryControls, IssueStage, Tracker, UsageLedger, Users}
+  alias SymphonyElixir.{Auth, FactoryControls, IssueStage, SessionHistory, Tracker, UsageLedger, Users}
   alias SymphonyElixir.Factory.{Definition, StagePrompt, Store}
   alias SymphonyElixir.Linear.Adapter
   alias SymphonyElixirWeb.{FactoryPresenter, Visibility}
@@ -98,9 +98,10 @@ defmodule SymphonyElixir.FactoryEditorTest do
     def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: Keyword.fetch!(opts, :name))
     def init(opts), do: {:ok, opts}
 
+    # Tests set running agents with :sys.replace_state/2.
     def handle_call(:snapshot, _from, state) do
       totals = %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
-      {:reply, %{running: [], retrying: [], agent_totals: totals, rate_limits: nil}, state}
+      {:reply, %{running: Keyword.get(state, :running, []), retrying: [], agent_totals: totals, rate_limits: nil}, state}
     end
 
     def handle_call(:request_refresh, _from, state), do: {:reply, %{queued: true}, state}
@@ -111,6 +112,9 @@ defmodule SymphonyElixir.FactoryEditorTest do
     Users.reset()
     UsageLedger.reset()
     Auth.clear_cache()
+    # Project names and teams a label sync learned.
+    :persistent_term.erase({SymphonyElixir.LabelSync, :project_names})
+    :persistent_term.erase({SymphonyElixir.LabelSync, :project_teams})
     keys = [:linear_client_module, :fake_linear_recipient, :fake_inventory, :fake_create]
     saved = Map.new(keys, &{&1, Application.get_env(:symphony_elixir, &1)})
     Application.put_env(:symphony_elixir, :linear_client_module, LabelLinear)
@@ -365,8 +369,35 @@ defmodule SymphonyElixir.FactoryEditorTest do
       {:ok, mia} = Users.register(mia_params, &Auth.check_linear_member/1)
       {:ok, mia} = Users.approve(mia.id, "ada")
       inventory([])
-      %{ada: ada, mia: mia}
+      SessionHistory.reset()
+      on_exit(fn -> SessionHistory.reset() end)
+      %{ada: ada, mia: mia, orchestrator: name}
     end
+
+    # An orchestrator snapshot's running entry.
+    defp running_agent(identifier, project, opts \\ []) do
+      %{
+        issue_id: "id-" <> identifier,
+        identifier: identifier,
+        issue_title: Keyword.get(opts, :title, "Work on " <> identifier),
+        issue_url: nil,
+        state: "In Progress",
+        project_slug: project,
+        labels: [],
+        backend: "claude",
+        session_id: "s-" <> identifier,
+        turn_count: 2,
+        started_at: Keyword.get(opts, :started_at, DateTime.utc_now()),
+        last_agent_timestamp: Keyword.get(opts, :last_at),
+        last_agent_message: nil,
+        last_agent_event: nil,
+        agent_input_tokens: 100,
+        agent_output_tokens: 20,
+        agent_total_tokens: 120
+      }
+    end
+
+    defp set_running(orchestrator, running), do: :sys.replace_state(orchestrator, &Keyword.put(&1, :running, running))
 
     defp data_json(html) do
       [_, json] = Regex.run(~r/data-json="([^"]*)"/, html)
@@ -593,6 +624,87 @@ defmodule SymphonyElixir.FactoryEditorTest do
       refute html =~ ~s(<option value="WEB">)
       json = member_view |> element("#factory-data") |> render() |> data_json()
       assert Enum.map(json["teams"], & &1["key"]) == ["PAY", "project:checkout"]
+    end
+
+    test "the project picker narrows the dashboard to one project; the agent count stays Symphony-wide", ctx do
+      UsageLedger.observe_issue(%Issue{id: "1", identifier: "PAY-1", state: "Todo", project_slug: "checkout"})
+      UsageLedger.observe_issue(%Issue{id: "2", identifier: "WEB-1", state: "Todo", project_slug: "site"})
+      UsageLedger.observe_issue(%Issue{id: "3", identifier: "PAY-2", state: "Todo", project_slug: "billing"})
+      set_running(ctx.orchestrator, [running_agent("PAY-1", "checkout"), running_agent("WEB-1", "site"), running_agent("PAY-2", "billing")])
+
+      {:ok, view, html} = live(session_for(ctx.ada), "/?team=PAY")
+      assert html =~ ~r{3/\d+ agents}
+      assert html =~ "PAY-1"
+      refute html =~ "WEB-1"
+      assert html =~ ~s(<option value="checkout">)
+      refute html =~ ~s(<option value="site">)
+
+      render_change(element(view, "#team-picker"), %{"team" => "PAY", "project" => "checkout"})
+      assert_patch(view, "/?team=PAY&project=checkout")
+      html = render(view)
+      json = view |> element("#factory-data") |> render() |> data_json()
+      assert Enum.map(json["teams"], & &1["key"]) == ["project:checkout"]
+      assert json["scope"] == "project:checkout"
+      assert html =~ ~r{3/\d+ agents}
+      assert html =~ "PAY-1"
+      refute html =~ "PAY-2"
+
+      # Picking another team starts from all of its projects.
+      render_change(element(view, "#team-picker"), %{"team" => "WEB", "project" => "checkout"})
+      assert_patch(view, "/?team=WEB")
+
+      # A project outside the chosen team falls back to all of the team's.
+      {:ok, _view, html} = live(session_for(ctx.ada), "/?team=PAY&project=site")
+      assert html =~ ~s(<option value="all" selected="">All projects</option>)
+    end
+
+    test "ended sessions are listed beside live ones, searchable, and only for the viewer's teams", ctx do
+      set_running(ctx.orchestrator, [running_agent("PAY-1", "checkout")])
+      SessionHistory.record(running_agent("PAY-7", "checkout", title: "Fix the login page"), :finished)
+      SessionHistory.record(running_agent("WEB-9", "site", title: "Fix the login form"), :crashed, "agent exited: :boom")
+      assert length(SessionHistory.list()) == 2
+
+      {:ok, view, html} = live(session_for(ctx.mia), "/")
+      # Live by default, with the ended ones counted.
+      assert html =~ "PAY-1"
+      refute html =~ "PAY-7"
+      assert html =~ ~r{Completed\s*<span class="muted numeric">1</span>}
+
+      html = render_click(view, "sessions_view", %{"view" => "completed"})
+      assert html =~ "PAY-7"
+      assert html =~ "Finished"
+      assert html =~ "💬 Transcript"
+      refute html =~ "WEB-9"
+      refute html =~ "Watch the agent"
+
+      html = render_click(view, "sessions_view", %{"view" => "all"})
+      assert html =~ "PAY-1"
+      assert html =~ "PAY-7"
+
+      html = view |> element("#sessions-filter") |> render_change(%{"query" => "pay-7"})
+      assert html =~ "PAY-7"
+      refute html =~ "Work on PAY-1"
+
+      html = view |> element("#sessions-filter") |> render_change(%{"query" => "nothing like it"})
+      assert html =~ "No sessions match"
+
+      {:ok, view, _html} = live(session_for(ctx.ada), "/")
+      html = render_click(view, "sessions_view", %{"view" => "completed"})
+      assert html =~ "WEB-9"
+      assert html =~ "Crashed"
+    end
+
+    test "the health strip says whether the factory works and flags a quiet agent as stuck", ctx do
+      quiet_since = DateTime.add(DateTime.utc_now(), -3_600, :second)
+      set_running(ctx.orchestrator, [running_agent("PAY-1", "checkout", started_at: quiet_since, last_at: quiet_since)])
+
+      {:ok, _view, html} = live(session_for(ctx.ada), "/")
+      assert html =~ ~s(id="health")
+      assert html =~ "Stuck"
+      assert html =~ "No update for"
+      assert html =~ "row-stuck"
+      # Cost lives on the traces and metrics page now.
+      refute html =~ ~s(id="spend")
     end
 
     test "AI drafts run in the background and are pushed when ready", %{mia: mia} do
