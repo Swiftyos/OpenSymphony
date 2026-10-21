@@ -16,6 +16,8 @@ defmodule SymphonyElixir.Orchestrator do
     IssueConfig,
     IssueStage,
     RetryStore,
+    RunLauncher,
+    RunRegistry,
     StatusDashboard,
     Tracker,
     UsageLedger,
@@ -92,6 +94,7 @@ defmodule SymphonyElixir.Orchestrator do
       }
       |> initialize_backend_totals(config)
       |> restore_retries()
+      |> recover_runs()
 
     run_terminal_workspace_cleanup()
     :ok = SymphonyElixir.DelayedRestartSignal.install()
@@ -488,7 +491,7 @@ defmodule SymphonyElixir.Orchestrator do
         worker_host = Map.get(running_entry, :worker_host)
 
         if is_pid(pid) do
-          terminate_task(pid)
+          stop_running_task(running_entry)
         end
 
         if cleanup_workspace do
@@ -498,6 +501,8 @@ defmodule SymphonyElixir.Orchestrator do
         if is_reference(ref) do
           Process.demonitor(ref, [:flush])
         end
+
+        RunRegistry.delete(issue_id)
 
         %{state | running: Map.delete(state.running, issue_id), claimed: MapSet.delete(state.claimed, issue_id)}
         |> put_retry_attempts(Map.delete(state.retry_attempts, issue_id))
@@ -581,6 +586,18 @@ defmodule SymphonyElixir.Orchestrator do
   defp stall_activity_label(running_entry) when is_map(running_entry) do
     if running_entry_backend(running_entry) == "codex", do: "codex", else: "agent"
   end
+
+  defp stop_running_task(%{launcher: launcher, run_ref: run_ref}) when is_atom(launcher) and is_binary(run_ref) do
+    if Code.ensure_loaded?(launcher) and function_exported?(launcher, :stop, 1) do
+      launcher.stop(run_ref)
+    else
+      :ok
+    end
+  end
+
+  defp stop_running_task(%{pid: pid}), do: terminate_task(pid)
+
+  defp stop_running_task(_running_entry), do: :ok
 
   defp terminate_task(pid) when is_pid(pid) do
     case Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, pid) do
@@ -899,30 +916,48 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host, route, issue_config, account) do
-    case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
-           AgentRunner.run(
-             issue,
-             recipient,
-             attempt: attempt,
-             worker_host: worker_host,
-             route: route,
-             issue_config: issue_config,
-             account: account
-           )
-         end) do
-      {:ok, pid} ->
+    launcher = RunLauncher.launcher()
+
+    case launcher.start(
+           fn ->
+             AgentRunner.run(
+               issue,
+               recipient,
+               attempt: attempt,
+               worker_host: worker_host,
+               route: route,
+               issue_config: issue_config,
+               account: account
+             )
+           end,
+           []
+         ) do
+      {:ok, pid, run_ref} ->
         ref = Process.monitor(pid)
 
         Logger.info(
           "Dispatching issue to agent: #{issue_context(issue)} backend=#{route.backend} effort=#{route.effort || "default"} pid=#{inspect(pid)} attempt=#{inspect(attempt)} worker_host=#{worker_host || "local"} account=#{account_log_label(account)}"
         )
 
-        running =
-          Map.put(
-            state.running,
-            issue.id,
-            new_running_entry(issue, pid, ref, worker_host, attempt, route, account)
-          )
+        run_id = RunRegistry.new_run_id()
+        epoch = RunRegistry.next_epoch(issue.id)
+
+        running_entry =
+          new_running_entry(issue, pid, ref, worker_host, attempt, route, account)
+          |> Map.merge(%{run_id: run_id, epoch: epoch, launcher: launcher, run_ref: run_ref})
+
+        :ok =
+          RunRegistry.record(issue.id, %{
+            run_id: run_id,
+            attempt: running_entry.retry_attempt,
+            epoch: epoch,
+            launcher: launcher,
+            ref: run_ref,
+            started_at_unix_ms: DateTime.to_unix(running_entry.started_at, :millisecond),
+            metadata: run_registry_metadata(running_entry)
+          })
+
+        running = Map.put(state.running, issue.id, running_entry)
 
         %{state | running: running, claimed: MapSet.put(state.claimed, issue.id)}
         |> put_retry_attempts(Map.delete(state.retry_attempts, issue.id))
@@ -1087,6 +1122,37 @@ defmodule SymphonyElixir.Orchestrator do
   defp put_retry_attempts(%State{} = state, retry_attempts) do
     :ok = RetryStore.save(retry_attempts)
     %{state | retry_attempts: retry_attempts}
+  end
+
+  # Runs left in the registry were cut off by the last stop. A run a launcher
+  # still reports alive is stopped (adoption comes with the process launcher),
+  # and every one is deleted and retried unless a retry was restored already.
+  defp recover_runs(%State{} = state) do
+    launcher = RunLauncher.launcher()
+
+    Enum.reduce(RunRegistry.load(), state, fn {issue_id, entry}, acc ->
+      if launcher.alive?(entry.ref) do
+        Logger.warning("Interrupted run is still alive issue_id=#{issue_id}: adopting live runs is not supported by this launcher yet; stopping it")
+
+        launcher.stop(entry.ref)
+      end
+
+      RunRegistry.delete(issue_id)
+
+      Logger.info("Recovered interrupted run issue_id=#{issue_id} issue_identifier=#{entry.metadata[:identifier] || issue_id} attempt=#{entry.attempt}")
+
+      if Map.has_key?(acc.retry_attempts, issue_id) do
+        acc
+      else
+        acc
+        |> claim_issue(issue_id)
+        |> schedule_issue_retry(
+          issue_id,
+          entry.attempt + 1,
+          Map.merge(entry.metadata, %{error: "interrupted by a Symphony restart", delay_ms: 1_000})
+        )
+      end
+    end)
   end
 
   # Re-arms the retries saved before the last stop. Each issue is claimed again,
@@ -1299,6 +1365,18 @@ defmodule SymphonyElixir.Orchestrator do
   defp pick_retry_value(previous_retry, metadata, key) when is_atom(key) do
     Map.get(metadata, key) || Map.get(previous_retry, key)
   end
+
+  defp run_registry_metadata(%{identifier: identifier} = running_entry) do
+    running_entry
+    |> retry_issue_metadata()
+    |> Map.merge(%{
+      identifier: identifier,
+      worker_host: Map.get(running_entry, :worker_host),
+      workspace_path: Map.get(running_entry, :workspace_path)
+    })
+  end
+
+  defp run_registry_metadata(_running_entry), do: %{}
 
   defp retry_issue_metadata(%{issue: %Issue{} = issue} = running_entry) do
     issue
@@ -1991,7 +2069,9 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp pop_running_entry(state, issue_id) do
-    {Map.get(state.running, issue_id), %{state | running: Map.delete(state.running, issue_id)}}
+    entry = Map.get(state.running, issue_id)
+    if is_map(entry), do: RunRegistry.delete(issue_id)
+    {entry, %{state | running: Map.delete(state.running, issue_id)}}
   end
 
   defp record_session_completion_totals(state, running_entry) when is_map(running_entry) do

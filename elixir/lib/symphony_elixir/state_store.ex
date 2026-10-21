@@ -1,7 +1,8 @@
 defmodule SymphonyElixir.StateStore do
   @moduledoc """
   Where Symphony keeps its state documents: sessions, usage, users, the agent
-  inbox, factory flows, the retry queue and the session secret.
+  inbox, factory flows, the retry queue, the run registry and the session
+  secret.
 
   Each store reads and writes whole documents named by the path they'd have on
   disk (`~/.symphony/sessions.json`, `~/.symphony/factories/PAY.json`). The

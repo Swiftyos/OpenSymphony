@@ -59,6 +59,10 @@ Kubernetes they move behind a tool gateway.
 2. **Run registry and adoption.** Covers run ids, attempts, epochs, the registry document and
    heartbeat-based liveness. The orchestrator records dispatch and completion, and on start
    adopts live runs. It still uses the local launcher.
+   Done: `SymphonyElixir.RunLauncher` (behaviour and `launcher/0`),
+   `SymphonyElixir.RunLauncher.Local`, `SymphonyElixir.RunRegistry` (`runs.json`), and the
+   orchestrator's dispatch/completion recording and `recover_runs/1` (runs cut off by a
+   restart are retried within a second with their next attempt).
 3. **Runner process.** Adds the `symphony runner <run spec file>` CLI, `RunHost.Remote` with
    the outbox, the controller's `/runner/v1` endpoints with tokens and epoch fencing, and
    command delivery for dashboard messages and steering.

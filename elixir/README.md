@@ -477,6 +477,10 @@ Issues waiting for a retry or a continuation check are saved in `~/.symphony/ret
 - **On restart** each one is claimed again and re-armed for its remaining delay, so the first poll doesn't dispatch it early and its attempt count isn't reset.
 - **Overdue retries.** A retry that came due while Symphony was down runs right away.
 
+### Interrupted runs
+
+Running agent runs are recorded in `~/.symphony/runs.json` with their run id, attempt, epoch and metadata. A run cut off by a restart is retried within a second with its next attempt, so it resumes its session instead of being forgotten until the next poll resets it.
+
 ### Idempotent Linear writes
 
 Symphony's own Linear writes after an agent stage result are safe to retry.
