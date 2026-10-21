@@ -51,6 +51,32 @@ CPU/memory sampler.
 - `symphony_run_memory_bytes_distribution`: histogram of every sample since start (0–32 GiB).
 - `symphony_run_tokens_per_minute{issue,backend}`: token total for the run divided by the run's age.
 
+### Runs hosted by a runner (Kubernetes pods, process runners)
+
+The controller cannot see a runner pod's processes, so a runner measures itself
+(`SymphonyElixir.Capacity.SelfUsage`) every `capacity.sample_interval_ms` and sends a `metrics`
+event over `/runner/v1`. It tries three sources in order:
+
+1. Its cgroup v2: `cpu.stat` `usage_usec`, and `memory.current` minus `memory.stat` `inactive_file`.
+   That is the working set, as the kubelet and `kubectl top` count it.
+2. Its cgroup v1: `cpuacct.usage`, and `memory.usage_in_bytes` minus `total_inactive_file`.
+3. Its own process tree in `/proc`: CPU including reaped children, and resident memory.
+
+A cgroup is used only when it belongs to the run alone: `/` in a namespaced container, or a
+`symphony-run-*` systemd unit. A cgroup shared with anything else is skipped, and the process tree
+is used instead. In a docker sandbox the runner does not report, because the controller's `stats`
+call already sees the agent's container.
+
+Under gVisor (GKE Sandbox), the sandbox kernel decides which of these files it emulates.
+`symphony_run_usage_reports_total{source}` (`cgroup_v2`, `cgroup_v1`, `proc`) shows which source
+answered. Check it on the first GKE runs: `proc` means the cgroup files were not readable in the
+sandbox.
+
+The sampler uses a report younger than three sample intervals as that run's sample. It writes the
+same `symphony_run_cpu_percent`, `symphony_run_memory_bytes` and distribution series, with the same
+`issue`, `backend` and `stage` labels. A runner-hosted run is never matched against the
+controller's `ps`, because the agent pid it reports is its pod's.
+
 With `sandbox.kind: docker`, one `docker`/`podman stats` call per sample covers all Symphony
 containers and containers are mapped back to issues by workspace. Without a sandbox, one
 portable `ps -e -o pid=,ppid=,rss=,time=` call per sample covers the process trees of the local
@@ -68,6 +94,63 @@ leaves the previous per-run gauges in place. Gauges for runs that have finished 
 after a successful sample. Sampler failures (missing container command, unreadable `ps`, invalid
 JSON) are logged once per kind of error and never crash Symphony; a successful sample clears that
 record so a later failure is logged again.
+
+### Agents
+
+These are recorded where in-process and runner-hosted runs converge, so a pod's run counts exactly
+like a local one. Runner events are deduplicated by seq before they are counted.
+
+- `symphony_agent_tokens_total{backend,type}`: tokens by `type` (`input`, which includes cached
+  input, `output`, `cached_input`). The deltas are the ones the usage ledger records.
+- `symphony_agent_turns_total{backend}`: turns started.
+- `symphony_agent_tool_calls_total{backend,outcome}`: tool calls that finished. This covers
+  commands, edits, MCP and dynamic tools, Claude Code tool results and OpenCode tool parts.
+  `outcome` is `ok` or `error` (failed or declined). A call is counted from its final transcript
+  status, and an entry without a status (Codex web searches) is not counted.
+- `symphony_agent_runs_total{backend,outcome}` and the histogram
+  `symphony_agent_run_duration_seconds{backend,outcome}` (30s to 12h): runs that left `running`.
+  The outcomes are `finished`, `crashed`, `stalled`, `closed`, `paused`, `moved` and `missing`.
+  A run that ended while the controller was down is not counted.
+
+### Kubernetes runner pods
+
+These come from the controller's single pod watch (`agent.launcher: kubernetes`; see
+[durable-runs.md](durable-runs.md)):
+
+- `symphony_runner_pods{phase}`: runner pods by phase (`pending`, `running`, `succeeded`,
+  `failed`, `unknown`). Finished pods stay until the janitor deletes them
+  (`finished_pod_retention_ms`).
+- `symphony_runner_pods_waiting{reason}`: Pending pods that are waiting for capacity.
+  `scheduling_gated` means not yet admitted by Kueue. `unschedulable` means no node fits.
+- `symphony_runner_pod_start_seconds`: histogram, 1s to 6h, from pod creation until the runner
+  container starts. It includes the Kueue wait, scheduling and image pulls. Only Pending→Running
+  transitions the watch sees are recorded.
+- `symphony_runner_pod_failures_total{reason}`: pods that turned Failed. The reason is the pod's
+  own (`DeadlineExceeded`, `Evicted`), else the runner container's (`OOMKilled`, `Error`), with
+  the exit code removed.
+- `symphony_runner_launches_total{outcome}` (`started`, `failed`) and
+  `symphony_runner_launch_failures_total{reason}`. The failure reason is a bounded step or status:
+  `settings`, `runner_config`, `render`, `kube_client`, `http_<status>`, `transport`, `watcher`
+  or `other`.
+- `symphony_runner_janitor_deletions_total{kind}` (`pod`, `secret`).
+- `symphony_runner_pod_watch_reconnects_total{reason}`. `closed` is the API server's normal
+  five-minute watch timeout. `gone` is a 410 and triggers a relist. The others are
+  `http_<status>`, `list_<reason>`, `transport`, `crashed` and `invalid_event`.
+- `symphony_runner_pod_watch_synced`: 1 while the pod cache is trusted.
+- `symphony_runner_pod_status_checks_total{source}`: where each run watcher's pod check was
+  answered. `cache` is the pod cache. `miss` is a GET for a pod the cache does not have, and
+  `stale` is a GET while the cache is not trusted. Many `stale` checks mean the watch is down
+  and the API server is being polled again.
+
+### Label cardinality at 1000 runs
+
+- `symphony_run_cpu_percent`, `symphony_run_memory_bytes` (`issue`, `backend`, `stage`) and
+  `symphony_run_tokens_per_minute` (`issue`, `backend`) keep the existing per-run design. They are gauges that are
+  replaced on every sample, so only running runs have series: about 3000 at 1000 concurrent runs,
+  and none left over once a run ends. Dashboards rely on them for per-issue drill-down.
+- Every other series is labelled only by bounded values: backend, stage, phase, reason, outcome
+  and source. Run ids and pod names are never labels. Reason labels are reduced to fixed sets
+  (HTTP status, a step, the pod's reason word), never free text.
 
 ## Reading it from the VM
 
@@ -102,6 +185,22 @@ quantile_over_time(0.95, symphony_run_tokens_per_minute[1h])
 
 # Linear requests/min per running agent
 sum(rate(symphony_linear_requests_total[5m])) / max(symphony_runs_sampled)
+
+# Runner pods by phase, and Kueue backlog
+sum by (phase) (symphony_runner_pods)
+symphony_runner_pods_waiting{reason="scheduling_gated"}
+
+# p95 pod start latency (creation to running) over the last hour
+histogram_quantile(0.95, sum by (le) (rate(symphony_runner_pod_start_seconds_bucket[1h])))
+
+# API GETs the pod watch saves: share of watcher checks answered from the cache
+sum(rate(symphony_runner_pod_status_checks_total{source="cache"}[5m]))
+  / sum(rate(symphony_runner_pod_status_checks_total[5m]))
+
+# Tokens per minute by backend, tool error ratio, run outcomes
+sum by (backend) (rate(symphony_agent_tokens_total{type!="cached_input"}[5m])) * 60
+sum(rate(symphony_agent_tool_calls_total{outcome="error"}[1h])) / sum(rate(symphony_agent_tool_calls_total[1h]))
+sum by (outcome) (increase(symphony_agent_runs_total[1d]))
 
 # Git operations per agent start
 sum(rate(symphony_git_operations_total{operation="workspace_create"}[15m]))

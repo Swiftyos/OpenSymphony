@@ -312,25 +312,61 @@ Kubernetes they move behind a tool gateway.
      container finished more than `finished_pod_retention_ms` (1h) ago, and deletes
      `run-*` Secrets (and the ConfigMap of the same name) that have no pod and are
      older than ten minutes (a launch creates its Secret just before its pod).
-   - **API load.** Each run's watcher GETs its pod every 5s: 200 GET/s at 1000
-     concurrent runs. A single pod watch (or informer) over the
-     `app.kubernetes.io/name=symphony-runner` label should feed the watchers before runs
-     scale that far; a follow-up note marks it in the launcher.
+   - **Pod watch.** Polling each pod would be 200 GET/s at 1000 concurrent runs (one GET
+     per run every 5s). Instead, `SymphonyElixir.RunLauncher.Kubernetes.PodWatch` keeps one
+     watch over the `app.kubernetes.io/name=symphony-runner` pods in
+     `agent.kubernetes.namespace` while the launcher is Kubernetes:
+     - It lists the pods with `Kube.list_pods_with_version/4`, 500 per page, and replaces its
+       ETS cache with them.
+     - It then watches from the list's `resourceVersion` with `Kube.watch_pods/6`
+       (`?watch=1&allowWatchBookmarks=true&timeoutSeconds=300`). The response is streamed over
+       `Req`, never retried by Req and uncompressed, and each line is applied as it arrives.
+       Bookmarks advance the version.
+     - A normal end of the watch rewatches at once from the last version. A `410 Gone`, as a
+       status or an `ERROR` event, lists again. Any other error, or a crashed watch task,
+       rewatches after a backoff of 1s doubling to 30s, and a failed list is retried the same
+       way.
+     - The cache keeps only each pod's name, timestamps, version, scheduling gates and status,
+       a few MB for 1000 pods.
+
+     The run watchers still poll every 5s, but `Kubernetes.status/2` answers from ETS. It GETs
+     the pod only in two cases:
+     - The pod is missing from the cache: it was just created and its `ADDED` event has not
+       arrived, or it is gone. A gone pod is confirmed this way before its watcher's lost
+       clock runs out.
+     - The cache is not trusted: not synced, another namespace, or a watch that has failed for
+       longer than 60s.
+
+     A watch outage therefore degrades to the old polling rather than to wrong answers.
+     `symphony_runner_pod_status_checks_total{source}` shows which happened.
+   - **Metrics.** The pod watch keeps the runner pod series. The launcher counts launches and
+     launch failures by a bounded reason, and the janitor counts its deletions. Runners report
+     their own CPU and memory as `metrics` events, which feed the VM's per-run series. Agent
+     tokens, turns, tool calls and run outcomes are counted the same way for both run hosts.
+     See [capacity.md](capacity.md) for the series and their label bounds.
    - `agent.kubernetes` config: namespace, images, `controller_url`, CPU/memory
      requests and limits, ephemeral storage and `emptyDir` size limits,
      `agent_tools_ephemeral_storage_request`, `run_as_user`, `queue_name`,
      `active_deadline_seconds` (default 6h), `finished_pod_retention_ms` (1h),
      `janitor_interval_ms` (5 min), and `secret_env` references to existing Secrets.
      The images and `controller_url` are required only when the launcher renders a pod.
-   - **RBAC.** The controller Role needs `patch` on `secrets` and `configmaps` for the
-     ownerReferences, and `list` on `pods` and `secrets` for the janitor
-     (create/get/delete are already granted).
+   - **RBAC.** The controller Role needs:
+     - `patch` on `secrets` and `configmaps`, for the ownerReferences;
+     - `list` on `pods` and `secrets`, for the janitor and the pod watch's list;
+     - `watch` on `pods`, for the pod watch.
+
+     create/get/delete are already granted. Without `watch`, every watch attempt fails with
+     `403`, so `symphony_runner_pod_watch_reconnects_total{reason="http_403"}` rises and the
+     watchers fall back to a GET per check. No extra RBAC is needed for per-run metrics:
+     runners report their own usage, so `metrics.k8s.io` is not used.
    Remaining:
    - **GitHub App tokens.** Per-run installation tokens are not in place yet; `secret_env`
      passes static named credentials. A minter will produce a per-run token and add it to
      the run Secret. There is a TODO at the rendering hook for this.
-   - **Pod watch.** Replace the per-run poll with one watch or informer (see API load
-     above).
+   - **Per-run usage under gVisor.** The runner reads its cgroup v2, then cgroup v1, then
+     `/proc`. Check which one gVisor answers (`symphony_run_usage_reports_total{source}`)
+     on the first GKE runs. If it is `proc` and that proves inaccurate, the fallback is the
+     `metrics.k8s.io` PodMetrics API, which needs `get`/`list` on `pods.metrics.k8s.io`.
    - **Environments on the pod.** The spec's resolved `environment` (image, resources,
      service sidecars, setup) is not rendered into the pod yet; the runner image and
      `agent.kubernetes` resources are used.

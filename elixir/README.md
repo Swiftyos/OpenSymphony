@@ -412,6 +412,18 @@ projects:
   `/metrics` exposes per-agent Linear, git, CPU, memory and token-rate series; see
   [`docs/capacity.md`](docs/capacity.md) for metric meanings, PromQL recipes and the pre-Kubernetes
   sizing checklist.
+- `/metrics` also has:
+  - **Agent series**: `symphony_agent_tokens_total`, `symphony_agent_turns_total`,
+    `symphony_agent_tool_calls_total`, `symphony_agent_runs_total` and
+    `symphony_agent_run_duration_seconds`, labelled by backend, token type and outcome.
+  - **Runner pod series** (Kubernetes launcher): `symphony_runner_pods{phase}`,
+    `symphony_runner_pods_waiting{reason}` for Kueue or scheduling, pod start latency, pod and
+    launch failures, janitor deletions and pod watch health.
+  - Runs hosted by a runner (a pod or a process runner) report their own CPU and memory. They
+    feed the same `symphony_run_cpu_percent` and `symphony_run_memory_bytes` series as local runs,
+    so one dashboard covers the VM and Kubernetes.
+  - No series is labelled by run id. The per-run gauges carry `issue` and exist only for runs
+    that are running.
 
 ### Telemetry export and trace context
 
