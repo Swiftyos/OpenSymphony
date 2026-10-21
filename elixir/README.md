@@ -294,7 +294,10 @@ projects:
   reload error until the file is fixed.
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard, Prometheus
   metrics, and JSON API at `/`, `/metrics`, `/api/v1/state`, `/api/v1/<issue_identifier>`,
-  `/api/v1/refresh`, and `/api/v1/issues/<issue_identifier>/messages`.
+  `/api/v1/refresh`, and `/api/v1/issues/<issue_identifier>/messages`. Besides account usage,
+  `/metrics` exposes per-agent Linear, git, CPU, memory and token-rate series; see
+  [`docs/capacity.md`](docs/capacity.md) for metric meanings, PromQL recipes and the pre-Kubernetes
+  sizing checklist.
 
 ### Telemetry metrics and traces in the dashboard
 

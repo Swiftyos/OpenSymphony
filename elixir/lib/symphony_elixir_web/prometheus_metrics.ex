@@ -4,6 +4,7 @@ defmodule SymphonyElixirWeb.PrometheusMetrics do
   """
 
   alias SymphonyElixir.{Accounts, Config}
+  alias SymphonyElixir.Capacity.Prometheus, as: CapacityPrometheus
 
   @usage_periods_file "usage_periods.csv"
 
@@ -108,6 +109,7 @@ defmodule SymphonyElixirWeb.PrometheusMetrics do
       Enum.join(block_lines, "\n")
     end)
     |> Kernel.<>("\n")
+    |> Kernel.<>(CapacityPrometheus.render())
   end
 
   @doc """

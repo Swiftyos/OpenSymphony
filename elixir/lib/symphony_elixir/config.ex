@@ -355,6 +355,12 @@ defmodule SymphonyElixir.Config do
     end
   end
 
+  @doc "How often the capacity sampler measures running agents, in milliseconds. 0 disables it."
+  @spec capacity_sample_interval_ms() :: non_neg_integer()
+  def capacity_sample_interval_ms do
+    settings!().capacity.sample_interval_ms
+  end
+
   @spec telemetry_enabled?() :: boolean()
   def telemetry_enabled? do
     settings!().telemetry.enabled

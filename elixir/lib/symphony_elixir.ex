@@ -70,7 +70,9 @@ defmodule SymphonyElixir.Application do
       # Warms project repo caches so agent starts rarely fetch from GitHub.
       SymphonyElixir.RepoCacheRefresher,
       SymphonyElixir.RunnerCommands,
+      SymphonyElixir.Capacity.Metrics,
       SymphonyElixir.Orchestrator,
+      SymphonyElixir.Capacity.Sampler,
       SymphonyElixir.HttpServer,
       SymphonyElixir.StatusDashboard,
       SymphonyElixir.ClaudeCode.RateLimitPoller

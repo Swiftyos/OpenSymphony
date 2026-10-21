@@ -4,6 +4,7 @@ defmodule SymphonyElixir.Workspace do
   """
 
   require Logger
+  alias SymphonyElixir.Capacity.Metrics
   alias SymphonyElixir.{Config, IssueConfig, PathSafety, ProjectWorkflow, RepoCacheLock, Sandbox, SSH}
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixirWeb.PrometheusMetrics
@@ -809,7 +810,7 @@ defmodule SymphonyElixir.Workspace do
 
     sync_script = build_repo_cache_sync_script(cache_repo, repo_source, target_branch, sync_opts)
 
-    case run_local_script(sync_script, timeout_ms) do
+    case instrument_git_operation("cache_clone_or_fetch", fn -> run_local_script(sync_script, timeout_ms) end) do
       {:ok, {output, 0}} ->
         record_repo_cache_outcome(repo_source, output, issue_context, sync_opts)
         :ok
@@ -844,7 +845,7 @@ defmodule SymphonyElixir.Workspace do
 
     sync_script = build_remote_repo_cache_sync_script(cache_repo, repo_source, target_branch, sync_opts)
 
-    case run_remote_command(worker_host, sync_script, timeout_ms) do
+    case instrument_git_operation("cache_clone_or_fetch", fn -> run_remote_command(worker_host, sync_script, timeout_ms) end) do
       {:ok, {output, 0}} ->
         record_repo_cache_outcome(repo_source, output, issue_context, sync_opts)
         :ok
@@ -963,7 +964,9 @@ defmodule SymphonyElixir.Workspace do
     do: :ok
 
   defp add_workspace_worktree(workspace, cache_repo, branch_name, target_branch, repo_source, issue_context, nil, timeout_ms) do
-    case run_local_script(build_worktree_add_script(cache_repo, workspace, branch_name, target_branch), timeout_ms) do
+    case instrument_git_operation("workspace_create", fn ->
+           run_local_script(build_worktree_add_script(cache_repo, workspace, branch_name, target_branch), timeout_ms)
+         end) do
       {:ok, {_output, 0}} ->
         :ok
 
@@ -987,7 +990,9 @@ defmodule SymphonyElixir.Workspace do
        when is_binary(worker_host) do
     add_script = build_remote_worktree_add_script(cache_repo, workspace, branch_name, target_branch)
 
-    case run_remote_command(worker_host, add_script, timeout_ms) do
+    case instrument_git_operation("workspace_create", fn ->
+           run_remote_command(worker_host, add_script, timeout_ms)
+         end) do
       {:ok, {_output, 0}} ->
         :ok
 
@@ -1389,6 +1394,21 @@ defmodule SymphonyElixir.Workspace do
       "fi"
     ]
   end
+
+  defp instrument_git_operation(operation, fun) when is_function(fun, 0) do
+    started_at = System.monotonic_time()
+    result = fun.()
+    duration_seconds = System.convert_time_unit(System.monotonic_time() - started_at, :native, :microsecond) / 1_000_000
+    outcome = git_operation_outcome(result)
+
+    Metrics.record_counter("symphony_git_operations_total", operation: operation, outcome: outcome)
+    Metrics.record_histogram("symphony_git_operation_duration_seconds", [operation: operation], duration_seconds)
+
+    result
+  end
+
+  defp git_operation_outcome({:ok, {_output, 0}}), do: "ok"
+  defp git_operation_outcome(_result), do: "error"
 
   defp run_local_script(script, timeout_ms) when is_binary(script) and is_integer(timeout_ms) and timeout_ms > 0 do
     task =

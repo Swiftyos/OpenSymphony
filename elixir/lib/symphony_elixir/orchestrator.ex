@@ -2159,6 +2159,7 @@ defmodule SymphonyElixir.Orchestrator do
       project_name: issue_value(metadata, :project_name),
       labels: issue_value(metadata, :labels) || [],
       backend: running_entry_backend(metadata),
+      stage: running_entry_stage(metadata),
       effort: Map.get(metadata, :effort),
       worker_host: Map.get(metadata, :worker_host),
       workspace_path: Map.get(metadata, :workspace_path),
@@ -2182,6 +2183,16 @@ defmodule SymphonyElixir.Orchestrator do
       runtime_seconds: running_seconds(metadata.started_at, now)
     }
   end
+
+  defp running_entry_stage(%{issue: %Issue{} = issue}) do
+    IssueStage.stage(issue)
+  rescue
+    _error -> nil
+  catch
+    _kind, _reason -> nil
+  end
+
+  defp running_entry_stage(_metadata), do: nil
 
   defp issue_value(%{issue: issue}, key) when is_map(issue), do: Map.get(issue, key)
   defp issue_value(_metadata, _key), do: nil

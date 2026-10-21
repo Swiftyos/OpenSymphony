@@ -667,6 +667,25 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule Capacity do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+
+    embedded_schema do
+      field(:sample_interval_ms, :integer, default: 30_000)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:sample_interval_ms], empty_values: [])
+      |> validate_number(:sample_interval_ms, greater_than_or_equal_to: 0)
+    end
+  end
+
   defmodule Telemetry do
     @moduledoc false
     use Ecto.Schema
@@ -881,6 +900,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:claude, Claude, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:capacity, Capacity, on_replace: :update, defaults_to_struct: true)
     embeds_one(:telemetry, Telemetry, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
     embeds_one(:instance, Instance, on_replace: :update, defaults_to_struct: true)
@@ -1007,6 +1027,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:claude, with: &Claude.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
+    |> cast_embed(:capacity, with: &Capacity.changeset/2)
     |> cast_embed(:telemetry, with: &Telemetry.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
     |> cast_embed(:instance, with: &Instance.changeset/2)

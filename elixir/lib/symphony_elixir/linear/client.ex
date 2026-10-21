@@ -4,6 +4,7 @@ defmodule SymphonyElixir.Linear.Client do
   """
 
   require Logger
+  alias SymphonyElixir.Capacity.Metrics
   alias SymphonyElixir.{Config, Linear.Issue}
 
   @issue_page_size 50
@@ -182,27 +183,113 @@ defmodule SymphonyElixir.Linear.Client do
   def graphql(query, variables \\ %{}, opts \\ [])
       when is_binary(query) and is_map(variables) and is_list(opts) do
     payload = build_graphql_payload(query, variables, Keyword.get(opts, :operation_name))
+    operation = graphql_operation_name(query, Keyword.get(opts, :operation_name))
     request_fun = Keyword.get(opts, :request_fun, &post_graphql_request/2)
 
     # `api_key:` runs the request as a specific Linear user (dashboard sign-in)
     # instead of Symphony's own tracker key.
-    with {:ok, headers} <- graphql_headers(Keyword.get(opts, :api_key)),
-         {:ok, %{status: 200, body: body}} <- request_fun.(payload, headers) do
-      {:ok, body}
-    else
-      {:ok, response} ->
-        Logger.error(
-          "Linear GraphQL request failed status=#{response.status}" <>
-            linear_error_context(payload, response)
-        )
+    with {:ok, headers} <- graphql_headers(Keyword.get(opts, :api_key)) do
+      started_at = System.monotonic_time()
+      result = request_fun.(payload, headers)
+      record_request_metrics(operation, result, System.monotonic_time() - started_at)
 
-        {:error, {:linear_api_status, response.status}}
+      case result do
+        {:ok, %{status: 200, body: body}} ->
+          record_rate_limit_headers(result)
+          {:ok, body}
 
-      {:error, reason} ->
-        Logger.error("Linear GraphQL request failed: #{inspect(reason)}")
-        {:error, {:linear_api_request, reason}}
+        {:ok, response} ->
+          record_rate_limit_headers(result)
+
+          Logger.error(
+            "Linear GraphQL request failed status=#{response.status}" <>
+              linear_error_context(payload, response)
+          )
+
+          {:error, {:linear_api_status, response.status}}
+
+        {:error, reason} ->
+          Logger.error("Linear GraphQL request failed: #{inspect(reason)}")
+          {:error, {:linear_api_request, reason}}
+      end
     end
   end
+
+  defp graphql_operation_name(query, fallback) do
+    case Regex.run(~r/\b(?:query|mutation|subscription)\s+([A-Za-z_][A-Za-z0-9_]*)/, query) do
+      [_, operation] ->
+        operation
+
+      _ ->
+        case normalize_operation_name(fallback) do
+          nil -> "unknown"
+          operation -> operation
+        end
+    end
+  end
+
+  defp normalize_operation_name(name) when is_binary(name) do
+    case String.trim(name) do
+      "" -> nil
+      normalized -> normalized
+    end
+  end
+
+  defp normalize_operation_name(_name), do: nil
+
+  defp record_request_metrics(operation, result, duration_native) do
+    duration_seconds = System.convert_time_unit(duration_native, :native, :microsecond) / 1_000_000
+
+    Metrics.record_counter("symphony_linear_requests_total",
+      operation: operation,
+      outcome: request_outcome(result)
+    )
+
+    Metrics.record_histogram("symphony_linear_request_duration_seconds", [operation: operation], duration_seconds)
+  end
+
+  defp request_outcome({:ok, %{status: 429}}), do: "rate_limited"
+  defp request_outcome({:ok, %{status: 200}}), do: "ok"
+  defp request_outcome(_result), do: "error"
+
+  defp record_rate_limit_headers({:ok, response}) do
+    case Map.get(response, :headers) do
+      headers when is_list(headers) or is_map(headers) ->
+        Enum.each(
+          [
+            {"requests", "x-ratelimit-requests-remaining"},
+            {"complexity", "x-ratelimit-complexity-remaining"}
+          ],
+          &record_rate_limit_header(headers, &1)
+        )
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp record_rate_limit_header(headers, {kind, header}) do
+    with value when not is_nil(value) <- header_value(headers, header),
+         {remaining, ""} <- Integer.parse(String.trim(to_string(value))) do
+      Metrics.set_gauge("symphony_linear_rate_limit_remaining", [kind: kind], remaining)
+    else
+      _ -> :ok
+    end
+  end
+
+  defp header_value(headers, name) when is_list(headers) do
+    Enum.find_value(headers, fn {key, value} ->
+      if String.downcase(to_string(key)) == name, do: value
+    end)
+  end
+
+  defp header_value(headers, name) when is_map(headers) do
+    Enum.find_value(headers, fn {key, value} ->
+      if String.downcase(to_string(key)) == name, do: value
+    end)
+  end
+
+  defp header_value(_headers, _name), do: nil
 
   @doc false
   @spec normalize_issue_for_test(map()) :: Issue.t() | nil
