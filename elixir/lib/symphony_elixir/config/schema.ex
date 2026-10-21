@@ -430,6 +430,15 @@ defmodule SymphonyElixir.Config.Schema do
       field(:memory_request, :string, default: "1Gi")
       field(:memory_limit, :string, default: "4Gi")
       field(:active_deadline_seconds, :integer, default: 21_600)
+      # The uid/gid every runner container runs as (and the pod fsGroup).
+      field(:run_as_user, :integer, default: 10_001)
+      # Kueue LocalQueue the pod is labelled for; "" leaves the label off.
+      field(:queue_name, :string, default: "symphony")
+      # emptyDir size limits and the runner's ephemeral-storage; "" omits each.
+      field(:workspace_size_limit, :string, default: "20Gi")
+      field(:agent_tools_size_limit, :string, default: "1Gi")
+      field(:ephemeral_storage_request, :string, default: "2Gi")
+      field(:ephemeral_storage_limit, :string, default: "24Gi")
       # [{env, secret, key}] references to existing secrets, injected by name.
       field(:secret_env, {:array, :map}, default: [])
     end
@@ -448,6 +457,12 @@ defmodule SymphonyElixir.Config.Schema do
           :memory_request,
           :memory_limit,
           :active_deadline_seconds,
+          :run_as_user,
+          :queue_name,
+          :workspace_size_limit,
+          :agent_tools_size_limit,
+          :ephemeral_storage_request,
+          :ephemeral_storage_limit,
           :secret_env
         ],
         empty_values: []
@@ -455,9 +470,16 @@ defmodule SymphonyElixir.Config.Schema do
       |> update_change(:namespace, &normalize_namespace/1)
       |> update_change(:runner_image, &Schema.normalize_optional_string/1)
       |> update_change(:agent_tools_image, &Schema.normalize_optional_string/1)
-      |> validate_required([:namespace, :cpu_request, :cpu_limit, :memory_request, :memory_limit])
+      |> update_change(:queue_name, &Schema.normalize_optional_string/1)
+      |> update_change(:workspace_size_limit, &Schema.normalize_optional_string/1)
+      |> update_change(:agent_tools_size_limit, &Schema.normalize_optional_string/1)
+      |> update_change(:ephemeral_storage_request, &Schema.normalize_optional_string/1)
+      |> update_change(:ephemeral_storage_limit, &Schema.normalize_optional_string/1)
+      |> validate_required([:namespace, :cpu_request, :cpu_limit, :memory_request, :memory_limit, :run_as_user])
       |> validate_format(:namespace, ~r/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/, message: "must be a DNS label such as symphony-runs")
+      |> validate_format(:queue_name, ~r/^[A-Za-z0-9]([A-Za-z0-9_.-]{0,61}[A-Za-z0-9])?$/, message: "must be a label value such as symphony")
       |> validate_number(:active_deadline_seconds, greater_than: 0)
+      |> validate_number(:run_as_user, greater_than: 0)
       |> validate_change(:secret_env, &validate_secret_env/2)
     end
 

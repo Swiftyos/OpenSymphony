@@ -74,7 +74,7 @@ defmodule SymphonyElixir.KubeTest do
   end
 
   test "in-cluster config reads the token, CA and service-account variables" do
-    directory = service_account_dir(%{"token" => "token-from-file", "ca.crt" => "ca"})
+    directory = service_account_dir(%{"token" => "token-from-file", "ca.crt" => ca_pem()})
     parent = self()
 
     assert {:ok, client} =
@@ -94,7 +94,7 @@ defmodule SymphonyElixir.KubeTest do
   end
 
   test "in-cluster config brackets an IPv6 API server host" do
-    directory = service_account_dir(%{"token" => "token", "ca.crt" => "ca"})
+    directory = service_account_dir(%{"token" => "token", "ca.crt" => ca_pem()})
     parent = self()
 
     assert {:ok, client} =
@@ -114,7 +114,7 @@ defmodule SymphonyElixir.KubeTest do
   end
 
   test "in-cluster config fails without the host, port, token or CA" do
-    directory = service_account_dir(%{"token" => "token", "ca.crt" => "ca"})
+    directory = service_account_dir(%{"token" => "token", "ca.crt" => ca_pem()})
 
     assert {:error, :not_in_cluster} =
              Kube.client(service_account_dir: directory, env: %{"KUBERNETES_SERVICE_PORT" => "443"})
@@ -124,7 +124,7 @@ defmodule SymphonyElixir.KubeTest do
 
     assert {:error, {:in_cluster_config, :enoent}} =
              Kube.client(
-               service_account_dir: service_account_dir(%{"ca.crt" => "ca"}),
+               service_account_dir: service_account_dir(%{"ca.crt" => ca_pem()}),
                env: %{"KUBERNETES_SERVICE_HOST" => "10.0.0.1", "KUBERNETES_SERVICE_PORT" => "443"}
              )
 
@@ -133,6 +133,104 @@ defmodule SymphonyElixir.KubeTest do
                service_account_dir: service_account_dir(%{"token" => "token"}),
                env: %{"KUBERNETES_SERVICE_HOST" => "10.0.0.1", "KUBERNETES_SERVICE_PORT" => "443"}
              )
+  end
+
+  test "in-cluster TLS verifies the API server with the decoded CA certificates" do
+    %{cert: der} = :public_key.pkix_test_root_cert(~c"Kube Test CA", [])
+    pem = :public_key.pem_encode([{:Certificate, der, :not_encrypted}])
+    directory = service_account_dir(%{"token" => "token", "ca.crt" => pem})
+
+    assert {:ok, client} =
+             Kube.client(
+               service_account_dir: directory,
+               env: %{"KUBERNETES_SERVICE_HOST" => "10.0.0.1", "KUBERNETES_SERVICE_PORT" => "443"},
+               req_options: [connect_options: [timeout: 1_000, transport_opts: [depth: 3]]]
+             )
+
+    connect_options = client.req.options.connect_options
+    assert connect_options[:timeout] == 1_000
+    transport_opts = connect_options[:transport_opts]
+    assert transport_opts[:cacerts] == [der]
+    assert transport_opts[:verify] == :verify_peer
+    assert transport_opts[:depth] == 3
+    refute Keyword.has_key?(transport_opts, :cacertfile)
+    assert [match_fun: match_fun] = transport_opts[:customize_hostname_check]
+    assert is_function(match_fun, 2)
+  end
+
+  test "explicit credentials leave TLS options to the caller" do
+    assert {:ok, client} = Kube.client(base_url: "https://kube.test", token: "token")
+    refute Map.has_key?(client.req.options, :connect_options)
+  end
+
+  test "in-cluster config rejects a CA file without a certificate" do
+    directory = service_account_dir(%{"token" => "token", "ca.crt" => "not a certificate"})
+
+    assert {:error, {:in_cluster_config, :invalid_ca_certificate}} =
+             Kube.client(
+               service_account_dir: directory,
+               env: %{"KUBERNETES_SERVICE_HOST" => "10.0.0.1", "KUBERNETES_SERVICE_PORT" => "443"}
+             )
+  end
+
+  test "the in-cluster token is re-read on every request" do
+    directory = service_account_dir(%{"token" => "first-token\n", "ca.crt" => ca_pem()})
+    parent = self()
+
+    assert {:ok, client} =
+             Kube.client(
+               service_account_dir: directory,
+               env: %{"KUBERNETES_SERVICE_HOST" => "10.0.0.1", "KUBERNETES_SERVICE_PORT" => "443"},
+               req_options: [
+                 retry: false,
+                 plug: fn conn ->
+                   send(parent, {:authorization, Plug.Conn.get_req_header(conn, "authorization")})
+                   Req.Test.json(conn, %{})
+                 end
+               ]
+             )
+
+    assert {:ok, %{}} = Kube.get_pod(client, "ns", "run-1")
+    assert_receive {:authorization, ["Bearer first-token"]}
+
+    File.write!(Path.join(directory, "token"), "rotated-token")
+    assert {:ok, %{}} = Kube.get_pod(client, "ns", "run-1")
+    assert_receive {:authorization, ["Bearer rotated-token"]}
+
+    File.rm!(Path.join(directory, "token"))
+    assert {:error, %File.Error{reason: :enoent}} = Kube.get_pod(client, "ns", "run-1")
+    refute_receive {:authorization, _header}
+  end
+
+  test "config maps are created, patched and deleted, and secrets are patched" do
+    parent = self()
+
+    client =
+      client!(
+        plug: fn conn ->
+          {:ok, body, conn} = Plug.Conn.read_body(conn)
+          send(parent, {:request, conn.method, conn.request_path, Plug.Conn.get_req_header(conn, "content-type"), body})
+          Req.Test.json(conn, %{"kind" => "ok"})
+        end
+      )
+
+    config_map = %{"apiVersion" => "v1", "kind" => "ConfigMap", "metadata" => %{"name" => "run-1"}}
+    patch = %{"metadata" => %{"ownerReferences" => [%{"kind" => "Pod", "uid" => "uid-1"}]}}
+
+    assert {:ok, _} = Kube.create_config_map(client, "symphony-runs", config_map)
+    assert_receive {:request, "POST", "/api/v1/namespaces/symphony-runs/configmaps", _type, body}
+    assert Jason.decode!(body) == config_map
+
+    assert {:ok, _} = Kube.patch_config_map(client, "symphony-runs", "run-1", patch)
+    assert_receive {:request, "PATCH", "/api/v1/namespaces/symphony-runs/configmaps/run-1", ["application/merge-patch+json"], body}
+    assert Jason.decode!(body) == patch
+
+    assert {:ok, _} = Kube.patch_secret(client, "symphony-runs", "run-1", patch)
+    assert_receive {:request, "PATCH", "/api/v1/namespaces/symphony-runs/secrets/run-1", ["application/merge-patch+json"], body}
+    assert Jason.decode!(body) == patch
+
+    assert {:ok, _} = Kube.delete_config_map(client, "symphony-runs", "run-1")
+    assert_receive {:request, "DELETE", "/api/v1/namespaces/symphony-runs/configmaps/run-1", _type, ""}
   end
 
   test "pods are created, read and deleted at the namespaced API paths" do
@@ -242,7 +340,7 @@ defmodule SymphonyElixir.KubeTest do
   end
 
   test "in-cluster config reads the process environment when no env map is given" do
-    directory = service_account_dir(%{"token" => "token", "ca.crt" => "ca"})
+    directory = service_account_dir(%{"token" => "token", "ca.crt" => ca_pem()})
     previous_host = System.get_env("KUBERNETES_SERVICE_HOST")
     previous_port = System.get_env("KUBERNETES_SERVICE_PORT")
     System.put_env("KUBERNETES_SERVICE_HOST", "10.0.0.1")
@@ -263,6 +361,11 @@ defmodule SymphonyElixir.KubeTest do
   defp client!(req_options) do
     assert {:ok, client} = Kube.client([base_url: "https://kube.test"] ++ [req_options: Keyword.put_new(req_options, :retry, false)])
     client
+  end
+
+  defp ca_pem do
+    %{cert: der} = :public_key.pkix_test_root_cert(~c"Kube Test CA", [])
+    :public_key.pem_encode([{:Certificate, der, :not_encrypted}])
   end
 
   defp restore_env(key, nil), do: System.delete_env(key)

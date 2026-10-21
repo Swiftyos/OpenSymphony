@@ -60,6 +60,12 @@ agent:
   #   memory_request: 1Gi
   #   memory_limit: 4Gi
   #   active_deadline_seconds: 21600
+  #   run_as_user: 10001
+  #   queue_name: symphony
+  #   workspace_size_limit: 20Gi
+  #   agent_tools_size_limit: 1Gi
+  #   ephemeral_storage_request: 2Gi
+  #   ephemeral_storage_limit: 24Gi
   #   secret_env:
   #     - {env: ANTHROPIC_API_KEY, secret: symphony-anthropic, key: api-key}
   #     - {env: GITHUB_TOKEN, secret: symphony-github, key: token}

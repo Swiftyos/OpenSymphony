@@ -79,7 +79,9 @@ RUN set -eux; \
     mkdir -p /srv/symphony; \
     chown symphony:symphony /srv/symphony /home/symphony
 
-USER symphony:symphony
+# Numeric, so Kubernetes can verify runAsNonRoot without a runAsUser; the
+# runner pod also sets runAsUser/runAsGroup/fsGroup 10001.
+USER 10001:10001
 WORKDIR /srv/symphony
 
 EXPOSE 4000

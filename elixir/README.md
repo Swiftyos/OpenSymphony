@@ -640,7 +640,7 @@ The Kubernetes launcher runs each issue in its own runner pod instead of as a ta
 process) on the controller host. It renders the pod itself, because the GKE admission
 policy admits only one shape: gVisor, the `symphony-runner` service account without a
 token, the `agents-sandbox` pool selector and toleration, non-root containers that drop
-`ALL`, and only per-run Secrets named `run-<run-id>` mounted.
+`ALL`, and only per-run Secrets and ConfigMaps named `run-<run-id>` mounted.
 
 ```yaml
 agent:
@@ -653,16 +653,27 @@ agent:
     memory_request: 1Gi
     memory_limit: 4Gi
     active_deadline_seconds: 21600    # default 6h
+    run_as_user: 10001                # runAsUser, runAsGroup and fsGroup
+    queue_name: symphony              # Kueue LocalQueue label; "" to omit
+    workspace_size_limit: 20Gi        # workspace emptyDir sizeLimit
+    agent_tools_size_limit: 1Gi       # agent CLI emptyDir sizeLimit
+    ephemeral_storage_request: 2Gi    # "" omits; Kueue must cover ephemeral-storage
+    ephemeral_storage_limit: 24Gi
     # Existing Secrets injected by name; per-run GitHub App tokens are a follow-up.
     secret_env:
       - {env: ANTHROPIC_API_KEY, secret: symphony-anthropic, key: api-key}
       - {env: GITHUB_TOKEN, secret: symphony-github, key: token}
 ```
 
-The controller writes the run spec into a Secret, creates the pod, and tracks it by the
-reference `k8s:<namespace>/<pod>`. Images and the rest of the section are only needed when
-this launcher is used. The pod mounts its workspace `emptyDir` at `workspace.root`, so on GKE
-set that to a container path (`/workspace`) rather than a host path. The pod layout, what is
+The controller writes the run spec into a Secret and its own config file (`symphony.yml` or
+`WORKFLOW.md`) into a ConfigMap, creates the pod, owns both by the pod so they are garbage
+collected with it, and tracks it by the reference `k8s:<namespace>/<pod>`. Keep credentials
+out of the config file itself (use `$VAR` references and `secret_env`): the ConfigMap is not
+a Secret. Images and the rest of the section are only needed when this launcher is used. The
+pod mounts its workspace `emptyDir` at `workspace.root`, so on GKE set that to a container
+path (`/workspace`) rather than a host path. The controller reads its service account token
+from a projected volume on every request; its Deployment must project one, because automount
+is off. The pod layout, what is
 still missing (watcher integration, git mirror clone URL, per-run GitHub App tokens, a pod
 janitor) and the protocol are in [`docs/durable-runs.md`](docs/durable-runs.md) (Phase 3).
 

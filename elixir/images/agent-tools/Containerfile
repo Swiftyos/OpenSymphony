@@ -55,6 +55,13 @@ LABEL org.opencontainers.image.title="symphony-agent-tools" \
 
 COPY --from=build /opt/symphony /agent-tools
 COPY elixir/images/agent-tools/copy-agent-tools.sh /usr/local/bin/copy-agent-tools
-RUN chmod 0755 /usr/local/bin/copy-agent-tools
+# Readable (and the binaries executable) by any uid: the init container runs as
+# the runner pod's non-root uid, not as the owner of these files.
+RUN chmod 0755 /usr/local/bin/copy-agent-tools \
+ && chmod -R a+rX /agent-tools
+
+# Non-root and numeric, so the admission policy's runAsNonRoot holds and the
+# kubelet can verify it; the same uid as the symphony image.
+USER 10001:10001
 
 ENTRYPOINT ["/usr/local/bin/copy-agent-tools"]

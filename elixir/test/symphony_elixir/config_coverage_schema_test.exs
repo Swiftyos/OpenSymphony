@@ -106,6 +106,12 @@ defmodule SymphonyElixir.ConfigCoverageSchemaTest do
               "memory_request" => "2Gi",
               "memory_limit" => "8Gi",
               "active_deadline_seconds" => 60,
+              "run_as_user" => 20_000,
+              "queue_name" => " sandbox ",
+              "workspace_size_limit" => "40Gi",
+              "agent_tools_size_limit" => "",
+              "ephemeral_storage_request" => "5Gi",
+              "ephemeral_storage_limit" => "50Gi",
               "secret_env" => [%{"env" => "ANTHROPIC_API_KEY", "secret" => "symphony-anthropic", "key" => "api-key"}]
             }
           }
@@ -120,6 +126,12 @@ defmodule SymphonyElixir.ConfigCoverageSchemaTest do
       assert kube.memory_request == "2Gi"
       assert kube.memory_limit == "8Gi"
       assert kube.active_deadline_seconds == 60
+      assert kube.run_as_user == 20_000
+      assert kube.queue_name == "sandbox"
+      assert kube.workspace_size_limit == "40Gi"
+      assert kube.agent_tools_size_limit == nil
+      assert kube.ephemeral_storage_request == "5Gi"
+      assert kube.ephemeral_storage_limit == "50Gi"
 
       assert kube.secret_env == [
                %{"env" => "ANTHROPIC_API_KEY", "secret" => "symphony-anthropic", "key" => "api-key"}
@@ -134,6 +146,12 @@ defmodule SymphonyElixir.ConfigCoverageSchemaTest do
       assert defaults.memory_request == "1Gi"
       assert defaults.memory_limit == "4Gi"
       assert defaults.active_deadline_seconds == 21_600
+      assert defaults.run_as_user == 10_001
+      assert defaults.queue_name == "symphony"
+      assert defaults.workspace_size_limit == "20Gi"
+      assert defaults.agent_tools_size_limit == "1Gi"
+      assert defaults.ephemeral_storage_request == "2Gi"
+      assert defaults.ephemeral_storage_limit == "24Gi"
       assert defaults.secret_env == []
     end
 
@@ -156,6 +174,12 @@ defmodule SymphonyElixir.ConfigCoverageSchemaTest do
 
       assert parse_error(%{"agent" => %{"kubernetes" => %{"active_deadline_seconds" => 0}}}) =~
                "agent.kubernetes.active_deadline_seconds must be greater than 0"
+
+      assert parse_error(%{"agent" => %{"kubernetes" => %{"run_as_user" => 0}}}) =~
+               "agent.kubernetes.run_as_user must be greater than 0"
+
+      assert parse_error(%{"agent" => %{"kubernetes" => %{"queue_name" => "bad queue"}}}) =~
+               "agent.kubernetes.queue_name must be a label value"
 
       assert parse_error(%{
                "agent" => %{"kubernetes" => %{"secret_env" => [%{"env" => "TOKEN", "secret" => "a-secret"}]}}

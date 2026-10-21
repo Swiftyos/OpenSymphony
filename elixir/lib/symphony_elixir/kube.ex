@@ -3,13 +3,14 @@ defmodule SymphonyElixir.Kube do
   A small Kubernetes API client for the run launcher.
 
   It covers only what starting a runner pod needs: create, get and delete a
-  pod, and create and delete a secret. Everything else stays outside this
-  controller.
+  pod, and create, patch and delete a secret or config map. Everything else
+  stays outside this controller.
 
   A client is built either from explicit `:base_url`/`:token` options (tests
   pass `req_options: [plug: {Req.Test, Stub}]`) or from an in-cluster service
   account. In-cluster it reads the bearer token and CA certificate from the
-  mounted service account directory and the API server address from
+  mounted service account directory (the token on every request) and the API
+  server address from
   `KUBERNETES_SERVICE_HOST`/`KUBERNETES_SERVICE_PORT`. See
   `docs/durable-runs.md`.
 
@@ -39,6 +40,12 @@ defmodule SymphonyElixir.Kube do
       the `KUBERNETES_SERVICE_*` variables.
     * `:req_options` — extra options for `Req.new/1`, such as `:plug` in tests.
 
+  In-cluster, the token file is re-read on every request, so a rotated
+  projected service account token is picked up without rebuilding the client.
+  The CA bundle is decoded once into DER certificates and passed as `:cacerts`
+  with `verify: :verify_peer` and HTTPS hostname checking against the API
+  server host.
+
   Returns `{:error, :not_in_cluster}` when there are no explicit credentials
   and no service account is mounted.
   """
@@ -46,14 +53,15 @@ defmodule SymphonyElixir.Kube do
   def client(opts \\ []) do
     opts = Keyword.merge(Application.get_env(:symphony_elixir, :kube_options, []), opts)
 
-    with {:ok, base_url, token, cacertfile} <- connection(opts) do
+    with {:ok, base_url, auth, cacerts} <- connection(opts) do
       req =
         opts
         |> Keyword.get(:req_options, [])
         |> Keyword.put(:base_url, base_url)
-        |> put_authorization(token)
-        |> put_cacertfile(cacertfile)
+        |> put_static_authorization(auth)
+        |> put_tls(cacerts)
         |> Req.new()
+        |> put_token_step(auth)
 
       {:ok, %__MODULE__{req: req}}
     end
@@ -62,37 +70,66 @@ defmodule SymphonyElixir.Kube do
   @doc "Creates a pod in a namespace."
   @spec create_pod(t(), String.t(), resource()) :: {:ok, resource()} | {:error, term()}
   def create_pod(%__MODULE__{} = client, namespace, pod) do
-    request(client, :post, pods_path(namespace), json: pod)
+    request(client, :post, collection_path(namespace, :pods), json: pod)
   end
 
   @doc "Gets a pod; `{:error, :not_found}` when it does not exist."
   @spec get_pod(t(), String.t(), String.t()) :: {:ok, resource()} | {:error, term()}
   def get_pod(%__MODULE__{} = client, namespace, name) do
-    request(client, :get, pod_path(namespace, name))
+    request(client, :get, object_path(namespace, :pods, name))
   end
 
   @doc "Deletes a pod; `{:error, :not_found}` when it is already gone."
   @spec delete_pod(t(), String.t(), String.t()) :: {:ok, resource()} | {:error, term()}
   def delete_pod(%__MODULE__{} = client, namespace, name) do
-    request(client, :delete, pod_path(namespace, name))
+    request(client, :delete, object_path(namespace, :pods, name))
   end
 
   @doc "Creates a secret in a namespace."
   @spec create_secret(t(), String.t(), resource()) :: {:ok, resource()} | {:error, term()}
   def create_secret(%__MODULE__{} = client, namespace, secret) do
-    request(client, :post, secrets_path(namespace), json: secret)
+    request(client, :post, collection_path(namespace, :secrets), json: secret)
+  end
+
+  @doc "Merge-patches a secret; `{:error, :not_found}` when it does not exist."
+  @spec patch_secret(t(), String.t(), String.t(), map()) :: {:ok, resource()} | {:error, term()}
+  def patch_secret(%__MODULE__{} = client, namespace, name, patch) do
+    merge_patch(client, object_path(namespace, :secrets, name), patch)
   end
 
   @doc "Deletes a secret; `{:error, :not_found}` when it is already gone."
   @spec delete_secret(t(), String.t(), String.t()) :: {:ok, resource()} | {:error, term()}
   def delete_secret(%__MODULE__{} = client, namespace, name) do
-    request(client, :delete, secret_path(namespace, name))
+    request(client, :delete, object_path(namespace, :secrets, name))
   end
 
-  defp pods_path(namespace), do: "/api/v1/namespaces/#{namespace}/pods"
-  defp pod_path(namespace, name), do: pods_path(namespace) <> "/" <> name
-  defp secrets_path(namespace), do: "/api/v1/namespaces/#{namespace}/secrets"
-  defp secret_path(namespace, name), do: secrets_path(namespace) <> "/" <> name
+  @doc "Creates a config map in a namespace."
+  @spec create_config_map(t(), String.t(), resource()) :: {:ok, resource()} | {:error, term()}
+  def create_config_map(%__MODULE__{} = client, namespace, config_map) do
+    request(client, :post, collection_path(namespace, :configmaps), json: config_map)
+  end
+
+  @doc "Merge-patches a config map; `{:error, :not_found}` when it does not exist."
+  @spec patch_config_map(t(), String.t(), String.t(), map()) :: {:ok, resource()} | {:error, term()}
+  def patch_config_map(%__MODULE__{} = client, namespace, name, patch) do
+    merge_patch(client, object_path(namespace, :configmaps, name), patch)
+  end
+
+  @doc "Deletes a config map; `{:error, :not_found}` when it is already gone."
+  @spec delete_config_map(t(), String.t(), String.t()) :: {:ok, resource()} | {:error, term()}
+  def delete_config_map(%__MODULE__{} = client, namespace, name) do
+    request(client, :delete, object_path(namespace, :configmaps, name))
+  end
+
+  defp merge_patch(client, path, patch) do
+    request(client, :patch, path,
+      body: Jason.encode!(patch),
+      headers: [{"content-type", "application/merge-patch+json"}]
+    )
+  end
+
+  defp collection_path(namespace, resource), do: "/api/v1/namespaces/#{namespace}/#{resource}"
+  defp object_path(namespace, resource, name), do: collection_path(namespace, resource) <> "/" <> name
 
   defp request(%__MODULE__{req: req}, method, url, opts \\ []) do
     case Req.request(req, Keyword.merge([method: method, url: url], opts)) do
@@ -134,7 +171,7 @@ defmodule SymphonyElixir.Kube do
   defp connection(opts) do
     case Keyword.get(opts, :base_url) do
       base_url when is_binary(base_url) and base_url != "" ->
-        {:ok, String.trim_trailing(base_url, "/"), Keyword.get(opts, :token), nil}
+        {:ok, String.trim_trailing(base_url, "/"), {:static, Keyword.get(opts, :token)}, nil}
 
       _ ->
         in_cluster_connection(opts)
@@ -143,15 +180,25 @@ defmodule SymphonyElixir.Kube do
 
   defp in_cluster_connection(opts) do
     dir = Keyword.get(opts, :service_account_dir, @service_account_dir)
+    token_path = Path.join(dir, "token")
 
     with host when is_binary(host) and host != "" <- env(opts, "KUBERNETES_SERVICE_HOST"),
          port when is_binary(port) and port != "" <- env(opts, "KUBERNETES_SERVICE_PORT"),
-         {:ok, token} <- File.read(Path.join(dir, "token")),
-         {:ok, cacertfile} <- File.read(Path.join(dir, "ca.crt")) do
-      {:ok, "https://#{url_host(host)}:#{port}", token, cacertfile}
+         {:ok, _token} <- File.read(token_path),
+         {:ok, ca_pem} <- File.read(Path.join(dir, "ca.crt")),
+         {:ok, cacerts} <- decode_cacerts(ca_pem) do
+      {:ok, "https://#{url_host(host)}:#{port}", {:file, token_path}, cacerts}
     else
       nil -> {:error, :not_in_cluster}
       {:error, reason} -> {:error, {:in_cluster_config, reason}}
+    end
+  end
+
+  # The CA file is PEM; :ssl wants DER certificates in :cacerts.
+  defp decode_cacerts(pem) do
+    case for({:Certificate, der, _} <- :public_key.pem_decode(pem), do: der) do
+      [] -> {:error, :invalid_ca_certificate}
+      cacerts -> {:ok, cacerts}
     end
   end
 
@@ -167,22 +214,45 @@ defmodule SymphonyElixir.Kube do
     end
   end
 
-  defp put_authorization(options, nil), do: options
-
-  defp put_authorization(options, token) when is_binary(token) do
+  defp put_static_authorization(options, {:static, token}) when is_binary(token) do
     headers = [{"authorization", "Bearer " <> token} | Enum.to_list(Keyword.get(options, :headers, []))]
     Keyword.put(options, :headers, headers)
   end
 
-  defp put_cacertfile(options, nil), do: options
+  defp put_static_authorization(options, _auth), do: options
 
-  defp put_cacertfile(options, cacertfile) when is_binary(cacertfile) do
+  # A projected service account token is rotated by the kubelet, so it is read
+  # again for every request instead of once when the client is built.
+  defp put_token_step(req, {:file, path}) do
+    Req.Request.append_request_steps(req, kube_token: &file_token_step(&1, path))
+  end
+
+  defp put_token_step(req, _auth), do: req
+
+  defp file_token_step(request, path) do
+    case File.read(path) do
+      {:ok, token} ->
+        Req.Request.put_header(request, "authorization", "Bearer " <> String.trim(token))
+
+      {:error, reason} ->
+        {request, File.Error.exception(reason: reason, action: "read service account token from", path: path)}
+    end
+  end
+
+  defp put_tls(options, nil), do: options
+
+  defp put_tls(options, cacerts) when is_list(cacerts) do
     connect_options = Keyword.get(options, :connect_options, [])
-    transport_opts = Keyword.get(connect_options, :transport_opts, [])
 
-    connect_options =
-      Keyword.put(connect_options, :transport_opts, Keyword.put(transport_opts, :cacertfile, cacertfile))
+    transport_opts =
+      connect_options
+      |> Keyword.get(:transport_opts, [])
+      |> Keyword.merge(
+        cacerts: cacerts,
+        verify: :verify_peer,
+        customize_hostname_check: [match_fun: :public_key.pkix_verify_hostname_match_fun(:https)]
+      )
 
-    Keyword.put(options, :connect_options, connect_options)
+    Keyword.put(options, :connect_options, Keyword.put(connect_options, :transport_opts, transport_opts))
   end
 end
