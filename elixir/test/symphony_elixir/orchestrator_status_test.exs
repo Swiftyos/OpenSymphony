@@ -1719,6 +1719,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         enabled: true,
         refresh_ms: 60_000,
         render_interval_ms: 16,
+        snapshot_interval_ms: 16,
         render_fun: fn content ->
           send(parent, {:render, System.monotonic_time(:millisecond), content})
         end
@@ -1743,6 +1744,40 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert_receive {:render, second_render_ms, _content}, 200
     assert second_render_ms > first_render_ms
     refute_receive {:render, _third_render_ms, _content}, 60
+  end
+
+  test "status dashboard takes at most one snapshot per interval however many updates arrive" do
+    dashboard_name = Module.concat(__MODULE__, :SnapshotDashboard)
+
+    {:ok, pid} =
+      StatusDashboard.start_link(name: dashboard_name, enabled: true, refresh_ms: 60_000, snapshot_interval_ms: 200, render_fun: fn _content -> :ok end)
+
+    on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :normal) end)
+
+    StatusDashboard.notify_update(dashboard_name)
+    first = :sys.get_state(pid)
+    assert is_integer(first.last_snapshot_at_ms)
+    assert first.refresh_timer_ref == nil
+
+    # A burst inside the interval is folded into one deferred snapshot.
+    for _ <- 1..500, do: StatusDashboard.notify_update(dashboard_name)
+    burst = :sys.get_state(pid)
+    assert burst.last_snapshot_at_ms == first.last_snapshot_at_ms
+    assert is_reference(burst.refresh_timer_ref)
+
+    # A stale deferred refresh is ignored.
+    send(pid, {:refresh_due, make_ref()})
+    assert :sys.get_state(pid).last_snapshot_at_ms == first.last_snapshot_at_ms
+
+    Process.sleep(300)
+    after_wait = :sys.get_state(pid)
+    assert after_wait.last_snapshot_at_ms > first.last_snapshot_at_ms
+    assert after_wait.refresh_timer_ref == nil
+
+    # A deferred refresh that lands after the dashboard was disabled takes no snapshot.
+    :sys.replace_state(pid, fn state -> %{state | enabled: false, refresh_timer_ref: :pending} end)
+    send(pid, {:refresh_due, :pending})
+    assert :sys.get_state(pid).last_snapshot_at_ms == after_wait.last_snapshot_at_ms
   end
 
   test "status dashboard computes rolling 5-second token throughput" do

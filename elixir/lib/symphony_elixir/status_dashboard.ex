@@ -11,6 +11,9 @@ defmodule SymphonyElixir.StatusDashboard do
   alias SymphonyElixirWeb.ObservabilityPubSub
 
   @minimum_idle_rerender_ms 1_000
+  # Event-driven refreshes take at most one orchestrator snapshot per interval:
+  # every agent event asks for a refresh, and a snapshot covers every run.
+  @default_snapshot_interval_ms 250
   @throughput_window_ms 5_000
   @throughput_graph_window_ms 10 * 60 * 1000
   @throughput_graph_columns 24
@@ -54,7 +57,10 @@ defmodule SymphonyElixir.StatusDashboard do
     :last_rendered_at_ms,
     :pending_content,
     :flush_timer_ref,
-    :last_snapshot_fingerprint
+    :last_snapshot_fingerprint,
+    :snapshot_interval_ms,
+    :last_snapshot_at_ms,
+    :refresh_timer_ref
   ]
 
   @type t :: %__MODULE__{
@@ -72,7 +78,10 @@ defmodule SymphonyElixir.StatusDashboard do
           last_rendered_at_ms: integer() | nil,
           pending_content: String.t() | nil,
           flush_timer_ref: reference() | nil,
-          last_snapshot_fingerprint: term() | nil
+          last_snapshot_fingerprint: term() | nil,
+          snapshot_interval_ms: pos_integer() | nil,
+          last_snapshot_at_ms: integer() | nil,
+          refresh_timer_ref: reference() | nil
         }
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -123,7 +132,10 @@ defmodule SymphonyElixir.StatusDashboard do
        last_rendered_at_ms: nil,
        pending_content: nil,
        flush_timer_ref: nil,
-       last_snapshot_fingerprint: nil
+       last_snapshot_fingerprint: nil,
+       snapshot_interval_ms: keyword_override(opts, :snapshot_interval_ms),
+       last_snapshot_at_ms: nil,
+       refresh_timer_ref: nil
      }}
   end
 
@@ -153,8 +165,33 @@ defmodule SymphonyElixir.StatusDashboard do
     {:noreply, state}
   end
 
-  def handle_info(:refresh, %{enabled: true} = state), do: {:noreply, maybe_render(refresh_runtime_config(state))}
+  # Refreshes come once per orchestrator event. One arriving within the
+  # snapshot interval of the last snapshot is folded into a single deferred
+  # one, so a busy fleet costs at most one snapshot per interval.
+  def handle_info(:refresh, %{enabled: true, refresh_timer_ref: ref} = state) when is_reference(ref), do: {:noreply, state}
+
+  def handle_info(:refresh, %{enabled: true} = state) do
+    now_ms = System.monotonic_time(:millisecond)
+
+    case snapshot_wait_ms(state, now_ms) do
+      0 ->
+        {:noreply, maybe_render(refresh_runtime_config(state))}
+
+      wait_ms ->
+        ref = make_ref()
+        Process.send_after(self(), {:refresh_due, ref}, wait_ms)
+        {:noreply, %{state | refresh_timer_ref: ref}}
+    end
+  end
+
   def handle_info(:refresh, state), do: {:noreply, state}
+
+  def handle_info({:refresh_due, ref}, %{refresh_timer_ref: ref} = state) do
+    state = %{state | refresh_timer_ref: nil}
+    if state.enabled, do: {:noreply, maybe_render(refresh_runtime_config(state))}, else: {:noreply, state}
+  end
+
+  def handle_info({:refresh_due, _ref}, state), do: {:noreply, state}
 
   def handle_info({:flush_render, timer_ref}, %{enabled: true, flush_timer_ref: timer_ref} = state) do
     now_ms = System.monotonic_time(:millisecond)
@@ -191,10 +228,17 @@ defmodule SymphonyElixir.StatusDashboard do
   defp schedule_tick(refresh_ms, true), do: Process.send_after(self(), :tick, refresh_ms)
   defp schedule_tick(_refresh_ms, false), do: :ok
 
+  defp snapshot_wait_ms(%{last_snapshot_at_ms: nil}, _now_ms), do: 0
+
+  defp snapshot_wait_ms(state, now_ms) do
+    interval_ms = state.snapshot_interval_ms || max(state.render_interval_ms || 0, @default_snapshot_interval_ms)
+    max(interval_ms - (now_ms - state.last_snapshot_at_ms), 0)
+  end
+
   defp maybe_render(state) do
     now_ms = System.monotonic_time(:millisecond)
     {snapshot_data, token_samples} = snapshot_with_samples(state.token_samples, now_ms)
-    state = Map.put(state, :token_samples, token_samples)
+    state = %{state | token_samples: token_samples, last_snapshot_at_ms: now_ms}
 
     current_tokens = snapshot_total_tokens(snapshot_data)
 
