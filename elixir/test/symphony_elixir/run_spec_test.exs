@@ -54,6 +54,7 @@ defmodule SymphonyElixir.RunSpecTest do
       account: %{backend: "claude", id: "acct-1"},
       controller_url: "http://127.0.0.1:4321",
       git_mirror_url: "http://127.0.0.1:4321/git/run-1/checkout-abc123",
+      target_branch: "main",
       token: "token-1"
     }
 
@@ -74,6 +75,7 @@ defmodule SymphonyElixir.RunSpecTest do
     assert loaded.account == %{backend: "claude", id: "acct-1"}
     assert loaded.controller_url == "http://127.0.0.1:4321"
     assert loaded.git_mirror_url == "http://127.0.0.1:4321/git/run-1/checkout-abc123"
+    assert loaded.target_branch == "main"
     assert loaded.token == "token-1"
 
     assert %Issue{} = rebuilt = RunSpec.to_issue(loaded)

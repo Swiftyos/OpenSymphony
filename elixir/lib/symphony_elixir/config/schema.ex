@@ -758,6 +758,31 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule GitMirror do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+
+    embedded_schema do
+      # Concurrent `git upload-pack` processes the read-only mirror runs; a
+      # request over the cap gets 503 with Retry-After.
+      field(:max_concurrent, :integer, default: 8)
+      # How long a mirror request may go without git producing output before
+      # the git process is killed. There is no total deadline.
+      field(:idle_timeout_ms, :integer, default: 60_000)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:max_concurrent, :idle_timeout_ms], empty_values: [])
+      |> validate_number(:max_concurrent, greater_than: 0)
+      |> validate_number(:idle_timeout_ms, greater_than: 0)
+    end
+  end
+
   defmodule Telemetry do
     @moduledoc false
     use Ecto.Schema
@@ -973,6 +998,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:capacity, Capacity, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:git_mirror, GitMirror, on_replace: :update, defaults_to_struct: true)
     embeds_one(:telemetry, Telemetry, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
     embeds_one(:instance, Instance, on_replace: :update, defaults_to_struct: true)
@@ -1100,6 +1126,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:capacity, with: &Capacity.changeset/2)
+    |> cast_embed(:git_mirror, with: &GitMirror.changeset/2)
     |> cast_embed(:telemetry, with: &Telemetry.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
     |> cast_embed(:instance, with: &Instance.changeset/2)

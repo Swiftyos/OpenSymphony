@@ -126,13 +126,18 @@ Kubernetes they move behind a tool gateway.
      project cache read-only at `/git/<run_id>/<repo-key>` over git smart HTTP,
      authenticated by the run token (bearer or HTTP basic with the token as the
      password). The key names a configured repo's cache, never a path. A run may
-     read only its own issue's project repo; metadata without a project slug may
-     read any configured repo (logged, for the legacy single-project fallback).
-     Receive-pack is refused. The endpoint serves the cache as it is and asks the
+     read only its own issue's project repo; a run without a project slug may
+     read it only when exactly one repo is configured. Receive-pack is refused.
+     The endpoint serves the cache as it is, never changes it, and asks the
      background refresher to catch up when it is stale; it never fetches from
-     GitHub in the request. Specs get `git_mirror_url` when the cache exists, and
-     `SymphonyElixir.GitMirror.clone_url/1` embeds the token for the runner's
-     clone.
+     GitHub in the request. Responses stream chunked with an idle timeout
+     (`git_mirror.idle_timeout_ms`), git is killed on timeout or disconnect, and
+     `git_mirror.max_concurrent` caps concurrent upload-packs (`503` when full).
+     The controller adds `git_mirror_url` and `target_branch` to the spec with
+     `RunSpec.attach_git_mirror/2`; the runner builds its workspace with
+     `SymphonyElixir.GitMirror.clone_commands/3` (init, fetch
+     `refs/remotes/origin/*` from the mirror, resume or create the issue
+     branch).
 
 ## Controller responsiveness
 

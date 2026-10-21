@@ -25,6 +25,7 @@ defmodule SymphonyElixir.RunSpec do
     :account,
     :controller_url,
     :git_mirror_url,
+    :target_branch,
     :token
   ]
 
@@ -62,6 +63,7 @@ defmodule SymphonyElixir.RunSpec do
           account: %{backend: String.t(), id: String.t()} | nil,
           controller_url: String.t() | nil,
           git_mirror_url: String.t() | nil,
+          target_branch: String.t() | nil,
           token: String.t() | nil
         }
 
@@ -76,13 +78,13 @@ defmodule SymphonyElixir.RunSpec do
   @doc """
   Writes the spec owner-only; returns its path.
 
-  When the controller has a cache for the issue's project repo, the spec gets
-  the read-only git mirror URL so a runner can clone from the controller.
+  It writes the spec exactly as given and reads no config: the controller
+  fills `git_mirror_url` and `target_branch` with `attach_git_mirror/2`,
+  passing the settings it launches the run with, before it writes the spec.
   """
   @spec write(t()) :: {:ok, Path.t()} | {:error, term()}
   def write(%__MODULE__{run_id: run_id} = spec) when is_binary(run_id) do
     path = path(run_id)
-    spec = attach_git_mirror(spec, Config.settings!())
 
     case PrivateFile.write(path, Jason.encode!(encode(spec), pretty: true)) do
       :ok -> {:ok, path}
@@ -90,10 +92,20 @@ defmodule SymphonyElixir.RunSpec do
     end
   end
 
-  @doc "Adds the mirror URL when this controller has the issue's repo cache."
+  @doc """
+  Adds the read-only git mirror URL and the target branch when this
+  controller has the cache of the issue's project repo
+  (`SymphonyElixir.GitMirror.mirror_for/2`). Values already set are kept.
+  """
   @spec attach_git_mirror(t(), Config.Schema.t()) :: t()
   def attach_git_mirror(%__MODULE__{} = spec, %Config.Schema{} = settings) do
-    %{spec | git_mirror_url: spec.git_mirror_url || GitMirror.mirror_url_for(spec, settings)}
+    case GitMirror.mirror_for(spec, settings) do
+      %{url: url, target_branch: target_branch} ->
+        %{spec | git_mirror_url: spec.git_mirror_url || url, target_branch: spec.target_branch || target_branch}
+
+      nil ->
+        spec
+    end
   end
 
   @doc "Reads a spec written with `write/1`."

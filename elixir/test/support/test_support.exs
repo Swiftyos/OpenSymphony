@@ -383,6 +383,7 @@ defmodule SymphonyElixir.TestSupport do
     server_host = Keyword.get(config, :server_host)
     server_api_token = Keyword.get(config, :server_api_token)
     server_trust_proxy = Keyword.get(config, :server_trust_proxy)
+    git_mirror = Keyword.get(config, :git_mirror)
     instance_name = Keyword.get(config, :instance_name)
     prompt = Keyword.get(config, :prompt)
 
@@ -464,6 +465,7 @@ defmodule SymphonyElixir.TestSupport do
           attrs: telemetry_resource_attributes
         }),
         server_yaml(server_port, server_host, server_api_token, server_trust_proxy),
+        git_mirror_yaml(git_mirror),
         instance_yaml(instance_name),
         "---",
         prompt
@@ -797,6 +799,13 @@ defmodule SymphonyElixir.TestSupport do
         "  max_concurrent_agents_per_host: #{yaml_value(max_concurrent_agents_per_host)}"
     ]
     |> Enum.reject(&(&1 in [nil, false]))
+    |> Enum.join("\n")
+  end
+
+  defp git_mirror_yaml(nil), do: nil
+
+  defp git_mirror_yaml(%{} = git_mirror) do
+    ["git_mirror:" | Enum.map(git_mirror, fn {key, value} -> "  #{key}: #{yaml_value(value)}" end)]
     |> Enum.join("\n")
   end
 

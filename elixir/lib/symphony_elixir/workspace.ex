@@ -1277,25 +1277,8 @@ defmodule SymphonyElixir.Workspace do
           "printf '%s\\t%s\\t%s\\n' '#{@repo_cache_sync_marker}' \"$action\" \"$reason\""
         ]
 
-    # A mirror clone advertises refs/heads, so keep the cache's local branches
-    # on the fetched remote heads and drop ones whose remote branch is gone.
-    # The workspace clone still uses refs/remotes/origin/* exactly as before.
     (preamble_lines ++
        freshness_lines ++
-       [
-         "git -C \"$cache_repo\" for-each-ref --format='%(refname)' refs/heads | while IFS= read -r local_ref; do",
-         "  branch=\"${local_ref#refs/heads/}\"",
-         "  if ! git -C \"$cache_repo\" show-ref --verify --quiet \"refs/remotes/origin/$branch\"; then",
-         "    git -C \"$cache_repo\" update-ref -d \"$local_ref\"",
-         "  fi",
-         "done",
-         "git -C \"$cache_repo\" for-each-ref --format='%(refname)' refs/remotes/origin | while IFS= read -r remote_ref; do",
-         "  branch=\"${remote_ref#refs/remotes/origin/}\"",
-         "  if [ \"$branch\" != \"HEAD\" ]; then",
-         "    git -C \"$cache_repo\" update-ref \"refs/heads/$branch\" \"$remote_ref\"",
-         "  fi",
-         "done"
-       ] ++
        resolve_target_branch_shell_lines("cache_repo", "target_branch") ++
        [
          # Keep the cache detached: a checked-out branch here would block
@@ -1553,9 +1536,11 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp issue_branch_name(issue_context) do
-    @repo_branch_prefix <> safe_identifier(issue_context.issue_identifier)
-  end
+  defp issue_branch_name(issue_context), do: issue_branch(issue_context.issue_identifier)
+
+  @doc "The branch an issue's workspace works on (`symphony/<identifier>`)."
+  @spec issue_branch(String.t() | nil) :: String.t()
+  def issue_branch(identifier), do: @repo_branch_prefix <> safe_identifier(identifier)
 
   defp route_issue_context(%{slug: slug}) do
     %{

@@ -38,12 +38,6 @@ defmodule SymphonyElixir.RepoCacheTest do
 
       assert {:ok, third_workspace} = Workspace.create_for_issue(issue.("PI-3"))
       assert File.read!(Path.join(third_workspace, "README.md")) == "v2\n"
-
-      # The cache's own branch follows the fetched remote head, so a runner
-      # cloning the cache mirror sees the same default branch.
-      {cache_main, 0} = System.cmd("git", ["-C", cache_repo, "rev-parse", "refs/heads/main"])
-      {source_main, 0} = System.cmd("git", ["-C", source_repo, "rev-parse", "refs/heads/main"])
-      assert cache_main == source_main
     after
       File.rm_rf(test_root)
     end

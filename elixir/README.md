@@ -324,6 +324,10 @@ Notes:
 - `workspace.repo_cache.refresh_interval_ms` is how often the background repo cache refresher
   warms each project repo on the local host. Default: `30000` (half the default `max_age_ms`, so
   agent starts usually reuse a fresh cache). `0` turns the refresher off.
+- `git_mirror.max_concurrent` caps concurrent `git upload-pack` processes for the read-only git
+  mirror runners clone from. Default: `8`; a request over the cap gets `503` with `Retry-After`.
+- `git_mirror.idle_timeout_ms` is how long a git mirror request may go without git output before
+  git is killed. Default: `60000`. There is no total deadline.
 - For path values, `~` is expanded to the home directory.
 - For env-backed path values, use `$VAR`. `workspace.root` resolves `$VAR` before path handling,
   while `opencode.command` stays a shell command string and any `$VAR` expansion there happens in the
@@ -556,21 +560,38 @@ caches read-only over git's smart HTTP protocol at
 `/git/<run_id>/<repo-key>`. The repo key is the cache directory key (for example
 `owner_name-<digest>`) for a configured project repo, never a filesystem path.
 The run token from the spec authenticates it, either as
-`Authorization: Bearer <token>` or as HTTP basic with the token as the password
-(the `https://x-access-token:<token>@host/...` form git uses). A run may only
-read its own issue's project repo; registries without a project slug (the legacy
-single-project fallback) may read any configured repo and the gap is logged.
-`info/refs` advertises the refs the cache has now, including protocol v2 when
-the client asks for it, and `git-upload-pack` streams the request to the cache.
-`git-receive-pack` is refused, so pushes still go to GitHub from the workspace's
-own origin. If the cache is older than `workspace.repo_cache.max_age_ms` the
-request asks `RepoCacheRefresher` to sync in the background and serves the
-current refs; the request never fetches from GitHub, and it does not hold the
-cache lock (a concurrent fetch is safe for git readers). A run spec gets
-`git_mirror_url` when the controller has the issue repo's cache;
-`SymphonyElixir.GitMirror.clone_url(spec)` turns it into a clone URL carrying the
-token. Wiring that clone into workspace creation waits for the Kubernetes
-launcher.
+`Authorization: Bearer <token>` or as HTTP basic with the token as the password.
+A run may only read its own issue's project repo: a project slug that matches no
+route with a repo is denied, and a run with no project slug at all may read the
+repo only when exactly one repo is configured. `info/refs` advertises the refs
+the cache has now, including protocol v2 when the client asks for it, and
+`git-upload-pack` runs git against the cache. `git-receive-pack` is refused, so
+pushes still go to GitHub. If the cache is older than
+`workspace.repo_cache.max_age_ms` the request asks `RepoCacheRefresher` to sync
+in the background and serves the current refs; the request never fetches from
+GitHub, never changes the cache, and does not hold the cache lock (a concurrent
+fetch is safe for git readers).
+
+The request body is streamed to an owner-only file in an owner-only temp
+directory (gzip bodies are inflated incrementally) and refused with `413` once
+it, or its inflated size, passes 8 MiB. The response is streamed chunked as git
+writes it. `git_mirror.idle_timeout_ms` (default `60000`) is the longest git
+may go without output; there is no total deadline. Git is killed on that
+timeout and when the client disconnects. At most `git_mirror.max_concurrent`
+(default `8`) upload-packs run at once; further requests get `503` with
+`Retry-After`.
+
+The controller fills a run spec's `git_mirror_url` and `target_branch` with
+`RunSpec.attach_git_mirror(spec, settings)` when it has the issue repo's cache
+(`RunSpec.write/1` reads no config). The cache's local branches are stale (only
+`refs/remotes/origin/*` is fetched), so a runner does not plain-clone the
+mirror: `SymphonyElixir.GitMirror.clone_commands(spec, workspace)` returns the
+script and environment that build the workspace the way the controller clones
+one from its cache (`git init`, fetch `+refs/remotes/origin/*:refs/remotes/origin/*`
+from the mirror, resume `symphony/<issue>` when it exists or branch from
+`origin/<target_branch>`). The token travels in `http.extraHeader` through
+`GIT_CONFIG_*` environment variables, never in a URL or `.git/config`. Wiring
+that clone into workspace creation waits for the Kubernetes launcher.
 
 ### Scheduling
 
