@@ -126,6 +126,8 @@ defmodule SymphonyElixir.RunLauncher.KubernetesTest do
     test "invalid settings and missing credentials are errors", ctx do
       capture_log(fn ->
         assert {:error, {:invalid_settings, :nope}} = Kubernetes.start_process(ctx.spec, settings: :nope)
+        # The loaded config configures no runner images.
+        assert {:error, {:invalid_kubernetes_config, _message}} = Kubernetes.start_process(ctx.spec)
 
         assert {:error, _reason} =
                  Kubernetes.start_process(ctx.spec, settings: settings(), config_path: ctx.config_path)
@@ -416,7 +418,8 @@ defmodule SymphonyElixir.RunLauncher.KubernetesTest do
 
       log =
         capture_log(fn ->
-          assert {:ok, watcher, _ref} = Kubernetes.start_process(ctx.spec, opts(ctx, respond))
+          # A spec without an issue still gets its watcher.
+          assert {:ok, watcher, _ref} = Kubernetes.start_process(%{ctx.spec | issue: nil}, opts(ctx, respond))
           RunWatcher.stop(watcher)
         end)
 
@@ -615,6 +618,23 @@ defmodule SymphonyElixir.RunLauncher.KubernetesTest do
       assert_receive {"DELETE", ^pod}
       assert_receive {"DELETE", ^secret}
       assert_receive {"DELETE", ^config_map}
+    end
+
+    test "stop deletes a pod it cannot read", ctx do
+      parent = self()
+
+      put_kube_options(fn
+        "GET", _path, _body, conn ->
+          Plug.Conn.send_resp(conn, 500, "boom")
+
+        method, path, _body, conn ->
+          send(parent, {method, path})
+          Req.Test.json(conn, %{})
+      end)
+
+      assert :ok = Kubernetes.stop(ctx.ref)
+      pod = ctx.pod
+      assert_receive {"DELETE", ^pod}
     end
 
     test "stop keeps a finished pod for its logs", ctx do

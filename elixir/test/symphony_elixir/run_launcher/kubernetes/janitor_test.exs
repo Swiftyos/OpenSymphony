@@ -188,6 +188,8 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.JanitorTest do
   end
 
   test "the interval comes from config, with a default when the config cannot load" do
+    # The application already runs the default-named janitor.
+    assert {:error, {:already_started, _pid}} = Janitor.start_link()
     {:ok, janitor} = Janitor.start_link(name: :"janitor_#{System.unique_integer([:positive])}")
     assert Process.alive?(janitor)
     GenServer.stop(janitor)
