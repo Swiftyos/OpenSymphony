@@ -149,6 +149,22 @@ defmodule SymphonyElixirWeb.RunnerControllerTest do
       assert %{last_seq: 8, finished: nil} = SymphonyElixir.RunRegistry.load()["issue-1"]
     end
 
+    test "a metrics event stores the runner's usage; any event marks the run runner-hosted" do
+      alias SymphonyElixir.Capacity.RunUsage
+
+      RunUsage.reset()
+      run!()
+
+      assert %{status: 200} = conn(:post, "/runner/v1/runs/run-1/events", token(), %{"events" => [event(1, "heartbeat", %{})]})
+      assert :remote = RunUsage.fetch("issue-1", 60_000)
+
+      metrics = %{run_id: "run-1", cpu_percent: 42.0, cpu_seconds: 10.0, memory_bytes: 1_000, source: "cgroup_v2"}
+      assert %{status: 200} = conn(:post, "/runner/v1/runs/run-1/events", token(), %{"events" => [event(2, "metrics", metrics)]})
+      assert {:ok, %{cpu_percent: 42.0, memory_bytes: 1_000, source: "cgroup_v2"}} = RunUsage.fetch("issue-1", 60_000)
+      refute_received {:orchestrator_message, _message}
+      RunUsage.reset()
+    end
+
     test "a restarted controller seeds the last seq and does not replay applied events" do
       run!()
       first = [event(1, "agent_update", %{issue_id: "issue-1", identifier: "MT-C-1", backend: "claude", message: agent_message("first")})]

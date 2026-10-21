@@ -17,6 +17,7 @@ defmodule SymphonyElixir.Runner do
   alias SymphonyElixir.Accounts
   alias SymphonyElixir.AgentRoute
   alias SymphonyElixir.AgentRunner
+  alias SymphonyElixir.Capacity.UsageReporter
   alias SymphonyElixir.Config
   alias SymphonyElixir.IssueConfig
   alias SymphonyElixir.RunHost.Remote
@@ -24,6 +25,7 @@ defmodule SymphonyElixir.Runner do
   alias SymphonyElixir.RunOutbox
   alias SymphonyElixir.RunSpec
   alias SymphonyElixir.RunTrace
+  alias SymphonyElixir.Sandbox
   alias SymphonyElixir.Telemetry
   alias SymphonyElixir.TraceExporter
 
@@ -108,6 +110,16 @@ defmodule SymphonyElixir.Runner do
       outbox: Process.whereis(RunOutbox)
     }
 
+    reporter = start_usage_reporter(host)
+
+    try do
+      run_with_host(spec, host)
+    after
+      UsageReporter.stop(reporter)
+    end
+  end
+
+  defp run_with_host(%RunSpec{} = spec, %Remote{} = host) do
     issue = RunSpec.to_issue(spec)
     account = resolve_account(spec.account)
     trace = RunTrace.from_spec(spec)
@@ -216,6 +228,17 @@ defmodule SymphonyElixir.Runner do
     error ->
       Logger.warning("Runner could not reload account backend=#{backend} id=#{id} reason=#{inspect(error, limit: 5)}")
       nil
+  end
+
+  # The runner measures itself for the controller's per-run CPU and memory
+  # series. In a docker sandbox the agent runs in a container outside the
+  # runner's cgroup and process tree, and the controller's `stats` call
+  # already sees it, so the runner does not report.
+  defp start_usage_reporter(%Remote{} = host) do
+    settings = Config.settings!()
+    reporting? = is_pid(host.outbox) and not Sandbox.enabled?(settings)
+    interval_ms = if reporting?, do: settings.capacity.sample_interval_ms, else: 0
+    UsageReporter.start(outbox: host.outbox, run_id: host.run_id, interval_ms: interval_ms)
   end
 
   defp finish(%Remote{} = host, reason) when is_binary(reason) do

@@ -16,6 +16,7 @@ defmodule SymphonyElixirWeb.RunnerController do
 
   alias Plug.Conn
   alias SymphonyElixir.AgentInbox
+  alias SymphonyElixir.Capacity.RunUsage
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.RunEvents
   alias SymphonyElixir.RunnerCommands
@@ -170,6 +171,7 @@ defmodule SymphonyElixirWeb.RunnerController do
 
   defp apply_event(conn, event) do
     RunWatcher.touch(conn.assigns.run_id)
+    RunUsage.mark_remote(conn.assigns.issue_id)
     do_apply_event(conn, event)
   end
 
@@ -211,6 +213,9 @@ defmodule SymphonyElixirWeb.RunnerController do
   end
 
   defp do_apply_event(_conn, %{type: "heartbeat"}), do: :ok
+
+  # The runner's own CPU and memory (SymphonyElixir.Capacity.UsageReporter).
+  defp do_apply_event(conn, %{type: "metrics", data: data}), do: RunUsage.report(conn.assigns.issue_id, data)
 
   defp do_apply_event(conn, %{type: "finished", data: data}) do
     reason = data_value(data, :reason)

@@ -79,6 +79,8 @@ defmodule SymphonyElixir.Application do
       SymphonyElixir.GitMirror.Limiter,
       SymphonyElixir.RunnerCommands,
       SymphonyElixir.Capacity.Metrics,
+      # The CPU and memory runners report about themselves (pods, process runners).
+      SymphonyElixir.Capacity.RunUsage,
       # The single writer of runs.json; before the orchestrator and the runner endpoints.
       SymphonyElixir.RunRegistry.Server,
       {Registry, keys: :unique, name: SymphonyElixir.RunWatcher.Registry},

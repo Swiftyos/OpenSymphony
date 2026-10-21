@@ -7,12 +7,19 @@ defmodule SymphonyElixir.Capacity.Sampler do
   local agent app servers. Commands run with a deadline so a wedged container
   runtime cannot block the sampler. Failures are logged once per kind of error
   and never take the sampler (or the application) down.
+
+  Runs hosted by a runner (Kubernetes pods, process runners) report their own
+  usage in `metrics` events (`SymphonyElixir.Capacity.RunUsage`). A report
+  younger than three sample intervals is used as the run's sample, with the
+  same series and labels, instead of measuring it here; a runner-hosted run
+  without one is never matched against this host's `ps` (its agent pid is the
+  pod's).
   """
 
   use GenServer
   require Logger
 
-  alias SymphonyElixir.Capacity.Metrics
+  alias SymphonyElixir.Capacity.{Metrics, RunUsage}
   alias SymphonyElixir.{Config, Orchestrator, Sandbox}
 
   @run_metric_names [
@@ -238,15 +245,18 @@ defmodule SymphonyElixir.Capacity.Sampler do
   defp do_sample(state) do
     case snapshot_running(state) do
       {:ok, running} ->
+        {reported, local, remote} = split_reported(running, state.interval_ms)
+
         {result, state} =
           if Sandbox.enabled?(state.settings) do
-            sample_containers(state, running)
+            sample_containers(state, local ++ remote)
           else
-            sample_processes(state, running)
+            sample_processes(state, local)
           end
 
         case result do
           {:ok, samples} ->
+            samples = samples ++ reported
             Metrics.delete_gauges(["symphony_run_tokens_per_minute" | @run_metric_names])
             record_token_rates(running)
             Enum.each(samples, &record_run_sample/1)
@@ -279,6 +289,21 @@ defmodule SymphonyElixir.Capacity.Sampler do
     error -> {:error, {:snapshot_exception, Exception.message(error)}}
   catch
     kind, reason -> {:error, {:snapshot_exception, inspect({kind, reason})}}
+  end
+
+  # Runner-hosted runs with a fresh report (as sample rows), the controller's
+  # own runs, and runner-hosted runs without a fresh report.
+  defp split_reported(running, interval_ms) do
+    max_age_ms = 3 * max(interval_ms, 1_000)
+    RunUsage.prune(Enum.map(running, &(Map.get(&1, :issue_id) || Map.get(&1, "issue_id"))))
+
+    Enum.reduce(Enum.reverse(running), {[], [], []}, fn entry, {reported, local, remote} ->
+      case RunUsage.fetch(Map.get(entry, :issue_id) || Map.get(entry, "issue_id"), max_age_ms) do
+        {:ok, sample} -> {[{entry, sample.cpu_percent, sample.memory_bytes} | reported], local, remote}
+        :remote -> {reported, local, [entry | remote]}
+        :none -> {reported, [entry | local], remote}
+      end
+    end)
   end
 
   defp record_token_rates(running) do
