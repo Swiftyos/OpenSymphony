@@ -2,9 +2,9 @@ defmodule SymphonyElixir.Kube do
   @moduledoc """
   A small Kubernetes API client for the run launcher.
 
-  It covers only what starting a runner pod needs: create, get and delete a
-  pod, and create, patch and delete a secret or config map. Everything else
-  stays outside this controller.
+  It covers only what running runner pods needs: create, get, list and delete
+  a pod, create, patch, list and delete a secret, and create, patch and delete
+  a config map. Everything else stays outside this controller.
 
   A client is built either from explicit `:base_url`/`:token` options (tests
   pass `req_options: [plug: {Req.Test, Stub}]`) or from an in-cluster service
@@ -79,6 +79,21 @@ defmodule SymphonyElixir.Kube do
     request(client, :get, object_path(namespace, :pods, name))
   end
 
+  @doc """
+  Lists the pods in a namespace matching a label selector (such as
+  `app.kubernetes.io/name=symphony-runner`); returns the items.
+  """
+  @spec list_pods(t(), String.t(), String.t()) :: {:ok, [resource()]} | {:error, term()}
+  def list_pods(%__MODULE__{} = client, namespace, label_selector) do
+    list(client, collection_path(namespace, :pods), label_selector)
+  end
+
+  @doc "Lists the secrets in a namespace matching a label selector; returns the items."
+  @spec list_secrets(t(), String.t(), String.t()) :: {:ok, [resource()]} | {:error, term()}
+  def list_secrets(%__MODULE__{} = client, namespace, label_selector) do
+    list(client, collection_path(namespace, :secrets), label_selector)
+  end
+
   @doc "Deletes a pod; `{:error, :not_found}` when it is already gone."
   @spec delete_pod(t(), String.t(), String.t()) :: {:ok, resource()} | {:error, term()}
   def delete_pod(%__MODULE__{} = client, namespace, name) do
@@ -119,6 +134,15 @@ defmodule SymphonyElixir.Kube do
   @spec delete_config_map(t(), String.t(), String.t()) :: {:ok, resource()} | {:error, term()}
   def delete_config_map(%__MODULE__{} = client, namespace, name) do
     request(client, :delete, object_path(namespace, :configmaps, name))
+  end
+
+  defp list(client, path, label_selector) do
+    with {:ok, body} <- request(client, :get, path, params: [labelSelector: label_selector]) do
+      case Map.get(body, "items") do
+        items when is_list(items) -> {:ok, Enum.filter(items, &is_map/1)}
+        _other -> {:ok, []}
+      end
+    end
   end
 
   defp merge_patch(client, path, patch) do

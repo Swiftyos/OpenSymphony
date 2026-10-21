@@ -1,6 +1,8 @@
 defmodule SymphonyElixir.CodexAppServerTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.Codex.AppServer, as: CodexAppServer
+
   # Real git/process/HTTP integration; excluded by `make test-fast`.
   @moduletag :slow
 
@@ -996,7 +998,7 @@ defmodule SymphonyElixir.CodexAppServerTest do
     port = Port.open({:spawn_executable, String.to_charlist(System.find_executable("true"))}, [:binary, :exit_status])
     assert_receive {^port, {:exit_status, 0}}, 5_000
 
-    assert {:error, :port_closed} = SymphonyElixir.Codex.AppServer.send_message(port, %{"method" => "initialize"})
+    assert {:error, :port_closed} = CodexAppServer.send_message(port, %{"method" => "initialize"})
   end
 
   test "a codex that exits at launch fails start_session with its exit status on either side of the write" do
@@ -1019,7 +1021,7 @@ defmodule SymphonyElixir.CodexAppServerTest do
       # The initialize write lands before or after the exit, depending on
       # scheduling; both must give the same error.
       for _attempt <- 1..10 do
-        assert {:error, {:port_exit, 7}} = SymphonyElixir.Codex.AppServer.start_session(workspace)
+        assert {:error, {:port_exit, 7}} = CodexAppServer.start_session(workspace)
       end
     after
       File.rm_rf(test_root)

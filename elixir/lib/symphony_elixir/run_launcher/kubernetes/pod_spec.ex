@@ -40,17 +40,20 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodSpec do
   Renders `%{namespace, name, ref, secret, config_map, pod}` for a run.
 
   `settings` is the parsed `SymphonyElixir.Config.Schema`; only
-  `agent.kubernetes` and `workspace.root` are used. The workspace `emptyDir` is
+  `agent.kubernetes` and `workspace.root` are used. The images and
+  `agent.kubernetes.controller_url` (which the spec's `controller_url` and
+  `git_mirror_url` are built from) are required. The workspace `emptyDir` is
   mounted at the spec's `workspace_root` when it has one, else at
   `workspace.root`. `runner_config` becomes the per-run ConfigMap the runner is
-  started with. A missing image is an error here, not in the general schema, so
-  an install that doesn't use this launcher never has to configure one.
+  started with. A missing image or controller URL is an error here, not in the
+  general schema, so an install that doesn't use this launcher never has to
+  configure one.
   """
   @spec render(RunSpec.t(), Schema.t(), runner_config()) :: {:ok, map()} | {:error, term()}
   def render(%RunSpec{} = spec, %Schema{} = settings, %{file_name: file_name, content: content}) do
     kube = settings.agent.kubernetes
 
-    with :ok <- validate_images(kube) do
+    with :ok <- validate_config(kube) do
       name = resource_name(spec.run_id)
       namespace = kube.namespace
       labels = labels(spec, name, kube)
@@ -91,13 +94,17 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodSpec do
     end
   end
 
-  defp validate_images(kube) do
+  defp validate_config(kube) do
     cond do
       blank?(kube.runner_image) ->
         {:error, {:invalid_kubernetes_config, "agent.kubernetes.runner_image is required"}}
 
       blank?(kube.agent_tools_image) ->
         {:error, {:invalid_kubernetes_config, "agent.kubernetes.agent_tools_image is required"}}
+
+      # A pod cannot reach the controller's loopback address.
+      blank?(kube.controller_url) ->
+        {:error, {:invalid_kubernetes_config, "agent.kubernetes.controller_url is required"}}
 
       true ->
         :ok
@@ -201,7 +208,8 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodSpec do
             "image" => kube.agent_tools_image,
             "args" => [@tools_dir],
             "securityContext" => container_security_context(),
-            "volumeMounts" => [%{"name" => @tools_volume, "mountPath" => @tools_dir}]
+            "volumeMounts" => [%{"name" => @tools_volume, "mountPath" => @tools_dir}],
+            "resources" => init_resources(kube)
           }
         ],
         "containers" => [
@@ -252,6 +260,14 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodSpec do
       "requests" => put_present(%{"cpu" => kube.cpu_request, "memory" => kube.memory_request}, "ephemeral-storage", kube.ephemeral_storage_request),
       "limits" => put_present(%{"cpu" => kube.cpu_limit, "memory" => kube.memory_limit}, "ephemeral-storage", kube.ephemeral_storage_limit)
     }
+  end
+
+  # Explicit rather than left to the namespace LimitRange default.
+  defp init_resources(kube) do
+    case kube.agent_tools_ephemeral_storage_request do
+      nil -> %{}
+      request -> %{"requests" => %{"ephemeral-storage" => request}}
+    end
   end
 
   defp put_present(map, _key, nil), do: map

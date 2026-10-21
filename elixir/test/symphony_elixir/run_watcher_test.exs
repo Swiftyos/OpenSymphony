@@ -257,4 +257,55 @@ defmodule SymphonyElixir.RunWatcherTest do
       {:ok, _pid} = Supervisor.restart_child(SymphonyElixir.Supervisor, RunWatcher.Supervisor)
     end
   end
+
+  defmodule StatusLauncher do
+    def status("fake:gone-" <> _), do: {:gone, {:pod_failed, "Evicted"}}
+    def status(_ref), do: {:unknown, :api_down}
+    def stop(_ref), do: :ok
+  end
+
+  test "a launcher's status/1 is used, an unknown status keeps polling and a gone reason is the exit", %{run_id: run_id} do
+    assert {:ok, watcher} =
+             RunWatcher.start(%{run_id: run_id}, "fake:" <> run_id, launcher: StatusLauncher, poll_interval_ms: 10, lost_grace_ms: 20)
+
+    log = ExUnit.CaptureLog.capture_log(fn -> Process.sleep(60) end)
+    assert Process.alive?(watcher)
+    assert log =~ "Run watcher could not check"
+    RunWatcher.stop(watcher)
+
+    assert {:ok, watcher} =
+             RunWatcher.start(%{run_id: run_id}, "fake:gone-" <> run_id, launcher: StatusLauncher, poll_interval_ms: 10, lost_grace_ms: 20)
+
+    monitor = Process.monitor(watcher)
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      assert_receive {:DOWN, ^monitor, :process, ^watcher, {:pod_failed, "Evicted"}}, 2_000
+    end)
+  end
+
+  test "a status function that raises is treated as gone", %{run_id: run_id} do
+    assert {:ok, watcher} =
+             RunWatcher.start(%{run_id: run_id}, "fake:" <> run_id,
+               launcher: StatusLauncher,
+               status: fn -> raise "no" end,
+               poll_interval_ms: 10,
+               lost_grace_ms: 20
+             )
+
+    monitor = Process.monitor(watcher)
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      assert_receive {:DOWN, ^monitor, :process, ^watcher, :runner_lost}, 2_000
+    end)
+  end
+
+  test "a second watcher for the same run is refused", %{run_id: run_id} do
+    FakeLauncher.set("fake:" <> run_id, true)
+    assert {:ok, watcher} = RunWatcher.start(%{run_id: run_id}, "fake:" <> run_id, launcher: FakeLauncher, poll_interval_ms: 10)
+
+    assert {:error, {:already_watched, ^watcher}} =
+             RunWatcher.start(%{run_id: run_id}, "fake:" <> run_id, launcher: FakeLauncher, poll_interval_ms: 10)
+
+    assert Process.alive?(watcher)
+  end
 end

@@ -81,6 +81,8 @@ defmodule SymphonyElixir.Application do
       SymphonyElixir.RunRegistry.Server,
       {Registry, keys: :unique, name: SymphonyElixir.RunWatcher.Registry},
       {DynamicSupervisor, strategy: :one_for_one, name: SymphonyElixir.RunWatcher.Supervisor},
+      # Deletes finished runner pods and orphaned run Secrets (Kubernetes launcher only).
+      SymphonyElixir.RunLauncher.Kubernetes.Janitor,
       SymphonyElixir.Orchestrator,
       SymphonyElixir.Capacity.Sampler,
       SymphonyElixir.HttpServer,

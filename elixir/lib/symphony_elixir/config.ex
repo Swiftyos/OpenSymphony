@@ -195,11 +195,15 @@ defmodule SymphonyElixir.Config do
   @spec default_runner_command() :: String.t()
   def default_runner_command, do: @default_runner_command
 
-  @doc "How agent runs are started: `:local` in-process or `:process` as separate OS processes."
-  @spec agent_launcher() :: :local | :process
+  @doc """
+  How agent runs are started: `:local` in-process, `:process` as separate OS
+  processes, or `:kubernetes` as runner pods.
+  """
+  @spec agent_launcher() :: :local | :process | :kubernetes
   def agent_launcher do
     case settings!().agent.launcher do
       "process" -> :process
+      "kubernetes" -> :kubernetes
       _ -> :local
     end
   end

@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.RunWatcher do
   @moduledoc """
-  Watches one process-launched run from the controller.
+  Watches one process-launched or Kubernetes run from the controller.
 
   The orchestrator monitors the watcher exactly like it monitors an in-process
   run task, so its `:DOWN` handling (a continuation retry for `:normal`, a
@@ -9,7 +9,16 @@ defmodule SymphonyElixir.RunWatcher do
   The watcher exits with the run's `finished` reason (`:normal` for a normal
   end, otherwise `{:runner_failed, reason}`). If the OS process disappears
   without a finished event, it waits a short grace period for the runner's
-  outbox to replay one, then exits `:runner_lost`.
+  outbox to replay one, then exits `:runner_lost` (or the reason the launcher
+  gave for the run's end, such as a pod's `{:pod_failed, "OOMKilled (exit code
+  137)"}`).
+
+  The run is checked with `SymphonyElixir.RunLauncher.status/2` (or a `:status`
+  function given at start). A check that fails (`{:unknown, reason}`) is
+  retried at the next poll without starting the lost clock. One that is refused
+  (`{:unauthorized, reason}`, a 401/403) for longer than
+  `unauthorized_timeout_ms` (five minutes) exits
+  `{:pod_monitor_unauthorized, reason}`, since the controller has lost access.
 
   A watcher started with `log:` (a just-launched runner's `runner.log`) checks
   the runner once after `startup_check_ms` (1s) before its regular polling. A
@@ -29,6 +38,7 @@ defmodule SymphonyElixir.RunWatcher do
   @poll_interval_ms 5_000
   @lost_grace_ms 10_000
   @startup_check_ms 1_000
+  @unauthorized_timeout_ms 300_000
   @log_tail_bytes 2_000
 
   @type run :: %{run_id: String.t(), issue_id: String.t() | nil}
@@ -44,7 +54,9 @@ defmodule SymphonyElixir.RunWatcher do
       poll_interval_ms: Keyword.get(opts, :poll_interval_ms, @poll_interval_ms),
       lost_grace_ms: Keyword.get(opts, :lost_grace_ms, @lost_grace_ms),
       log: Keyword.get(opts, :log),
-      startup_check_ms: Keyword.get(opts, :startup_check_ms, @startup_check_ms)
+      startup_check_ms: Keyword.get(opts, :startup_check_ms, @startup_check_ms),
+      status: Keyword.get(opts, :status),
+      unauthorized_timeout_ms: Keyword.get(opts, :unauthorized_timeout_ms, @unauthorized_timeout_ms)
     }
 
     case Process.whereis(@supervisor) do
@@ -135,10 +147,14 @@ defmodule SymphonyElixir.RunWatcher do
 
   @impl true
   def init(args) do
-    if Process.whereis(@registry) && Registry.lookup(@registry, args.run_id) == [] do
-      Registry.register(@registry, args.run_id, nil)
+    # One watcher per run: a second would give the run two exits.
+    case Process.whereis(@registry) && Registry.register(@registry, args.run_id, nil) do
+      {:error, {:already_registered, pid}} -> {:stop, {:already_watched, pid}}
+      _registered_or_no_registry -> init_watcher(args)
     end
+  end
 
+  defp init_watcher(args) do
     # A just-launched runner is checked once at startup_check_ms; regular
     # polling starts after that check passes.
     case Map.get(args, :log) do
@@ -155,8 +171,11 @@ defmodule SymphonyElixir.RunWatcher do
        poll_interval_ms: args.poll_interval_ms,
        lost_grace_ms: args.lost_grace_ms,
        log: Map.get(args, :log),
+       status: Map.get(args, :status),
+       unauthorized_timeout_ms: Map.get(args, :unauthorized_timeout_ms, @unauthorized_timeout_ms),
        last_seen_ms: now_ms(),
-       gone_since_ms: nil
+       gone_since_ms: nil,
+       unauthorized_since_ms: nil
      }}
   end
 
@@ -175,7 +194,7 @@ defmodule SymphonyElixir.RunWatcher do
 
   @impl true
   def handle_info(:startup_check, state) do
-    if alive?(state) do
+    if status(state) == :alive do
       schedule_poll(state.poll_interval_ms)
       {:noreply, state}
     else
@@ -186,38 +205,66 @@ defmodule SymphonyElixir.RunWatcher do
   end
 
   def handle_info(:poll, state) do
-    if alive?(state) do
-      schedule_poll(state.poll_interval_ms)
-      {:noreply, %{state | gone_since_ms: nil}}
-    else
-      lost(state)
+    case status(state) do
+      :alive ->
+        schedule_poll(state.poll_interval_ms)
+        {:noreply, %{state | gone_since_ms: nil, unauthorized_since_ms: nil}}
+
+      {:gone, reason} ->
+        lost(state, reason)
+
+      {:unauthorized, reason} ->
+        unauthorized(state, reason)
+
+      {:unknown, reason} ->
+        Logger.warning("Run watcher could not check run_id=#{state.run_id} ref=#{state.ref} reason=#{inspect(reason, limit: 5)}")
+        schedule_poll(state.poll_interval_ms)
+        {:noreply, state}
     end
   end
 
   def handle_info(_message, state), do: {:noreply, state}
 
-  defp lost(%{gone_since_ms: nil} = state) do
+  defp lost(%{gone_since_ms: nil} = state, _reason) do
     schedule_poll(state.poll_interval_ms)
-    {:noreply, %{state | gone_since_ms: now_ms()}}
+    {:noreply, %{state | gone_since_ms: now_ms(), unauthorized_since_ms: nil}}
   end
 
-  defp lost(state) do
+  defp lost(state, reason) do
     remaining_ms = state.lost_grace_ms - (now_ms() - state.gone_since_ms)
 
     if remaining_ms > 0 do
       schedule_poll(min(state.poll_interval_ms, remaining_ms))
       {:noreply, state}
     else
-      Logger.warning("Run watcher lost run_id=#{state.run_id} ref=#{state.ref}; no finished event within #{state.lost_grace_ms}ms")
-      {:stop, :runner_lost, state}
+      Logger.warning("Run watcher lost run_id=#{state.run_id} ref=#{state.ref} reason=#{inspect(reason, limit: 5)}; no finished event within #{state.lost_grace_ms}ms")
+      {:stop, reason || :runner_lost, state}
     end
   end
 
-  defp alive?(%{launcher: launcher, ref: ref}) do
-    Code.ensure_loaded?(launcher) and function_exported?(launcher, :alive?, 1) and launcher.alive?(ref)
-  rescue
-    _error -> false
+  # A rotated token is picked up on the next request, so a short burst of
+  # 401/403 is retried; one that persists means the controller lost access.
+  defp unauthorized(state, reason) do
+    now = now_ms()
+    since = state.unauthorized_since_ms || now
+
+    if now - since >= state.unauthorized_timeout_ms do
+      Logger.error("Run watcher unauthorized for too long run_id=#{state.run_id} ref=#{state.ref} reason=#{inspect(reason, limit: 5)}")
+      {:stop, {:pod_monitor_unauthorized, reason}, state}
+    else
+      Logger.warning("Run watcher check unauthorized run_id=#{state.run_id} ref=#{state.ref} reason=#{inspect(reason, limit: 5)}")
+      schedule_poll(state.poll_interval_ms)
+      {:noreply, %{state | unauthorized_since_ms: since}}
+    end
   end
+
+  defp status(%{status: status}) when is_function(status, 0) do
+    status.()
+  rescue
+    _error -> {:gone, nil}
+  end
+
+  defp status(%{launcher: launcher, ref: ref}), do: SymphonyElixir.RunLauncher.status(launcher, ref)
 
   @doc "The exit reason for a run's finished reason: `:normal`, or `{:runner_failed, reason}`."
   @spec exit_reason(String.t()) :: :normal | {:runner_failed, String.t()}

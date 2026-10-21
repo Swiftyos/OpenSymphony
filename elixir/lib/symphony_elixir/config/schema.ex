@@ -500,8 +500,17 @@ defmodule SymphonyElixir.Config.Schema do
       field(:agent_tools_size_limit, :string, default: "1Gi")
       field(:ephemeral_storage_request, :string, default: "2Gi")
       field(:ephemeral_storage_limit, :string, default: "24Gi")
+      # The agent-tools init container's ephemeral-storage request; "" omits it.
+      field(:agent_tools_ephemeral_storage_request, :string, default: "256Mi")
       # [{env, secret, key}] references to existing secrets, injected by name.
       field(:secret_env, {:array, :map}, default: [])
+      # The controller URL as a runner pod reaches it (a cluster Service), for
+      # the /runner/v1 endpoints and the git mirror. Required by the launcher.
+      field(:controller_url, :string)
+      # How long a finished runner pod is kept for its logs before the janitor
+      # deletes it, and how often the janitor sweeps.
+      field(:finished_pod_retention_ms, :integer, default: 3_600_000)
+      field(:janitor_interval_ms, :integer, default: 300_000)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -524,7 +533,11 @@ defmodule SymphonyElixir.Config.Schema do
           :agent_tools_size_limit,
           :ephemeral_storage_request,
           :ephemeral_storage_limit,
-          :secret_env
+          :agent_tools_ephemeral_storage_request,
+          :secret_env,
+          :controller_url,
+          :finished_pod_retention_ms,
+          :janitor_interval_ms
         ],
         empty_values: []
       )
@@ -536,11 +549,16 @@ defmodule SymphonyElixir.Config.Schema do
       |> update_change(:agent_tools_size_limit, &Schema.normalize_optional_string/1)
       |> update_change(:ephemeral_storage_request, &Schema.normalize_optional_string/1)
       |> update_change(:ephemeral_storage_limit, &Schema.normalize_optional_string/1)
+      |> update_change(:controller_url, &Schema.normalize_optional_string/1)
+      |> update_change(:agent_tools_ephemeral_storage_request, &Schema.normalize_optional_string/1)
       |> validate_required([:namespace, :cpu_request, :cpu_limit, :memory_request, :memory_limit, :run_as_user])
       |> validate_format(:namespace, ~r/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/, message: "must be a DNS label such as symphony-runs")
       |> validate_format(:queue_name, ~r/^[A-Za-z0-9]([A-Za-z0-9_.-]{0,61}[A-Za-z0-9])?$/, message: "must be a label value such as symphony")
       |> validate_number(:active_deadline_seconds, greater_than: 0)
       |> validate_number(:run_as_user, greater_than: 0)
+      |> validate_number(:finished_pod_retention_ms, greater_than_or_equal_to: 0)
+      |> validate_number(:janitor_interval_ms, greater_than: 0)
+      |> validate_format(:controller_url, ~r{^https?://[^\s/]+}, message: "must be an http(s) URL such as http://symphony.symphony.svc:4000")
       |> validate_change(:secret_env, &validate_secret_env/2)
     end
 
@@ -632,10 +650,10 @@ defmodule SymphonyElixir.Config.Schema do
         end
       end)
       |> validate_change(:launcher, fn :launcher, value ->
-        if value in ["local", "process"] do
+        if value in ["local", "process", "kubernetes"] do
           []
         else
-          [launcher: "must be one of: local, process"]
+          [launcher: "must be one of: local, process, kubernetes"]
         end
       end)
       |> validate_change(:runner_command, fn :runner_command, value ->

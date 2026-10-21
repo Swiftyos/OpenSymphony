@@ -72,8 +72,43 @@ defmodule SymphonyElixir.DurableRunsProcessTest do
     end
   end
 
+  # A launcher like the Kubernetes one: it reports a status (not just alive?),
+  # releases an ended run's credentials and names its own controller URL.
+  defmodule StatusLauncher do
+    @table :symphony_durable_status_launcher
+
+    def setup do
+      if :ets.whereis(@table) == :undefined, do: :ets.new(@table, [:named_table, :public, :set])
+      :ets.delete_all_objects(@table)
+      :ok
+    end
+
+    def set_status(ref, status), do: :ets.insert(@table, {{:status, ref}, status})
+    def released(ref), do: :ets.member(@table, {:released, ref})
+
+    defdelegate start_process(spec, opts), to: FakeLauncher
+    defdelegate alive?(ref), to: FakeLauncher
+    defdelegate stop(ref), to: FakeLauncher
+    def stopped(ref), do: FakeLauncher.stopped(ref)
+
+    def status(ref) do
+      case :ets.lookup(@table, {:status, ref}) do
+        [{_key, status}] -> status
+        [] -> if FakeLauncher.alive?(ref), do: :alive, else: {:gone, nil}
+      end
+    end
+
+    def release(ref) do
+      :ets.insert(@table, {{:released, ref}, true})
+      :ok
+    end
+
+    def controller_url(_settings), do: "http://symphony.symphony.svc:4000"
+  end
+
   setup do
     root = Support.temp_root!("durable-process")
+    StatusLauncher.setup()
     Support.setup_runs!(root)
     FakeLauncher.setup()
     previous_state_root = Application.get_env(:symphony_elixir, :state_root)
@@ -412,6 +447,96 @@ defmodule SymphonyElixir.DurableRunsProcessTest do
     refute File.exists?(RunSpec.path(run_id))
 
     GenServer.stop(pid)
+  end
+
+  test "dispatch builds the spec with the launcher's controller URL and the git mirror of a cached repo", %{root: root} do
+    origin = Path.join(root, "origin.git")
+    seed = Path.join(root, "seed")
+    System.cmd("git", ["init", "--bare", "-q", "-b", "main", origin])
+    File.mkdir_p!(seed)
+    File.write!(Path.join(seed, "README.md"), "base\n")
+
+    for args <- [
+          ["init", "-q", "-b", "main"],
+          ["-c", "user.name=T", "-c", "user.email=t@example.com", "add", "README.md"],
+          ["-c", "user.name=T", "-c", "user.email=t@example.com", "commit", "-q", "-m", "initial"],
+          ["push", "-q", origin, "main"]
+        ] do
+      {_output, 0} = System.cmd("git", ["-C", seed | args], stderr_to_stdout: true)
+    end
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      agent_backend: "claude",
+      tracker_project_slug: nil,
+      tracker_projects: [%{slug: "project-a", repo: origin}],
+      workspace_root: Path.join(root, "workspaces")
+    )
+
+    issue = %{Support.issue_fixture("issue-mirror", "MT-MIRROR") | project_slug: "project-a"}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    Application.put_env(:symphony_elixir, :run_launcher, StatusLauncher)
+    FakeLauncher.on_start(:ok, self())
+
+    # Startup's repo preflight fills the controller's cache of the project repo.
+    {:ok, pid} = Orchestrator.start_link(name: Module.concat(__MODULE__, "MirrorDispatchOrchestrator"))
+
+    assert_receive {:fake_start, %RunSpec{run_id: run_id} = spec, _ref}, 10_000
+    assert spec.controller_url == "http://symphony.symphony.svc:4000"
+    repo_key = SymphonyElixir.GitMirror.repo_key(Config.repo_source(origin))
+    assert spec.git_mirror_url == "http://symphony.symphony.svc:4000/git/#{run_id}/#{repo_key}"
+    assert spec.target_branch == "main"
+
+    GenServer.stop(pid)
+  end
+
+  test "a run that finishes normally is released, not stopped", %{root: root} do
+    issue = Support.issue_fixture("issue-release", "MT-RELEASE")
+    ref = "fake:release"
+    FakeLauncher.set(ref, true)
+    run_registry_entry(issue, "run-release", %{launcher: StatusLauncher, ref: ref, metadata: metadata(issue, root)})
+
+    {:ok, pid} = Orchestrator.start_link(name: Module.concat(__MODULE__, "ReleaseOrchestrator"))
+    assert %{launcher: StatusLauncher} = :sys.get_state(pid).running[issue.id]
+
+    send(pid, {:run_finished, issue.id, "run-release", "normal"})
+
+    assert eventually(fn -> StatusLauncher.released(ref) end)
+    refute StatusLauncher.stopped(ref)
+    GenServer.stop(pid)
+  end
+
+  test "a dead recovered run is released (its spec deleted) and retried", %{root: root} do
+    issue = Support.issue_fixture("issue-dead", "MT-DEAD")
+    ref = "fake:dead"
+    StatusLauncher.set_status(ref, {:gone, {:pod_failed, "Evicted"}})
+    {:ok, spec_path} = RunSpec.write(%RunSpec{run_id: "run-dead", epoch: 1, issue: issue})
+    run_registry_entry(issue, "run-dead", %{attempt: 1, launcher: StatusLauncher, ref: ref, metadata: metadata(issue, root)})
+
+    {:ok, pid} = Orchestrator.start_link(name: Module.concat(__MODULE__, "DeadOrchestrator"))
+    state = :sys.get_state(pid)
+
+    refute Map.has_key?(state.running, issue.id)
+    assert %{attempt: 2, error: "interrupted by a Symphony restart"} = state.retry_attempts[issue.id]
+    assert eventually(fn -> StatusLauncher.released(ref) end)
+    assert eventually(fn -> not File.exists?(spec_path) end)
+    refute StatusLauncher.stopped(ref)
+    GenServer.stop(pid)
+  end
+
+  test "a run whose launcher cannot check it at startup is adopted, and its watcher decides", %{root: root} do
+    issue = Support.issue_fixture("issue-unknown", "MT-UNKNOWN")
+    ref = "fake:unknown"
+
+    for {status, name} <- [{{:unknown, :api_down}, "UnknownOrchestrator"}, {{:unauthorized, :expired}, "UnauthorizedOrchestrator"}] do
+      StatusLauncher.set_status(ref, status)
+      run_registry_entry(issue, "run-unknown", %{launcher: StatusLauncher, ref: ref, metadata: metadata(issue, root)})
+
+      {:ok, pid} = Orchestrator.start_link(name: Module.concat(__MODULE__, name))
+      assert %{run_id: "run-unknown", run_ref: ^ref} = :sys.get_state(pid).running[issue.id]
+      GenServer.stop(pid)
+      RunWatcher.stop("run-unknown")
+    end
   end
 
   defp fake_run!(issue, run_id, ref, root, entry) do

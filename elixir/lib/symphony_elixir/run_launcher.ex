@@ -9,8 +9,9 @@ defmodule SymphonyElixir.RunLauncher do
 
   `SymphonyElixir.RunLauncher.Local` (the default) starts each run as a task
   under `SymphonyElixir.TaskSupervisor`, so a controller restart kills the
-  run. `SymphonyElixir.RunLauncher.Process` starts it as a separate OS process,
-  whose `alive?/1` lets a restarted controller adopt it; see
+  run. `SymphonyElixir.RunLauncher.Process` starts it as a separate OS process
+  and `SymphonyElixir.RunLauncher.Kubernetes` as a runner pod; their `alive?/1`
+  (or `status/1`) lets a restarted controller adopt the run. See
   `docs/durable-runs.md`.
   """
 
@@ -35,6 +36,34 @@ defmodule SymphonyElixir.RunLauncher do
   @doc "Stops the run a reference names."
   @callback stop(ref :: String.t()) :: :ok
 
+  @typedoc """
+  What a launcher can tell about a run beyond `alive?/1`:
+
+    * `:alive` — the run is still going.
+    * `{:gone, reason}` — it has ended; `reason` (or nil) is what to exit with
+      when no `finished` event arrives, such as `{:pod_failed, "OOMKilled"}`.
+    * `{:unknown, reason}` — it could not be checked (a transient API error).
+    * `{:unauthorized, reason}` — the check was refused (401/403).
+  """
+  @type status :: :alive | {:gone, term()} | {:unknown, term()} | {:unauthorized, term()}
+
+  @doc "The run's status. Optional: a launcher without it is checked with `alive?/1`."
+  @callback status(ref :: String.t()) :: status()
+
+  @doc """
+  Frees what an ended run no longer needs (its credentials) while keeping what
+  is kept for debugging (a pod's logs). Optional.
+  """
+  @callback release(ref :: String.t()) :: :ok
+
+  @doc """
+  The controller URL a run started by this launcher reaches the controller at.
+  Optional: the default is the controller's bound loopback address.
+  """
+  @callback controller_url(settings :: SymphonyElixir.Config.Schema.t()) :: String.t() | nil
+
+  @optional_callbacks status: 1, release: 1, controller_url: 1
+
   @doc """
   Starts a run through the given launcher. A launcher that implements
   `start_process/2` receives the run spec; every other launcher receives the
@@ -50,6 +79,43 @@ defmodule SymphonyElixir.RunLauncher do
     end
   end
 
+  @doc """
+  A run's status through its launcher: `status/1` when the launcher has it,
+  else `:alive` or `{:gone, nil}` from `alive?/1`. A launcher that raises (or
+  is not loaded) reports the run gone.
+  """
+  @spec status(module(), String.t()) :: status()
+  def status(launcher, ref) when is_atom(launcher) do
+    cond do
+      not Code.ensure_loaded?(launcher) -> {:gone, nil}
+      function_exported?(launcher, :status, 1) -> launcher.status(ref)
+      function_exported?(launcher, :alive?, 1) and launcher.alive?(ref) -> :alive
+      true -> {:gone, nil}
+    end
+  rescue
+    _error -> {:gone, nil}
+  end
+
+  @doc "Releases an ended run's resources through its launcher, when it has `release/1`."
+  @spec release(module(), String.t()) :: :ok
+  def release(launcher, ref) when is_atom(launcher) do
+    if Code.ensure_loaded?(launcher) and function_exported?(launcher, :release, 1) do
+      launcher.release(ref)
+    end
+
+    :ok
+  end
+
+  @doc "The controller URL for runs this launcher starts (see `c:controller_url/1`)."
+  @spec controller_url(module(), SymphonyElixir.Config.Schema.t()) :: String.t() | nil
+  def controller_url(launcher, settings) when is_atom(launcher) do
+    if Code.ensure_loaded?(launcher) and function_exported?(launcher, :controller_url, 1) do
+      launcher.controller_url(settings)
+    else
+      SymphonyElixir.RunSpec.controller_url()
+    end
+  end
+
   @doc "The configured launcher; `SymphonyElixir.RunLauncher.Local` unless set."
   @spec launcher() :: module()
   def launcher do
@@ -61,6 +127,7 @@ defmodule SymphonyElixir.RunLauncher do
         try do
           case SymphonyElixir.Config.agent_launcher() do
             :process -> SymphonyElixir.RunLauncher.Process
+            :kubernetes -> SymphonyElixir.RunLauncher.Kubernetes
             _ -> SymphonyElixir.RunLauncher.Local
           end
         rescue

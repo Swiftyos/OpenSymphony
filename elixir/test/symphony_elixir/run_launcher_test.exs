@@ -134,6 +134,33 @@ defmodule SymphonyElixir.RunLauncherTest do
     assert :ok = Local.stop("nonsense")
   end
 
+  defmodule StatusOnly do
+    def status(_ref), do: {:unknown, :api_down}
+    def release(ref), do: send(self(), {:released, ref}) && :ok
+  end
+
+  defmodule AliveOnly do
+    def alive?("yes"), do: true
+    def alive?("raise"), do: raise("no")
+    def alive?(_ref), do: false
+  end
+
+  test "status/2 prefers status/1, falls back to alive?/1 and reports anything else as gone" do
+    assert RunLauncher.status(StatusOnly, "ref") == {:unknown, :api_down}
+    assert RunLauncher.status(AliveOnly, "yes") == :alive
+    assert RunLauncher.status(AliveOnly, "no") == {:gone, nil}
+    assert RunLauncher.status(AliveOnly, "raise") == {:gone, nil}
+    assert RunLauncher.status(String, "ref") == {:gone, nil}
+    assert RunLauncher.status(:"Elixir.NotALoadedLauncher", "ref") == {:gone, nil}
+  end
+
+  test "release/2 calls the launcher's release/1 only when it has one" do
+    assert :ok = RunLauncher.release(StatusOnly, "ref")
+    assert_received {:released, "ref"}
+    assert :ok = RunLauncher.release(AliveOnly, "ref")
+    assert :ok = RunLauncher.release(:"Elixir.NotALoadedLauncher", "ref")
+  end
+
   defp refute_eventually_alive(ref, attempts \\ 50) do
     if Local.alive?(ref) and attempts > 0 do
       Process.sleep(10)

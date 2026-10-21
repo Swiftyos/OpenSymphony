@@ -1480,7 +1480,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp start_process_run(launcher, run, issue_config, fun) do
-    case build_run_spec(run, issue_config) do
+    case build_run_spec(launcher, run, issue_config) do
       {:ok, spec} ->
         # Recorded before the runner starts: a runner's first events must find
         # its run, since the runner treats an unknown run as fenced.
@@ -1505,8 +1505,20 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp build_run_spec(run, issue_config) do
-    {:ok, run_spec(run.issue, run.attempt, run.worker_host, run.route, issue_config, run.account, run.run_id, run.epoch)}
+  # The launcher says where its runs reach the controller (a runner pod cannot
+  # use the loopback address), and the git mirror URL is built from that. The
+  # mirror is attached whenever this controller has the issue repo's cache: a
+  # runner with its own cache ignores it.
+  defp build_run_spec(launcher, run, issue_config) do
+    settings = issue_config.settings
+
+    spec =
+      run.issue
+      |> run_spec(run.attempt, run.worker_host, run.route, issue_config, run.account, run.run_id, run.epoch)
+      |> Map.put(:controller_url, RunLauncher.controller_url(launcher, settings))
+      |> RunSpec.attach_git_mirror(settings)
+
+    {:ok, spec}
   rescue
     error -> {:error, {:run_spec_failed, Exception.message(error)}}
   end
@@ -1532,8 +1544,10 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp cleanup_process_run(_running_entry, _stop?), do: :ok
 
+  # A run that ended by itself is released (a pod's Secret goes, its logs
+  # stay); one that may still be going is stopped.
   defp stop_and_forget_run(launcher, run_ref, run_id, stop?) do
-    if stop?, do: launcher_stop(launcher, run_ref)
+    if stop?, do: launcher_stop(launcher, run_ref), else: RunLauncher.release(launcher, run_ref)
     delete_run_spec(run_id)
   end
 
@@ -1745,15 +1759,28 @@ defmodule SymphonyElixir.Orchestrator do
       launcher = entry_launcher(entry.launcher, current_launcher)
       alive? = launcher_alive?(launcher, entry.ref)
 
+      # A run whose launcher says it is still going is adopted; one it could
+      # not check (an API error) is adopted too, and its watcher decides.
+
       # A run whose finished event the controller already applied (or that its
       # runner wrote to the outbox before dying) has ended; it is never adopted
       # or retried as interrupted.
       case entry.finished || (not alive? && outbox_finished_reason(entry.run_id)) do
         reason when is_binary(reason) -> recover_finished_run(acc, issue_id, entry, launcher, reason, alive?)
         _ when alive? -> adopt_run(acc, issue_id, entry, launcher)
-        _ -> retry_recovered_run(acc, issue_id, entry)
+        _ -> acc |> release_dead_run(launcher, entry) |> retry_recovered_run(issue_id, entry)
       end
     end)
+  end
+
+  # A dead run's leftovers (its spec and, for a pod, its Secret) are not needed
+  # by the retry, which gets a new run id.
+  defp release_dead_run(%State{} = state, launcher, entry) do
+    if process_launcher?(launcher) and is_binary(entry.ref) do
+      run_async(fn -> stop_and_forget_run(launcher, entry.ref, entry.run_id, false) end)
+    end
+
+    state
   end
 
   defp outbox_finished_reason(run_id) do
@@ -1831,9 +1858,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp entry_launcher(_launcher, current), do: current
 
   defp launcher_alive?(launcher, ref) do
-    Code.ensure_loaded?(launcher) and function_exported?(launcher, :alive?, 1) and launcher.alive?(ref)
-  rescue
-    _error -> false
+    not match?({:gone, _reason}, RunLauncher.status(launcher, ref))
   end
 
   defp stop_unadopted_run(launcher, ref) do

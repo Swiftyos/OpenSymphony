@@ -36,6 +36,33 @@ defmodule SymphonyElixir.KubeTest do
     assert_receive {:request, ["Bearer token-1"]}
   end
 
+  test "list_pods and list_secrets list by label selector and return the items" do
+    parent = self()
+
+    assert {:ok, client} =
+             Kube.client(
+               base_url: "https://kube.test",
+               req_options: [
+                 retry: false,
+                 plug: fn conn ->
+                   conn = Plug.Conn.fetch_query_params(conn)
+                   send(parent, {:list, conn.method, conn.request_path, conn.query_params})
+
+                   case conn.request_path do
+                     "/api/v1/namespaces/runs/pods" -> Req.Test.json(conn, %{"items" => [%{"metadata" => %{"name" => "run-1"}}, "junk"]})
+                     "/api/v1/namespaces/runs/secrets" -> Req.Test.json(conn, %{"kind" => "SecretList"})
+                     _other -> Plug.Conn.send_resp(conn, 403, "forbidden")
+                   end
+                 end
+               ]
+             )
+
+    assert {:ok, [%{"metadata" => %{"name" => "run-1"}}]} = Kube.list_pods(client, "runs", "app=x")
+    assert_receive {:list, "GET", "/api/v1/namespaces/runs/pods", %{"labelSelector" => "app=x"}}
+    assert {:ok, []} = Kube.list_secrets(client, "runs", "app=x")
+    assert {:error, {:http_error, 403, "forbidden"}} = Kube.list_pods(client, "other", "app=x")
+  end
+
   test "a client without a token sends no authorization header" do
     parent = self()
 

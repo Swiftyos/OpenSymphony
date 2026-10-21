@@ -1,11 +1,27 @@
 defmodule SymphonyElixir.RunLauncher.Kubernetes do
   @moduledoc """
-  Starts each run as a runner pod on Kubernetes.
+  Starts each run as a runner pod on Kubernetes (`agent.launcher: kubernetes`).
 
-  `start/2` renders the run's Secret, ConfigMap and pod (see
+  `start_process/2` renders the run's Secret, ConfigMap and pod (see
   `SymphonyElixir.RunLauncher.Kubernetes.PodSpec`), creates the Secret and the
-  ConfigMap, then the pod, and returns a lightweight monitor process and the
-  reference `"k8s:<namespace>/<pod>"`.
+  ConfigMap, then the pod, and returns a `SymphonyElixir.RunWatcher` and the
+  reference `"k8s:<namespace>/<pod>"`. The orchestrator monitors the watcher
+  exactly like a process run's, so a pod's end reaches it the same way:
+
+  - The runner's `finished` event (over `/runner/v1`) ends the watcher with
+    the run's reason.
+  - A pod that reaches a terminal phase, or disappears, without one ends it,
+    after the watcher's grace period, with `{:pod_failed, reason}` (the pod's
+    reason, else the runner container's terminated reason and exit code) or
+    `:runner_lost`.
+  - A 401/403 that lasts five minutes ends it with
+    `{:pod_monitor_unauthorized, reason}`; other API errors are retried.
+
+  A Pending pod is never timed out: Kueue may hold it behind its scheduling
+  gate for as long as the queue is full. `activeDeadlineSeconds` still bounds
+  a pod once it starts.
+
+  Other details:
 
   - The ConfigMap holds the controller's effective config file (`symphony.yml`
     or `WORKFLOW.md`), which the runner is started with.
@@ -16,33 +32,10 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes do
     restarts before cleaning up.
   - When the pod create fails without an answer (a timeout), the pod is read
     back before anything is cleaned up: it may have been created.
-
-  The monitor polls the pod every five seconds until it reaches a terminal
-  phase and exits with that result:
-
-  - `:normal` when the pod Succeeded
-  - `{:pod_failed, reason}` when it Failed (the pod's reason, else the runner
-    container's terminated reason and exit code)
-  - `:pod_lost` when the pod is gone
-  - `{:pod_monitor_unauthorized, reason}` when the API has answered 401/403 for
-    longer than five minutes
-
-  A Pending pod is never timed out here: Kueue may hold it behind its
-  scheduling gate for as long as the queue is full. `activeDeadlineSeconds`
-  still bounds a pod once it starts.
-
-  That monitor is interim: it uses the controller's current `RunLauncher`
-  behaviour, where the orchestrator monitors the returned pid. The process
-  launcher's watcher step replaces it once both branches merge. `alive?/1` and
-  `stop/1` already read the pod, so adoption and cancellation need no change.
-
-  On a terminal phase the monitor deletes the run's Secret and ConfigMap. The
-  pod is kept for its logs; a janitor is expected to remove old pods
-  separately.
-
-  `start/2` accepts either a `%SymphonyElixir.RunSpec{}` or the current
-  behaviour's zero-arity function plus `spec: %RunSpec{}` in opts, so wiring can
-  keep calling it the same way as the other launchers.
+  - `release/1` (a run that ended) deletes the Secret and ConfigMap and keeps
+    the pod for its logs; `stop/1` deletes the pod too unless it has already
+    finished. `SymphonyElixir.RunLauncher.Kubernetes.Janitor` deletes finished
+    pods after `agent.kubernetes.finished_pod_retention_ms`.
   """
 
   @behaviour SymphonyElixir.RunLauncher
@@ -54,76 +47,199 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes do
   alias SymphonyElixir.Kube
   alias SymphonyElixir.RunLauncher.Kubernetes.PodSpec
   alias SymphonyElixir.RunSpec
+  alias SymphonyElixir.RunWatcher
   alias SymphonyElixir.SymphonyConfig
   alias SymphonyElixir.Workflow
 
-  # Follow-up (pod watch): replace the per-run poll with one pod watch (or
-  # informer) over the runner label. At 5s per run, 1000 concurrent runs are
-  # 200 GET/s against the API server; a watch is one stream. See
-  # docs/durable-runs.md.
-  @poll_interval_ms 5_000
-  @unauthorized_timeout_ms 300_000
+  # Follow-up (pod watch): each run's watcher GETs its pod every poll (5s).
+  # At 1000 concurrent runs that is 200 GET/s against the API server; one pod
+  # watch (or informer) over the runner label should feed the watchers
+  # instead. See docs/durable-runs.md.
   @prefix "k8s:"
+  @terminal_phases ["Succeeded", "Failed"]
 
   @doc """
-  Starts the run's Secret, ConfigMap, pod and monitor.
+  Starts the run's Secret, ConfigMap, pod and watcher.
 
-  Options: `:spec` (when called with a function), `:settings` (defaults to the
-  loaded config), `:config_path` (the config file handed to the runner;
-  defaults to the controller's own `symphony.yml` or `WORKFLOW.md`),
-  `:poll_interval_ms`, `:unauthorized_timeout_ms`, and any
-  `SymphonyElixir.Kube` options (`:base_url`, `:token`, `:service_account_dir`,
-  `:req_options`).
+  Options: `:settings` (defaults to the loaded config), `:config_path` (the
+  config file handed to the runner; defaults to the controller's own
+  `symphony.yml` or `WORKFLOW.md`), the watcher's `:poll_interval_ms`,
+  `:lost_grace_ms` and `:unauthorized_timeout_ms`, and any
+  `SymphonyElixir.Kube` options (`:base_url`, `:token`,
+  `:service_account_dir`, `:req_options`), which the watcher's pod checks use
+  too.
   """
   @impl true
-  @spec start((-> any()) | RunSpec.t(), keyword()) :: {:ok, pid(), String.t()} | {:error, term()}
-  def start(fun, opts) when is_function(fun, 0) do
-    case Keyword.fetch(opts, :spec) do
-      {:ok, %RunSpec{} = spec} -> start(spec, Keyword.delete(opts, :spec))
-      {:ok, other} -> {:error, {:invalid_run_spec, other}}
-      :error -> {:error, :missing_run_spec}
-    end
-  end
-
-  def start(%RunSpec{} = spec, opts) do
+  @spec start_process(RunSpec.t(), keyword()) :: {:ok, pid(), String.t()} | {:error, term()}
+  def start_process(%RunSpec{} = spec, opts \\ []) do
     with {:ok, settings} <- settings(opts),
          {:ok, runner_config} <- runner_config(opts),
          {:ok, rendered} <- PodSpec.render(spec, settings, runner_config),
-         {:ok, client} <- Kube.client(opts) do
-      create_and_watch(rendered, client, opts)
+         {:ok, client} <- Kube.client(opts),
+         :ok <- create_run_objects(rendered, client),
+         {:ok, watcher} <- start_watcher(spec, rendered, opts) do
+      Logger.info("Started runner pod run_id=#{spec.run_id} ref=#{rendered.ref} watcher=#{inspect(watcher)}")
+      {:ok, watcher, rendered.ref}
+    else
+      {:error, reason} = error ->
+        Logger.error("Unable to start runner pod run_id=#{spec.run_id} reason=#{inspect(reason, limit: 10)}")
+        error
     end
   end
+
+  @doc "The behaviour's `start/2`: a run spec (or `%{spec: spec}`) is started as a pod."
+  @impl true
+  @spec start(term(), keyword()) :: {:ok, pid(), String.t()} | {:error, term()}
+  def start(%RunSpec{} = spec, opts), do: start_process(spec, opts)
+  def start(%{spec: %RunSpec{} = spec}, opts), do: start_process(spec, opts)
+  def start(_fun_or_other, _opts), do: {:error, :missing_run_spec}
+
+  @doc "The controller URL runner pods use: `agent.kubernetes.controller_url`."
+  @impl true
+  @spec controller_url(Schema.t()) :: String.t() | nil
+  def controller_url(%Schema{} = settings), do: settings.agent.kubernetes.controller_url
 
   @doc "Whether the pod named by a reference exists and is Pending or Running."
   @impl true
   @spec alive?(String.t()) :: boolean()
-  def alive?(ref) when is_binary(ref) do
+  def alive?(ref), do: status(ref) == :alive
+
+  @doc """
+  The run's status from its pod: `:alive` while Pending or Running, `{:gone,
+  nil}` when it Succeeded or is missing, `{:gone, {:pod_failed, reason}}` when
+  it Failed, `{:unauthorized, reason}` for a 401/403 (or no usable
+  credentials), and `{:unknown, reason}` for any other error or a phase that
+  is not known yet (`Unknown`, or none).
+  """
+  @impl true
+  @spec status(String.t()) :: SymphonyElixir.RunLauncher.status()
+  def status(ref), do: status(ref, [])
+
+  @doc "`status/1` with explicit `SymphonyElixir.Kube` options."
+  @spec status(String.t(), keyword()) :: SymphonyElixir.RunLauncher.status()
+  def status(ref, opts) when is_binary(ref) do
     with {:ok, namespace, name} <- parse_ref(ref),
-         {:ok, client} <- Kube.client(),
-         {:ok, pod} <- Kube.get_pod(client, namespace, name) do
-      phase(pod) in ["Pending", "Running"]
+         {:ok, client} <- client(opts) do
+      case Kube.get_pod(client, namespace, name) do
+        {:ok, pod} -> pod_status(pod)
+        {:error, :not_found} -> {:gone, nil}
+        {:error, {:http_error, status, _body} = reason} when status in [401, 403] -> {:unauthorized, reason}
+        {:error, reason} -> {:unknown, reason}
+      end
     else
-      _ -> false
+      :error -> {:gone, nil}
+      {:error, reason} -> {:unauthorized, reason}
     end
   end
 
-  def alive?(_ref), do: false
+  def status(_ref, _opts), do: {:gone, nil}
 
-  @doc "Deletes the pod, its Secret and its ConfigMap; missing objects are not an error."
+  @doc """
+  Deletes the pod (unless it has already finished, so its logs stay), its
+  Secret and its ConfigMap; missing objects are not an error.
+  """
   @impl true
   @spec stop(String.t()) :: :ok
   def stop(ref) when is_binary(ref) do
     with {:ok, namespace, name} <- parse_ref(ref),
          {:ok, client} <- Kube.client() do
-      _ = Kube.delete_pod(client, namespace, name)
-      _ = Kube.delete_secret(client, namespace, name)
-      _ = Kube.delete_config_map(client, namespace, name)
+      unless finished_pod?(client, namespace, name), do: _ = Kube.delete_pod(client, namespace, name)
+      delete_run_objects(client, namespace, name)
     end
 
     :ok
   end
 
   def stop(_ref), do: :ok
+
+  @doc """
+  Deletes an ended run's Secret (the run token) and ConfigMap; the pod is kept
+  for its logs until the janitor removes it.
+  """
+  @impl true
+  @spec release(String.t()) :: :ok
+  def release(ref) when is_binary(ref) do
+    with {:ok, namespace, name} <- parse_ref(ref),
+         {:ok, client} <- Kube.client() do
+      delete_run_objects(client, namespace, name)
+    end
+
+    :ok
+  end
+
+  def release(_ref), do: :ok
+
+  @doc "The pod's phase, or nil."
+  @spec phase(map()) :: String.t() | nil
+  def phase(%{"status" => %{"phase" => phase}}) when is_binary(phase), do: phase
+  def phase(_pod), do: nil
+
+  @doc "Whether a pod has reached a terminal phase."
+  @spec terminal?(map()) :: boolean()
+  def terminal?(pod), do: phase(pod) in @terminal_phases
+
+  defp client(opts) do
+    case Keyword.take(opts, [:base_url, :token, :service_account_dir, :env, :req_options]) do
+      [] -> Kube.client()
+      kube_opts -> Kube.client(kube_opts)
+    end
+  end
+
+  defp pod_status(pod) do
+    case phase(pod) do
+      phase when phase in ["Pending", "Running"] -> :alive
+      "Succeeded" -> {:gone, nil}
+      "Failed" -> {:gone, {:pod_failed, failure_reason(pod)}}
+      phase -> {:unknown, {:pod_phase, phase}}
+    end
+  end
+
+  defp finished_pod?(client, namespace, name) do
+    case Kube.get_pod(client, namespace, name) do
+      {:ok, pod} -> terminal?(pod)
+      _other -> false
+    end
+  end
+
+  defp delete_run_objects(client, namespace, name) do
+    for {kind, result} <- [
+          secret: Kube.delete_secret(client, namespace, name),
+          config_map: Kube.delete_config_map(client, namespace, name)
+        ],
+        not match?({:ok, _response}, result) and result != {:error, :not_found} do
+      Logger.warning("Runner #{kind} cleanup failed run=#{@prefix}#{namespace}/#{name} reason=#{inspect(elem(result, 1), limit: 5)}")
+    end
+
+    :ok
+  end
+
+  defp start_watcher(spec, rendered, opts) do
+    kube_opts = Keyword.take(opts, [:base_url, :token, :service_account_dir, :env, :req_options])
+
+    watcher_opts =
+      [launcher: __MODULE__, status: fn -> status(rendered.ref, kube_opts) end] ++
+        Keyword.take(opts, [:poll_interval_ms, :lost_grace_ms, :unauthorized_timeout_ms])
+
+    case RunWatcher.start(%{run_id: spec.run_id, issue_id: issue_id(spec)}, rendered.ref, watcher_opts) do
+      {:ok, pid} ->
+        {:ok, pid}
+
+      {:error, reason} ->
+        # Without a watcher nothing would ever notice the pod's end.
+        stop_with(rendered, kube_opts)
+        {:error, {:watcher_failed, reason}}
+    end
+  end
+
+  defp stop_with(rendered, kube_opts) do
+    with {:ok, client} <- client(kube_opts) do
+      _ = Kube.delete_pod(client, rendered.namespace, rendered.name)
+      delete_run_objects(client, rendered.namespace, rendered.name)
+    end
+  end
+
+  defp issue_id(%RunSpec{issue: issue}) when is_map(issue), do: Map.get(issue, :id) || Map.get(issue, "id")
+  defp issue_id(_spec), do: nil
 
   defp settings(opts) do
     case Keyword.get(opts, :settings) do
@@ -153,13 +269,13 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes do
     if String.downcase(Path.extname(path)) == ".md", do: "WORKFLOW.md", else: "symphony.yml"
   end
 
-  defp create_and_watch(rendered, client, opts) do
+  defp create_run_objects(rendered, client) do
     with :ok <- create_replacing(client, rendered, :secret),
          :ok <- create_replacing(client, rendered, :config_map) do
       case create_pod(client, rendered) do
         {:ok, pod} ->
           own_run_objects(client, rendered, pod)
-          {:ok, start_monitor(rendered, client, opts), rendered.ref}
+          :ok
 
         {:error, reason} ->
           cleanup_run_objects(rendered, client)
@@ -258,72 +374,7 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes do
     :ok
   end
 
-  defp start_monitor(rendered, client, opts) do
-    state = %{
-      rendered: rendered,
-      client: client,
-      interval: Keyword.get(opts, :poll_interval_ms, @poll_interval_ms),
-      unauthorized_timeout: Keyword.get(opts, :unauthorized_timeout_ms, @unauthorized_timeout_ms),
-      unauthorized_since: nil
-    }
-
-    spawn(fn -> monitor(state) end)
-  end
-
-  defp monitor(state) do
-    Process.sleep(state.interval)
-
-    case Kube.get_pod(state.client, state.rendered.namespace, state.rendered.name) do
-      {:ok, pod} -> monitor_phase(%{state | unauthorized_since: nil}, phase(pod), pod)
-      {:error, :not_found} -> finish(state, :pod_lost)
-      {:error, {:http_error, status, _body} = reason} when status in [401, 403] -> monitor_unauthorized(state, reason)
-      {:error, reason} -> monitor_retry(state, reason)
-    end
-  end
-
-  defp monitor_phase(state, "Succeeded", _pod), do: finish(state, :normal)
-  defp monitor_phase(state, "Failed", pod), do: finish(state, {:pod_failed, failure_reason(pod)})
-  defp monitor_phase(state, _phase, _pod), do: monitor(state)
-
-  # A rotated token is picked up on the next request, so a short burst of
-  # 401/403 is retried; one that persists means the controller lost access.
-  defp monitor_unauthorized(state, reason) do
-    now = System.monotonic_time(:millisecond)
-    since = state.unauthorized_since || now
-
-    if now - since >= state.unauthorized_timeout do
-      Logger.error("Runner pod poll unauthorized for too long run=#{state.rendered.ref} reason=#{inspect(reason, limit: 5)}")
-      exit({:pod_monitor_unauthorized, reason})
-    else
-      monitor_retry(%{state | unauthorized_since: since}, reason)
-    end
-  end
-
-  defp monitor_retry(state, reason) do
-    Logger.warning("Runner pod poll failed run=#{state.rendered.ref} reason=#{inspect(reason, limit: 5)}")
-
-    monitor(state)
-  end
-
-  defp finish(state, reason) do
-    cleanup_run_objects(state.rendered, state.client)
-    exit(reason)
-  end
-
-  defp cleanup_run_objects(rendered, client) do
-    for kind <- [:secret, :config_map] do
-      case delete(client, rendered, kind) do
-        {:ok, _response} -> :ok
-        {:error, :not_found} -> :ok
-        {:error, reason} -> Logger.warning("Runner #{kind} cleanup failed run=#{rendered.ref} reason=#{inspect(reason, limit: 5)}")
-      end
-    end
-
-    :ok
-  end
-
-  defp phase(%{"status" => %{"phase" => phase}}) when is_binary(phase), do: phase
-  defp phase(_pod), do: nil
+  defp cleanup_run_objects(rendered, client), do: delete_run_objects(client, rendered.namespace, rendered.name)
 
   # The pod's own reason (DeadlineExceeded, Evicted) wins; otherwise the runner
   # container's terminated state says why it stopped.

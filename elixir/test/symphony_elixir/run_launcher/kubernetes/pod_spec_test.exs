@@ -77,6 +77,7 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodSpecTest do
     assert init["image"] == "registry.test/symphony-agent-tools:test"
     assert init["args"] == ["/opt/symphony"]
     assert init["volumeMounts"] == [%{"name" => "agent-tools", "mountPath" => "/opt/symphony"}]
+    assert init["resources"] == %{"requests" => %{"ephemeral-storage" => "256Mi"}}
 
     assert [runner] = spec_doc["containers"]
     assert runner["name"] == "runner"
@@ -186,6 +187,7 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodSpecTest do
         "ephemeral_storage_limit" => "50Gi",
         "workspace_size_limit" => "40Gi",
         "agent_tools_size_limit" => "2Gi",
+        "agent_tools_ephemeral_storage_request" => "512Mi",
         "active_deadline_seconds" => 60,
         "run_as_user" => 20_000,
         "queue_name" => "sandbox",
@@ -203,6 +205,7 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodSpecTest do
     assert pod_spec["securityContext"]["fsGroup"] == 20_000
     assert [init] = pod_spec["initContainers"]
     assert init["image"] == "registry.test/custom-tools:1"
+    assert init["resources"] == %{"requests" => %{"ephemeral-storage" => "512Mi"}}
     assert [runner] = pod_spec["containers"]
     assert runner["image"] == "registry.test/custom-runner:1"
 
@@ -228,7 +231,8 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodSpecTest do
         "workspace_size_limit" => "",
         "agent_tools_size_limit" => " ",
         "ephemeral_storage_request" => "",
-        "ephemeral_storage_limit" => ""
+        "ephemeral_storage_limit" => "",
+        "agent_tools_ephemeral_storage_request" => ""
       })
 
     assert {:ok, rendered} = PodSpec.render(spec, settings, @runner_config)
@@ -238,6 +242,7 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodSpecTest do
     assert [tools, _secret, _config, workspace] = pod_spec["volumes"]
     assert tools["emptyDir"] == %{}
     assert workspace["emptyDir"] == %{}
+    assert [%{"resources" => %{}}] = pod_spec["initContainers"]
 
     assert [runner] = pod_spec["containers"]
 
@@ -245,6 +250,25 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodSpecTest do
              "requests" => %{"cpu" => "500m", "memory" => "1Gi"},
              "limits" => %{"cpu" => "2", "memory" => "4Gi"}
            }
+  end
+
+  test "the pod references only its own run-<id> Secret and ConfigMap, plus secret_env's shared Secrets", %{spec: spec} do
+    assert {:ok, rendered} = PodSpec.render(spec, settings!(%{}), @runner_config)
+    pod_spec = rendered.pod["spec"]
+
+    volume_refs =
+      for volume <- pod_spec["volumes"], ref = volume["secret"]["secretName"] || volume["configMap"]["name"], do: ref
+
+    assert volume_refs == [rendered.name, rendered.name]
+
+    key_refs =
+      for container <- pod_spec["containers"] ++ pod_spec["initContainers"],
+          env <- container["env"] || [],
+          ref = get_in(env, ["valueFrom", "secretKeyRef", "name"]),
+          do: ref
+
+    assert key_refs == ["symphony-anthropic", "symphony-github"]
+    refute Enum.any?(pod_spec["containers"] ++ pod_spec["initContainers"], &Map.has_key?(&1, "envFrom"))
   end
 
   test "a missing issue and an empty run id still render valid names and labels", %{spec: spec} do
@@ -304,6 +328,13 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodSpecTest do
 
     assert {:error, {:invalid_kubernetes_config, "agent.kubernetes.runner_image is required"}} =
              PodSpec.render(spec, bare_settings!(%{"agent_tools_image" => "registry.test/tools:test"}), @runner_config)
+
+    assert {:error, {:invalid_kubernetes_config, "agent.kubernetes.controller_url is required"}} =
+             PodSpec.render(
+               spec,
+               bare_settings!(%{"runner_image" => "registry.test/symphony:test", "agent_tools_image" => "registry.test/tools:test"}),
+               @runner_config
+             )
   end
 
   defp bare_settings!(kubernetes) do
@@ -322,6 +353,7 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodSpecTest do
         %{
           "runner_image" => "registry.test/symphony:test",
           "agent_tools_image" => "registry.test/symphony-agent-tools:test",
+          "controller_url" => "http://symphony.symphony.svc:4000",
           "secret_env" => [
             %{"env" => "ANTHROPIC_API_KEY", "secret" => "symphony-anthropic", "key" => "api-key"},
             %{"env" => "GITHUB_TOKEN", "secret" => "symphony-github", "key" => "token"}
