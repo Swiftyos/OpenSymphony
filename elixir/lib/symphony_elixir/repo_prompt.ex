@@ -100,7 +100,7 @@ defmodule SymphonyElixir.RepoPrompt do
     If the problem, or part of it, has to be fixed in one of the other repos, don't change that repo from here. Instead:
 
     1. Create a Linear issue for it with `linear_graphql`, in this issue's project and team (read their ids from this issue),
-       in the `Todo` state, assigned like this issue, with the labels #{Enum.join(labels, " and ")}. Its description must say what needs to change in that repo
+       in the `#{queue_state(issue)}` state, assigned like this issue, with the labels #{Enum.join(labels, " and ")}. Its description must say what needs to change in that repo
        and why, the evidence (errors, logs, file paths, lines), how to verify the fix, and link back to #{issue.identifier}.
     2. Link it as blocking this issue: `issueRelationCreate(input: {issueId: "<new issue id>", relatedIssueId: "<this issue's id>", type: blocks})`.
     3. Commit and push whatever you have on this issue's branch, then #{blocked_move(issue)}
@@ -110,6 +110,15 @@ defmodule SymphonyElixir.RepoPrompt do
 
     Work that only needs #{home.name} stays here as usual.
     """
+  end
+
+  # The state new issues wait in for an agent: the flow's queue stage (teams
+  # name it differently, e.g. "Ready for pickup"), else Linear's default.
+  defp queue_state(issue) do
+    case Enum.find(IssueStage.definition(issue)["stages"] || [], &(&1["kind"] == "queue")) do
+      %{"linear_state" => state} when is_binary(state) -> state
+      _ -> "Todo"
+    end
   end
 
   defp blocked_move(issue) do

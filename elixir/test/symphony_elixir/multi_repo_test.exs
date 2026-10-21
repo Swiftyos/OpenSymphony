@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.MultiRepoTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.Factory.{Definition, Store}
   alias SymphonyElixir.Linear.Adapter
   alias SymphonyElixir.{RepoPrompt, Unblocker}
 
@@ -107,6 +108,8 @@ defmodule SymphonyElixir.MultiRepoTest do
       assert prompt =~ "**worker** (`acme/jobs-worker`) at `.symphony/repos/worker`: Queue consumers"
       assert prompt =~ "`repo/worker`"
       assert prompt =~ "type: blocks"
+      # New blocker issues go to the flow's queue state.
+      assert prompt =~ "in the `Todo` state"
       assert prompt =~ "with the move `blocked` (Blocked)"
 
       assert %{"name" => "api", "others" => [%{"name" => "worker", "path" => ".symphony/repos/worker"}]} = RepoPrompt.variables(issue)
@@ -120,6 +123,28 @@ defmodule SymphonyElixir.MultiRepoTest do
 
       assert RepoPrompt.render(nil) == ""
       assert RepoPrompt.variables(nil) == %{"name" => nil, "repo" => nil, "others" => []}
+    end
+
+    test "blocker issues are filed in the flow's queue state" do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_project_slug: nil,
+        tracker_projects: [%{slug: "project-a", repo: "acme/api", repos: [%{name: "worker", repo: "acme/jobs-worker"}]}]
+      )
+
+      flow =
+        Definition.default_template()
+        |> Map.update!("stages", fn stages ->
+          Enum.map(stages, fn
+            %{"id" => "todo"} = stage -> %{stage | "linear_state" => "Ready for pickup"}
+            stage -> stage
+          end)
+        end)
+
+      {:ok, _} = Store.put("project:project-a", flow, 0, "test")
+      on_exit(fn -> Store.reset() end)
+
+      issue = %Issue{id: "i-1", identifier: "PI-1", project_slug: "project-a", state: "In Progress", labels: ["factory/implement"]}
+      assert RepoPrompt.render(issue) =~ "in the `Ready for pickup` state"
     end
 
     test "a repo needs a name and a repo" do
