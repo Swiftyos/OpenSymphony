@@ -56,6 +56,10 @@ esac
 [ "$PARTITIONS" -lt 1 ] && PARTITIONS=1
 
 TMP_ROOT="${TMPDIR:-/tmp}/symphony-test-${USER:-$(id -u)}"
+# Use the physical path: on macOS /tmp and /var/folders are symlinks into
+# /private, and the workspace path-safety checks compare canonical paths.
+mkdir -p "$TMP_ROOT"
+TMP_ROOT="$(cd "$TMP_ROOT" && pwd -P)"
 mkdir -p "$TMP_ROOT" || exit 1
 RUN_DIR=$(mktemp -d "$TMP_ROOT/run.XXXXXX") || exit 1
 
