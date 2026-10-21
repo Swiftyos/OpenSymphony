@@ -759,7 +759,7 @@
       var count = counts[key] || 0;
       var selected = self.selected && self.selected.type === "edge" && self.selected.id === key;
       var kind = selected ? "selected" : count > 0 ? t.by : "idle";
-      var width = count > 0 ? 1.5 + 3.5 * Math.sqrt(count / maxCount) : 1.4;
+      var width = count > 0 ? 1.8 + 3.5 * Math.sqrt(count / maxCount) : 1.8;
       var id = "fx-edge-" + index;
 
       edgeLayer.appendChild(

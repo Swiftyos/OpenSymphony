@@ -17,7 +17,7 @@
   --line: rgba(0, 0, 0, 0.07);
   --line-strong: rgba(0, 0, 0, 0.14);
   /* Flow diagram connections not used yet: dark enough to read at a glance. */
-  --edge-idle: rgba(0, 0, 0, 0.4);
+  --edge-idle: rgba(0, 0, 0, 0.62);
   --ink: #1f1f1f;
   --ink-2: #3d3d3d;
   --muted: #6f6f6f;
@@ -589,7 +589,7 @@ pre {
 
 .fx-edge-idle {
   stroke: var(--edge-idle);
-  stroke-dasharray: 2 5;
+  stroke-dasharray: 3 4;
 }
 
 .fx-edge-live {
@@ -2204,18 +2204,18 @@ a.brand:hover {
 
 .fx-edge-by-human.fx-edge-human,
 .fx-edge-by-human.fx-edge-idle {
-  stroke-dasharray: 1 6;
+  stroke-dasharray: 2 4;
   stroke-linecap: round;
 }
 
 .fx-edge-human {
   stroke: var(--ink-2);
-  opacity: 0.9;
+  opacity: 1;
 }
 
 .fx-edge-agent {
   stroke: var(--flow);
-  opacity: 0.85;
+  opacity: 1;
 }
 
 .fx-edge-selected {
@@ -3302,12 +3302,12 @@ a.brand:hover {
 }
 
 .fx-edge-live {
-  stroke: #6b6b6b;
+  stroke: #4a4a4a;
   opacity: 1;
 }
 
 .fx-arrow-live {
-  fill: #6b6b6b;
+  fill: #4a4a4a;
 }
 
 .fx-edge-chip rect {
