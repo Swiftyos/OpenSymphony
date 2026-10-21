@@ -1119,8 +1119,10 @@ defmodule SymphonyElixir.Orchestrator do
     |> MapSet.new()
   end
 
+  # The same states the tracker fetches (IssueStage.active_state_names/1), so an issue fetched in a
+  # flow's own state is dispatched and kept running, not reconciled away as inactive.
   defp active_state_set do
-    Config.settings!().tracker.active_states
+    IssueStage.active_state_names(Config.settings!())
     |> Enum.map(&normalize_issue_state/1)
     |> Enum.filter(&(&1 != ""))
     |> MapSet.new()

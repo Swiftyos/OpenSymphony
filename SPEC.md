@@ -690,7 +690,9 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `tracker.endpoint`: string, default `https://api.linear.app/graphql` when `tracker.kind=linear`
 - `tracker.api_key`: string or `$VAR`, canonical env `LINEAR_API_KEY` when `tracker.kind=linear`
 - `tracker.project_slug`: string, required when `tracker.kind=linear`
-- `tracker.active_states`: list of strings, default `["Todo", "In Progress"]`
+- `tracker.active_states`: list of strings, default `["Todo", "In Progress"]`. With factory flows
+  (extension), the polled and dispatchable states are these plus every state a saved flow's agent or
+  queue stages use, so a flow stage in a new or renamed Linear state works without a config change.
 - `tracker.terminal_states`: list of strings, default `["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]`
 - `tracker.stage_label_prefix` (extension): string, default `factory`; labels named
   `<prefix>/<stage>` (or children of a `<prefix>` label group) set the issue's factory stage
@@ -862,7 +864,8 @@ first.
 An issue is dispatch-eligible only if all are true:
 
 - It has `id`, `identifier`, `title`, and `state`.
-- Its state is in `active_states` and not in `terminal_states`.
+- Its state is in `active_states` (plus the saved flows' dispatch states, see `tracker.active_states`)
+  and not in `terminal_states`.
 - Its stage label (extension) is not in `paused_stages`.
 - It is not already in `running`.
 - It is not already in `claimed`.
