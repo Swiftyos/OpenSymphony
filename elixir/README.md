@@ -634,6 +634,38 @@ Symphony's own Linear writes after an agent stage result are safe to retry.
 - **Completed moves** are recognised on replay: a result whose target stage is already the issue's stage and whose comment exists is accepted instead of rejected.
 - **Final reports** use the same scheme, with an id derived from the move, so the report is posted once.
 
+### Kubernetes runner pods
+
+The Kubernetes launcher runs each issue in its own runner pod instead of as a task (or
+process) on the controller host. It renders the pod itself, because the GKE admission
+policy admits only one shape: gVisor, the `symphony-runner` service account without a
+token, the `agents-sandbox` pool selector and toleration, non-root containers that drop
+`ALL`, and only per-run Secrets named `run-<run-id>` mounted.
+
+```yaml
+agent:
+  kubernetes:
+    namespace: symphony-runs          # default
+    runner_image: europe-north1-docker.pkg.dev/PROJECT/symphony/symphony:REVISION
+    agent_tools_image: europe-north1-docker.pkg.dev/PROJECT/symphony/symphony-agent-tools:REVISION
+    cpu_request: 500m
+    cpu_limit: "2"
+    memory_request: 1Gi
+    memory_limit: 4Gi
+    active_deadline_seconds: 21600    # default 6h
+    # Existing Secrets injected by name; per-run GitHub App tokens are a follow-up.
+    secret_env:
+      - {env: ANTHROPIC_API_KEY, secret: symphony-anthropic, key: api-key}
+      - {env: GITHUB_TOKEN, secret: symphony-github, key: token}
+```
+
+The controller writes the run spec into a Secret, creates the pod, and tracks it by the
+reference `k8s:<namespace>/<pod>`. Images and the rest of the section are only needed when
+this launcher is used. The pod mounts its workspace `emptyDir` at `workspace.root`, so on GKE
+set that to a container path (`/workspace`) rather than a host path. The pod layout, what is
+still missing (watcher integration, git mirror clone URL, per-run GitHub App tokens, a pod
+janitor) and the protocol are in [`docs/durable-runs.md`](docs/durable-runs.md) (Phase 3).
+
 ### State in Postgres
 
 By default Symphony keeps its state in owner-only files under `~/.symphony`: sessions, retries, usage, users, the agent inbox, factory flows and the dashboard session secret. Set `SYMPHONY_DATABASE_URL` (for example `ecto://symphony:secret@db:5432/symphony`) and the same documents are kept in Postgres instead, in a `state_documents` table keyed by their path under `~/.symphony` (`sessions.json`, `factories/PAY.json`).

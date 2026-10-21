@@ -75,6 +75,10 @@ defmodule SymphonyElixir.RunSpec do
   @spec path(String.t()) :: Path.t()
   def path(run_id) when is_binary(run_id), do: Path.join(dir(run_id), "spec.json")
 
+  @doc "The spec as the JSON document written to `spec.json`."
+  @spec to_map(t()) :: map()
+  def to_map(%__MODULE__{} = spec), do: encode(spec)
+
   @doc """
   Writes the spec owner-only; returns its path.
 
@@ -86,7 +90,7 @@ defmodule SymphonyElixir.RunSpec do
   def write(%__MODULE__{run_id: run_id} = spec) when is_binary(run_id) do
     path = path(run_id)
 
-    case PrivateFile.write(path, Jason.encode!(encode(spec), pretty: true)) do
+    case PrivateFile.write(path, Jason.encode!(to_map(spec), pretty: true)) do
       :ok -> {:ok, path}
       {:error, reason} -> {:error, reason}
     end

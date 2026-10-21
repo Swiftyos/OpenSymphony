@@ -49,6 +49,20 @@ agent:
   default_effort: medium
   max_concurrent_agents: 10
   max_turns: 20
+  # Kubernetes runner pods (Phase 3). Only needed when the Kubernetes launcher is
+  # selected; see docs/durable-runs.md.
+  # kubernetes:
+  #   namespace: symphony-runs
+  #   runner_image: europe-north1-docker.pkg.dev/PROJECT/symphony/symphony:REVISION
+  #   agent_tools_image: europe-north1-docker.pkg.dev/PROJECT/symphony/symphony-agent-tools:REVISION
+  #   cpu_request: 500m
+  #   cpu_limit: "2"
+  #   memory_request: 1Gi
+  #   memory_limit: 4Gi
+  #   active_deadline_seconds: 21600
+  #   secret_env:
+  #     - {env: ANTHROPIC_API_KEY, secret: symphony-anthropic, key: api-key}
+  #     - {env: GITHUB_TOKEN, secret: symphony-github, key: token}
 
 codex:
   command: codex --config shell_environment_policy.inherit=all --config model_reasoning_effort=medium --model gpt-5.4 app-server

@@ -138,6 +138,44 @@ Kubernetes they move behind a tool gateway.
      `SymphonyElixir.GitMirror.clone_commands/3` (init, fetch
      `refs/remotes/origin/*` from the mirror, resume or create the issue
      branch).
+   Built:
+   - `SymphonyElixir.Kube` is the API client (create/get/delete a pod, create/delete a
+     Secret) over the in-cluster service account or explicit credentials, with `Req`
+     `plug:` injection for tests.
+   - `SymphonyElixir.RunLauncher.Kubernetes.PodSpec` renders the run's Secret and pod to
+     the shape the GKE admission policy enforces: `gvisor`, the `symphony-runner` service
+     account without a token, the `agents-sandbox` node selector and toleration, non-root
+     containers that drop `ALL`, the `symphony.n8n.io/run-id` label, and only
+     `run-<run-id>` Secrets mounted. The Secret carries `spec.json` at mode `0400`; the
+     agent CLIs come from the `symphony-agent-tools` init container at `/opt/symphony`. The
+     workspace `emptyDir` mounts at `workspace.root`, which must therefore be a container
+     path on GKE.
+   - `SymphonyElixir.RunLauncher.Kubernetes` creates the Secret then the pod, returns
+     `"k8s:<namespace>/<pod>"`, polls the pod every 5s from a lightweight monitor process,
+     and implements `alive?/1` (pod exists and is Pending/Running) and `stop/1` (delete
+     pod and Secret). The monitor is interim: it exits `:normal`, `{:pod_failed, reason}`
+     or `:pod_lost` for the current behaviour's monitor, until the process launcher's
+     watcher lands. On a terminal phase it deletes the run's Secret; the pod stays for
+     its logs.
+   - `agent.kubernetes` config: namespace, images, CPU/memory requests and limits,
+     `active_deadline_seconds` (default 6h), and `secret_env` references to existing
+     Secrets. The images are required only when the launcher renders a pod.
+   Remaining:
+   - **Watcher integration.** The interim poller should become the step 4 `RunWatcher`, so
+     a pod's completion reaches the orchestrator exactly like a process run and a
+     controller restart adopts live pods.
+   - **Runner clone from the git mirror.** The controller endpoint and
+     `RunSpec.attach_git_mirror/2` are built (see "Repo access" above); the pod's runner
+     must still build its workspace with `GitMirror.clone_commands/3` instead of the
+     host checkout.
+   - **GitHub App tokens.** Per-run installation tokens are not in place yet; `secret_env`
+     passes static named credentials. A minter will produce a per-run token and add it to
+     the run Secret. There is a TODO at the rendering hook for this.
+   - **Janitor.** Nothing removes completed/failed pods or orphaned Secrets yet. The
+     controller cleans the Secret on a terminal phase, and `stop/1` removes both, but old
+     pods need a separate sweep.
+   - **Dispatch wiring.** `RunLauncher.Kubernetes` is self-contained against the current
+     behaviour; selecting it for dispatch is left until both branches merge.
 
 ## Controller responsiveness
 

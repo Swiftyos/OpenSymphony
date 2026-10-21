@@ -411,6 +411,81 @@ defmodule SymphonyElixir.Config.Schema do
     defp normalize_boolean_value(value), do: value
   end
 
+  defmodule Kubernetes do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    alias SymphonyElixir.Config.Schema
+
+    @primary_key false
+    embedded_schema do
+      field(:namespace, :string, default: "symphony-runs")
+      # Required by the Kubernetes launcher; omitted here so a non-Kubernetes
+      # install doesn't have to configure an image it never runs.
+      field(:runner_image, :string)
+      field(:agent_tools_image, :string)
+      field(:cpu_request, :string, default: "500m")
+      field(:cpu_limit, :string, default: "2")
+      field(:memory_request, :string, default: "1Gi")
+      field(:memory_limit, :string, default: "4Gi")
+      field(:active_deadline_seconds, :integer, default: 21_600)
+      # [{env, secret, key}] references to existing secrets, injected by name.
+      field(:secret_env, {:array, :map}, default: [])
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(
+        attrs,
+        [
+          :namespace,
+          :runner_image,
+          :agent_tools_image,
+          :cpu_request,
+          :cpu_limit,
+          :memory_request,
+          :memory_limit,
+          :active_deadline_seconds,
+          :secret_env
+        ],
+        empty_values: []
+      )
+      |> update_change(:namespace, &normalize_namespace/1)
+      |> update_change(:runner_image, &Schema.normalize_optional_string/1)
+      |> update_change(:agent_tools_image, &Schema.normalize_optional_string/1)
+      |> validate_required([:namespace, :cpu_request, :cpu_limit, :memory_request, :memory_limit])
+      |> validate_format(:namespace, ~r/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/, message: "must be a DNS label such as symphony-runs")
+      |> validate_number(:active_deadline_seconds, greater_than: 0)
+      |> validate_change(:secret_env, &validate_secret_env/2)
+    end
+
+    defp normalize_namespace(namespace) when is_binary(namespace) do
+      case Schema.normalize_optional_string(namespace) do
+        nil -> nil
+        trimmed -> String.downcase(trimmed)
+      end
+    end
+
+    defp validate_secret_env(:secret_env, entries) do
+      Enum.flat_map(entries, fn entry ->
+        if valid_secret_env?(entry) do
+          []
+        else
+          [secret_env: "entries must set non-empty env, secret and key"]
+        end
+      end)
+    end
+
+    defp valid_secret_env?(entry) when is_map(entry) do
+      Enum.all?(["env", "secret", "key"], fn field ->
+        value = Map.get(entry, field) || Map.get(entry, String.to_atom(field))
+        is_binary(value) and String.trim(value) != ""
+      end)
+    end
+  end
+
   defmodule Agent do
     @moduledoc false
     use Ecto.Schema
@@ -430,6 +505,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:max_retry_backoff_ms, :integer, default: 300_000)
       field(:tracker_task_timeout_ms, :integer, default: 60_000)
       field(:max_concurrent_agents_by_state, :map, default: %{})
+      embeds_one(:kubernetes, Kubernetes, on_replace: :update, defaults_to_struct: true)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -470,6 +546,7 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:tracker_task_timeout_ms, greater_than: 0)
       |> update_change(:max_concurrent_agents_by_state, &Schema.normalize_state_limits/1)
       |> Schema.validate_state_limits(:max_concurrent_agents_by_state)
+      |> cast_embed(:kubernetes, with: &Kubernetes.changeset/2)
     end
   end
 

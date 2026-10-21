@@ -92,6 +92,83 @@ defmodule SymphonyElixir.ConfigCoverageSchemaTest do
     end
   end
 
+  describe "kubernetes launcher config" do
+    test "defaults, normalization and secret_env entries are carried through" do
+      settings =
+        parse!(%{
+          "agent" => %{
+            "kubernetes" => %{
+              "namespace" => " Sandbox-Runs ",
+              "runner_image" => " registry.test/symphony:test ",
+              "agent_tools_image" => "registry.test/tools:test",
+              "cpu_request" => "1",
+              "cpu_limit" => "4",
+              "memory_request" => "2Gi",
+              "memory_limit" => "8Gi",
+              "active_deadline_seconds" => 60,
+              "secret_env" => [%{"env" => "ANTHROPIC_API_KEY", "secret" => "symphony-anthropic", "key" => "api-key"}]
+            }
+          }
+        })
+
+      kube = settings.agent.kubernetes
+      assert kube.namespace == "sandbox-runs"
+      assert kube.runner_image == "registry.test/symphony:test"
+      assert kube.agent_tools_image == "registry.test/tools:test"
+      assert kube.cpu_request == "1"
+      assert kube.cpu_limit == "4"
+      assert kube.memory_request == "2Gi"
+      assert kube.memory_limit == "8Gi"
+      assert kube.active_deadline_seconds == 60
+
+      assert kube.secret_env == [
+               %{"env" => "ANTHROPIC_API_KEY", "secret" => "symphony-anthropic", "key" => "api-key"}
+             ]
+
+      defaults = parse!(%{}).agent.kubernetes
+      assert defaults.namespace == "symphony-runs"
+      assert defaults.runner_image == nil
+      assert defaults.agent_tools_image == nil
+      assert defaults.cpu_request == "500m"
+      assert defaults.cpu_limit == "2"
+      assert defaults.memory_request == "1Gi"
+      assert defaults.memory_limit == "4Gi"
+      assert defaults.active_deadline_seconds == 21_600
+      assert defaults.secret_env == []
+    end
+
+    test "secret_env entries also accept atom keys" do
+      changeset =
+        Schema.Kubernetes.changeset(%Schema.Kubernetes{}, %{
+          "secret_env" => [%{env: "TOKEN", secret: "a-secret", key: "token"}]
+        })
+
+      assert changeset.valid?
+      assert changeset.changes.secret_env == [%{env: "TOKEN", secret: "a-secret", key: "token"}]
+    end
+
+    test "rejects an invalid namespace, deadline and secret_env entry" do
+      assert parse_error(%{"agent" => %{"kubernetes" => %{"namespace" => "Bad_Name"}}}) =~
+               "agent.kubernetes.namespace must be a DNS label"
+
+      assert parse_error(%{"agent" => %{"kubernetes" => %{"namespace" => "  "}}}) =~
+               "agent.kubernetes.namespace can't be blank"
+
+      assert parse_error(%{"agent" => %{"kubernetes" => %{"active_deadline_seconds" => 0}}}) =~
+               "agent.kubernetes.active_deadline_seconds must be greater than 0"
+
+      assert parse_error(%{
+               "agent" => %{"kubernetes" => %{"secret_env" => [%{"env" => "TOKEN", "secret" => "a-secret"}]}}
+             }) =~ "agent.kubernetes.secret_env entries must set non-empty env, secret and key"
+
+      assert parse_error(%{"agent" => %{"kubernetes" => %{"secret_env" => ["not-a-map"]}}}) =~
+               "agent.kubernetes.secret_env"
+
+      assert parse_error(%{"agent" => %{"kubernetes" => %{"memory_limit" => ""}}}) =~
+               "agent.kubernetes.memory_limit can't be blank"
+    end
+  end
+
   describe "string normalizers" do
     test "normalize_optional_string trims, blanks to nil, and passes through non-strings" do
       assert Schema.normalize_optional_string(nil) == nil
