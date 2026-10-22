@@ -540,6 +540,23 @@ defmodule SymphonyElixir.ObservabilityTest do
       assert {:ok, [%{langfuse_url: "https://langfuse.example.com/trace/" <> @trace_id}]} = Observability.issue_traces("TRUST-758")
     end
 
+    test "a Langfuse only Symphony can reach (no public_url) gets no links, never its internal url" do
+      internal = String.replace(@langfuse, "  public_url: https://langfuse.example.com/\n", "")
+      refute internal =~ "public_url"
+      configure!(@clickhouse <> internal)
+
+      stub!(fn
+        "lf.test", "/api/public/projects", _body, _params -> {:json, %{"data" => [%{"id" => "p1"}]}}
+        host, path, body, params -> clickhouse_responder().(host, path, body, params)
+      end)
+
+      assert {:ok, [%{langfuse_url: nil}]} = Observability.issue_traces("TRUST-758")
+
+      config = %{url: "http://lf.test:3000", public_key: "pk", secret_key: "sk"}
+      assert Langfuse.trace_url(config, @trace_id, "p1") == nil
+      assert Langfuse.html_url(config, "/project/p1/traces/" <> @trace_id) == nil
+    end
+
     test "issue_traces fall back to Langfuse metadata when ClickHouse is not configured" do
       configure!(@langfuse)
 
