@@ -17,9 +17,10 @@ defmodule SymphonyElixirWeb.DashboardLive do
   import SymphonyElixirWeb.Topbar
   require Logger
 
-  alias SymphonyElixir.{AgentInbox, Auth, Config, FactoryControls, IssueMoves, IssueStage, SessionHistory, Transcript}
+  alias SymphonyElixir.{AgentInbox, Auth, Config, FactoryControls, IssueMoves, IssueStage, McpTokens}
   alias SymphonyElixir.Factory.{Assistant, Definition, Store}
   alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.{SessionHistory, Transcript}
   alias SymphonyElixir.UsageLedger
   alias SymphonyElixir.Users
   alias SymphonyElixirWeb.{Endpoint, FactoryPresenter, ObservabilityPubSub, Presenter, UserAuth, Visibility}
@@ -58,6 +59,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
       |> assign(:chat_error, nil)
       |> assign(:chat_expanded, false)
       |> assign(:ended, [])
+      |> assign(:mcp_setup, first_visit_mcp_setup(socket.assigns[:current_user]))
       # handle_params/3 loads the payload, once the URL's team and project are known.
       |> assign(:now, DateTime.utc_now())
 
@@ -256,6 +258,15 @@ defmodule SymphonyElixirWeb.DashboardLive do
     end
   end
 
+  def handle_event("dismiss_mcp_setup", _params, socket) do
+    case socket.assigns.current_user do
+      %Auth.User{local: false, id: id} -> Users.mark_mcp_welcomed(id)
+      _local -> :ok
+    end
+
+    {:noreply, assign(socket, :mcp_setup, nil)}
+  end
+
   def handle_event("toggle_bell", _params, socket), do: {:noreply, assign(socket, :bell_open, !socket.assigns.bell_open)}
   def handle_event("close_bell", _params, socket), do: {:noreply, assign(socket, :bell_open, false)}
 
@@ -277,24 +288,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
     {:noreply, socket |> assign(sessions_window: window, sessions_query: query) |> assign_ended()}
   end
 
-  def handle_event("approve_account", %{"id" => id}, socket) do
-    with :ok <- authorize(socket, &Auth.can_control?/1, :not_admin),
-         {:ok, _account} <- Users.approve(id, socket.assigns.current_user.username || "local") do
-      ObservabilityPubSub.broadcast_update()
-    end
-
-    {:noreply, assign_payload(socket)}
-  end
-
-  def handle_event("reject_account", %{"id" => id}, socket) do
-    with :ok <- authorize(socket, &Auth.can_control?/1, :not_admin),
-         :ok <- Users.reject(id) do
-      ObservabilityPubSub.broadcast_update()
-    end
-
-    {:noreply, assign_payload(socket)}
-  end
-
   @impl true
   def handle_async(:refresh, {:ok, fetched}, socket) do
     socket = assign(socket, :refreshing, false)
@@ -303,7 +296,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
     socket =
       if fetched.gen == socket.assigns.payload_gen do
         socket
-        |> assign(pending_accounts: fetched.pending_accounts, now: DateTime.utc_now())
+        |> assign(now: DateTime.utc_now())
         |> assign_fetched_chat(fetched.chat)
         |> assign_snapshot(fetched.snapshot)
         |> assign_scope()
@@ -487,7 +480,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
         <section id="factory" class="factory" aria-label="Agent factory">
           <div id="health" class="fx-stats health-strip" aria-label="Is the factory working">
-            <%= for tile <- health_tiles(@payload, @symphony_counts, @pending_accounts, @now) do %>
+            <%= for tile <- health_tiles(@payload, @symphony_counts, @now) do %>
               <a :if={tile[:href]} class={["fx-stat", "health-#{tile.tone}"]} href={tile.href}>
                 <.health_tile tile={tile} />
               </a>
@@ -510,43 +503,14 @@ defmodule SymphonyElixirWeb.DashboardLive do
               <div id="fx-drawer" class="fx-drawer-slot" data-fx="drawer" phx-update="ignore"></div>
               <div class="panel-head">
                 <h2 class="panel-title">Needs you</h2>
-                <span class={["count-pill", attention_count(@payload, @pending_accounts) > 0 && "count-pill-hot"]}>
-                  <%= attention_count(@payload, @pending_accounts) %>
+                <span class={["count-pill", attention_count(@payload) > 0 && "count-pill-hot"]}>
+                  <%= attention_count(@payload) %>
                 </span>
-              </div>
-
-              <div :if={@pending_accounts != []} class="attention-group">
-                <h3 class="attention-title">
-                  <span class="attention-icon attention-icon-review" aria-hidden="true">+</span>
-                  Pending accounts
-                  <span class="attention-count numeric"><%= length(@pending_accounts) %></span>
-                </h3>
-                <p class="attention-more">Only approve people you expect. <a href="/admin/users">Review in Users</a></p>
-                <div :for={account <- @pending_accounts} class="attention-item account-request">
-                  <span class="attention-id"><%= account.username %></span>
-                  <span class="attention-text" title={"#{account.email} · requested from #{account[:requested_from] || "unknown"}"}>
-                    <%= account.email %>
-                  </span>
-                  <span class="account-request-actions">
-                    <button type="button" class="fx-action is-primary" phx-click="approve_account" phx-value-id={account.id}>
-                      Approve
-                    </button>
-                    <button
-                      type="button"
-                      class="fx-action"
-                      phx-click="reject_account"
-                      phx-value-id={account.id}
-                      data-confirm={"Reject #{account.username}'s request?"}
-                    >
-                      Reject
-                    </button>
-                  </span>
-                </div>
               </div>
 
               <p :if={@approval_error} class="attention-more" role="alert"><%= @approval_error %></p>
 
-              <%= if attention_count(@payload, @pending_accounts) == 0 do %>
+              <%= if attention_count(@payload) == 0 do %>
                 <p class="all-clear">All clear. Nothing is waiting on a human.</p>
               <% else %>
                 <div :if={approvals(@payload, @now) != []} class="attention-group">
@@ -798,9 +762,34 @@ defmodule SymphonyElixirWeb.DashboardLive do
         error={@chat_error}
         expanded={@chat_expanded}
       />
+
+      <div :if={@mcp_setup} class="mcp-welcome" role="dialog" aria-modal="true" aria-labelledby="mcp-welcome-title">
+        <div class="mcp-welcome-card">
+          <h2 id="mcp-welcome-title" class="login-title">Connect your agents to {@instance_name || "Symphony"}</h2>
+          <p class="login-help">
+            Your coding agent can watch and steer Symphony over MCP with your personal token. It can do what you can do here.
+            Pick your harness and run its step. You can find this again, or rotate the token, under <a href="/account/mcp">MCP setup</a>.
+          </p>
+          <SymphonyElixirWeb.McpSetup.instructions url={@mcp_setup.url} token={@mcp_setup.token} />
+          <button type="button" class="login-button" phx-click="dismiss_mcp_setup">Done</button>
+        </div>
+      </div>
     </section>
     """
   end
+
+  # The MCP setup opens once, on someone's first visit, and never in local mode.
+  defp first_visit_mcp_setup(%Auth.User{local: false, id: id}) do
+    with true <- Config.settings!().server.mcp.enabled == true,
+         %{mcp_welcomed_at: nil} <- Users.get(id),
+         {:ok, secret, _token} <- McpTokens.current(id) do
+      %{url: SymphonyElixirWeb.McpSetup.url(Endpoint.url()), token: secret}
+    else
+      _ -> nil
+    end
+  end
+
+  defp first_visit_mcp_setup(_user), do: nil
 
   # The pickers offer the teams and projects this person can see (a chosen
   # team's projects only); an unknown or hidden one in the URL falls back to
@@ -811,9 +800,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
     socket
     |> update(:payload_gen, &(&1 + 1))
     |> assign_chat()
-    # An assign, not a template call: LiveView only re-renders template calls
-    # when their arguments change, so an approved account would never clear.
-    |> assign(:pending_accounts, pending_accounts(user))
     |> assign_snapshot(snapshot(user))
     |> assign_scope()
   end
@@ -848,7 +834,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
     socket
     |> assign(refreshing: true, refresh_again: false, last_refresh_ms: System.monotonic_time(:millisecond))
     |> start_async(:refresh, fn ->
-      %{gen: gen, snapshot: snapshot(user), pending_accounts: pending_accounts(user), chat: {issue, chat_data(issue)}}
+      %{gen: gen, snapshot: snapshot(user), chat: {issue, chat_data(issue)}}
     end)
   end
 
@@ -977,7 +963,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   # Is the factory working, and is any agent stuck or blocked. Agents counts
   # every running agent; the rest follows the team and project pickers.
-  defp health_tiles(payload, symphony_counts, pending_accounts, now) do
+  defp health_tiles(payload, symphony_counts, now) do
     stuck = stuck_entries(payload, now)
     parked = issues_in_kind(payload, "parked")
     retrying = Enum.reject(payload.retrying, &stalled_retry?/1)
@@ -985,7 +971,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
     approvals = approvals(payload, now)
     waiting = issues_in_kind(payload, "human")
     blocked = length(parked) + length(retrying) + length(troubled)
-    needs_you = length(approvals) + length(waiting) + length(pending_accounts)
+    needs_you = length(approvals) + length(waiting)
 
     [
       system_tile(payload, troubled),
@@ -1137,14 +1123,10 @@ defmodule SymphonyElixirWeb.DashboardLive do
     |> Enum.reject(&(&1.items == []))
   end
 
-  defp attention_count(payload, pending_accounts) do
+  defp attention_count(payload) do
     payload
     |> attention_groups(DateTime.utc_now())
-    |> Enum.reduce(length(pending_accounts) + length(approvals(payload, DateTime.utc_now())), &(length(&1.items) + &2))
-  end
-
-  defp pending_accounts(user) do
-    if Auth.mode() == :accounts and Auth.can_control?(user), do: Users.list("pending"), else: []
+    |> Enum.reduce(length(approvals(payload, DateTime.utc_now())), &(length(&1.items) + &2))
   end
 
   # Issues sitting in stages of a kind (human, parked) across every visible team.

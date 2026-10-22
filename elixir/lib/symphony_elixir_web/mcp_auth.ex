@@ -9,12 +9,13 @@ defmodule SymphonyElixirWeb.McpAuth do
       web pages, including DNS-rebinding ones, from driving it
     * `Authorization: Bearer <MCP token>` is required in every auth mode; the
       token's account is re-resolved on every request (`SymphonyElixir.Auth`),
-      so disabled accounts and lost Linear roles take effect at once, and is
-      then narrowed to the token's teams and projects
-      (`SymphonyElixir.Auth.restrict_to/2`)
+      so disabled accounts and lost Linear roles take effect at once. The token
+      can do what its account can.
 
-  No cookies are read, so the dashboard's session can't be used here and CSRF
-  doesn't apply. Assigns `:current_user` and `:mcp_token`.
+  The MCP route sits outside IAP (agents can't do Google sign-in), so no IAP
+  header is read here. No cookies are read either, so the dashboard's session
+  can't be used here and CSRF doesn't apply. Assigns `:current_user` and
+  `:mcp_token`.
   """
 
   import Plug.Conn
@@ -35,8 +36,7 @@ defmodule SymphonyElixirWeb.McpAuth do
          :ok <- origin_allowed(conn, settings),
          {:ok, secret} <- bearer(conn),
          {:ok, token} <- McpTokens.verify(secret),
-         {:ok, owner} <- resolve_user(token),
-         {:ok, user} <- Auth.restrict_to(owner, token.resources) do
+         {:ok, user} <- resolve_user(token) do
       McpTokens.touch(token.id, client_ip(conn))
 
       conn
@@ -91,11 +91,10 @@ defmodule SymphonyElixirWeb.McpAuth do
 
     {error, message} =
       case reason do
-        :missing_token -> {"invalid_request", "Send Authorization: Bearer <token>. Create a token on your Symphony account page."}
-        :expired_token -> {"invalid_token", "This token has expired. Create a new one on your Symphony account page."}
+        :missing_token -> {"invalid_request", "Send Authorization: Bearer <token>. Your token is on Symphony's MCP setup page (/account/mcp)."}
+        :expired_token -> {"invalid_token", "This token has expired. Your current token is on Symphony's MCP setup page (/account/mcp)."}
         :account_unavailable -> {"invalid_token", "This token's account can't use Symphony any more."}
-        :scope_unavailable -> {"invalid_token", "This token's account no longer has access to the teams or projects it was limited to."}
-        _ -> {"invalid_token", "That token isn't valid."}
+        _ -> {"invalid_token", "That token isn't valid. It may have been rotated; your current token is on Symphony's MCP setup page (/account/mcp)."}
       end
 
     conn

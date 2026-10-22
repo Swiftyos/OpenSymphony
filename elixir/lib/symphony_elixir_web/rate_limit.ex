@@ -1,7 +1,7 @@
 defmodule SymphonyElixirWeb.RateLimit do
   @moduledoc """
-  Fixed-window, per-client-IP limits for unauthenticated, expensive endpoints
-  (password checks run PBKDF2). In-memory only; resets on restart.
+  Fixed-window, per-client-IP limits for endpoints outside the dashboard's
+  sign-in. In-memory only; resets on restart.
 
   Behind a reverse proxy every request shares the proxy's IP, so these limits
   then apply to all clients together; see the README.
@@ -12,9 +12,6 @@ defmodule SymphonyElixirWeb.RateLimit do
   @table :symphony_rate_limit
 
   @limits %{
-    login: {20, 15 * 60_000},
-    signup: {5, 60 * 60_000},
-    reset: {10, 60 * 60_000},
     # The MCP endpoint, per client IP; generous for busy agents.
     mcp: {600, 60_000},
     # GitHub App token refreshes, per run (`check/2`): a runner needs about one

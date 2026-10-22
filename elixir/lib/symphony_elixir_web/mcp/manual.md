@@ -251,10 +251,11 @@ point the agent stage's transition at it, and add `human` transitions out of it.
 
 ## Using this MCP
 
-**Tokens.** Create and revoke them on the dashboard's **MCP tokens** page (top-right menu,
-`/account/mcp`). A token has scopes `read` (look) and optionally `write` (change), and can be
-limited to chosen teams or `project:<slug>` scopes. It never does more than your account may,
-and stops working when your account is disabled or loses that access.
+**Tokens.** Each person has one token, shown with install steps for each agent harness on the
+dashboard's **MCP setup** page (top-right menu, `/account/mcp`). It can do exactly what your
+account can do in the dashboard, and changes with it: it stops working when your account is
+disabled, and loses what your account loses. **Rotate token** on that page issues a new one and
+stops the old one at once.
 
 **Who can do what.**
 
@@ -271,7 +272,7 @@ next stage an agent starts; running agents finish their turn. Flow saves are ver
 
 ## MCP tool reference
 
-Read (scope `read`):
+Read:
 
 | Tool | Arguments | What it does |
 | --- | --- | --- |
@@ -284,7 +285,7 @@ Read (scope `read`):
 | `get_transcript` | `identifier`, `limit` (default 50, max 200) | The newest transcript entries: messages, thinking, commands with output, edits, tool calls, turns. |
 | `list_projects` | none | The projects Symphony listens to: primary `repo`, `repos`, branch, harness, environment, `source` (`config` or `mcp`) and whether it's active. |
 
-Write (scope `write`):
+Change (what your account may change):
 
 | Tool | Arguments | What it does |
 | --- | --- | --- |

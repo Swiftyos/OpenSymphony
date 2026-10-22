@@ -52,11 +52,7 @@ defmodule SymphonyElixir.HttpServer do
   end
 
   defp start_endpoint do
-    with {:ok, _pid} = started <- Endpoint.start_link() do
-      # On a fresh install the first-account setup code goes to the log at boot.
-      if SymphonyElixir.Auth.mode() == :accounts, do: SymphonyElixir.Users.setup_code()
-      started
-    end
+    Endpoint.start_link()
   end
 
   @spec bound_port(term()) :: non_neg_integer() | nil
@@ -104,7 +100,7 @@ defmodule SymphonyElixir.HttpServer do
     {[scheme: scheme, host: public_host, port: public_port], [origin]}
   end
 
-  def endpoint_origin(_server, host, :accounts), do: {[host: normalize_host(host)], :conn}
+  def endpoint_origin(_server, host, :iap), do: {[host: normalize_host(host)], :conn}
   def endpoint_origin(_server, host, _auth_mode), do: {[host: normalize_host(host)], SymphonyElixirWeb.RequestGuards.local_origins()}
 
   defp normalize_host(host) when host in ["", nil], do: "127.0.0.1"

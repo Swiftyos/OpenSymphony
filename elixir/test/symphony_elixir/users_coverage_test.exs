@@ -3,8 +3,6 @@ defmodule SymphonyElixir.UsersCoverageTest do
 
   alias SymphonyElixir.{Auth, PrivateFile, Users}
 
-  @password "correct horse battery"
-
   defmodule FakeLinear do
     def graphql(query, variables, _opts \\ []) do
       if query =~ "SymphonyMemberByEmail", do: member(String.downcase(variables[:email])), else: {:ok, %{"data" => %{}}}
@@ -46,18 +44,14 @@ defmodule SymphonyElixir.UsersCoverageTest do
     dir
   end
 
-  defp ok_check(_email), do: :ok
-
   defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
   defp restore_app_env(key, value), do: Application.put_env(:symphony_elixir, key, value)
 
   defp restore_fetched_env(key, {:ok, value}), do: Application.put_env(:symphony_elixir, key, value)
   defp restore_fetched_env(key, :error), do: Application.delete_env(:symphony_elixir, key)
 
-  defp register!(username, email, extra \\ %{}) do
-    base = %{"username" => username, "email" => email, "password" => @password, "setup_code" => Users.setup_code()}
-    params = Map.merge(base, extra)
-    {:ok, account} = Users.register(params, &ok_check/1)
+  defp account!(email) do
+    {:ok, account} = Users.ensure(email)
     account
   end
 
@@ -82,41 +76,38 @@ defmodule SymphonyElixir.UsersCoverageTest do
     end
 
     test "lookups with missing or invalid input return nothing" do
-      assert Users.authenticate(nil, nil) == {:error, :invalid_credentials}
       assert Users.get("usr_missing") == nil
-      assert Users.reset_account_for_token(nil) == nil
-      assert Users.create_reset_token("usr_missing") == {:error, :not_found}
-      assert Users.approve("usr_missing", "ada") == {:error, :not_found}
-      assert GenServer.call(Users, {:set_password, "usr_missing", "hash"}) == {:error, :not_found}
+      assert Users.get(nil) == nil
+      assert Users.mark_mcp_welcomed("usr_missing") == {:error, :not_found}
+      assert Users.disable("usr_missing", "ada") == {:error, :not_found}
     end
 
-    test "a :skip Linear check counts as allowed" do
-      params = %{"username" => "solo", "email" => "solo@acme.test", "password" => @password}
-      params = Map.put(params, "setup_code", Users.setup_code())
-      assert {:ok, %{username: "solo", status: "active"}} = Users.register(params, fn _ -> :skip end)
-    end
+    test "ensure finds an email case-insensitively and leaves disabled accounts disabled" do
+      admin = account!("ada@acme.test")
+      assert {:ok, %{id: id}} = Users.ensure("  ADA@acme.test ")
+      assert id == admin.id
 
-    test "reject only deletes pending requests; enable reactivates disabled accounts" do
-      admin = register!("ada", "ada@acme.test")
-      pending = register!("pat", "pat@acme.test")
-      active = register!("mia", "mia@acme.test")
-      {:ok, _} = Users.approve(active.id, "ada")
-
-      assert Users.reject("usr_missing") == {:error, :not_found}
-      assert Users.reject(admin.id) == {:error, :not_pending}
-      assert Users.reject(pending.id) == :ok
-      assert Users.get(pending.id) == nil
-
+      active = account!("mia@acme.test")
       {:ok, disabled} = Users.disable(active.id, "ada")
       assert disabled.status == "disabled"
-      assert {:ok, %{status: "active", approved_by: "ada"}} = Users.enable(active.id, "ada")
+      assert {:ok, %{status: "disabled"}} = Users.ensure("mia@acme.test")
+      assert {:ok, %{status: "active", approved_by: "iap"}} = Users.enable(active.id, "ada")
+    end
+
+    test "the MCP welcome is recorded once" do
+      account = account!("ada@acme.test")
+      assert account.mcp_welcomed_at == nil
+      assert {:ok, %{mcp_welcomed_at: at}} = Users.mark_mcp_welcomed(account.id)
+      assert is_binary(at)
+      assert {:ok, %{mcp_welcomed_at: ^at}} = Users.mark_mcp_welcomed(account.id)
     end
   end
 
   describe "team admins and access" do
     test "admin and access lists are validated, deduplicated, and only for active accounts" do
-      admin = register!("ada", "ada@acme.test")
-      pending = register!("pat", "pat@acme.test")
+      admin = account!("ada@acme.test")
+      disabled = account!("pat@acme.test")
+      {:ok, _} = Users.disable(disabled.id, "ada")
 
       assert {:ok, %{team_admin: ["PAY"]}} = Users.set_team_admin(admin.id, " pay ", true, "ada")
       assert {:ok, %{team_admin: ["PAY"]}} = Users.set_team_admin(admin.id, "PAY", true, "ada")
@@ -129,7 +120,7 @@ defmodule SymphonyElixir.UsersCoverageTest do
       assert Users.set_access(admin.id, "project:bad slug", true, "ada") == {:error, :invalid_scope}
       assert Users.set_access(admin.id, nil, true, "ada") == {:error, :invalid_scope}
       assert Users.set_access("usr_missing", "PAY", true, "ada") == {:error, :not_found}
-      assert Users.set_access(pending.id, "PAY", true, "ada") == {:error, :not_active}
+      assert Users.set_access(disabled.id, "PAY", true, "ada") == {:error, :not_active}
     end
   end
 
@@ -139,23 +130,22 @@ defmodule SymphonyElixir.UsersCoverageTest do
       path = Path.join([dir, "state", "users.json"])
       pid = isolated_users!(path: path)
 
-      account = register!("ada", "ada@acme.test", %{"requested_from" => "10.0.0.1"})
-      {:ok, token} = Users.create_reset_token(account.id)
+      account = account!("ada@acme.test")
+      {:ok, _} = Users.mark_mcp_welcomed(account.id)
       {:ok, _} = Users.set_team_admin(account.id, "PAY", true, "ada")
       {:ok, _} = Users.set_access(account.id, "project:web", true, "ada")
 
       assert {:ok, %{mode: mode}} = File.stat(path)
       assert Bitwise.band(mode, 0o777) == 0o600
       saved = path |> File.read!() |> Jason.decode!()
-      assert %{"users" => [%{"username" => "ada", "requested_from" => "10.0.0.1"}]} = saved
+      assert %{"users" => [%{"username" => "ada", "email" => "ada@acme.test"}]} = saved
 
       GenServer.stop(pid)
       {:ok, pid} = Users.start_link(path: path)
       Process.unlink(pid)
 
-      assert %{username: "ada", status: "active", bootstrap_admin: true, team_admin: ["PAY"], access: ["project:web"]} = Users.get(account.id)
-      assert Users.reset_account_for_token(token).id == account.id
-      assert {:ok, _} = Users.authenticate("ada", @password)
+      assert %{username: "ada", status: "active", bootstrap_admin: true, team_admin: ["PAY"], access: ["project:web"], mcp_welcomed_at: at} = Users.get(account.id)
+      assert is_binary(at)
     end
 
     test "loading fills defaults and skips malformed records" do
@@ -173,9 +163,11 @@ defmodule SymphonyElixir.UsersCoverageTest do
           "session_version" => 3,
           "team_admin" => ["pay", "bad team!", "PAY"],
           "access" => ["project:ok", "nope nope", "web"],
+          # Password-era fields are ignored and dropped on the next save.
+          "password_hash" => "pbkdf2-sha256$1$c2FsdA==$aGFzaA==",
           "reset" => %{"hash" => Base.encode64(:crypto.hash(:sha256, "tok")), "expires_ms" => expires}
         },
-        %{"id" => "usr_min", "username" => "min", "reset" => "garbage"},
+        %{"id" => "usr_min", "username" => "min", "email" => "Min@Acme.test", "reset" => "garbage"},
         %{"username" => "no-id"},
         "junk"
       ]
@@ -186,7 +178,12 @@ defmodule SymphonyElixir.UsersCoverageTest do
       assert %{status: "disabled", session_version: 3, bootstrap_admin: true, team_admin: ["PAY"], access: ["project:ok", "WEB"]} = Users.get("usr_full")
       assert %{status: "pending", session_version: 1, bootstrap_admin: false, team_admin: [], access: []} = Users.get("usr_min")
       assert Enum.map(Users.list(), & &1.id) |> Enum.sort() == ["usr_full", "usr_min"]
-      assert Users.reset_account_for_token("tok").id == "usr_full"
+      refute Map.has_key?(Users.get("usr_full"), :password_hash)
+
+      # A pending password-era request becomes active on its first IAP visit, keeping its id.
+      assert {:ok, %{id: "usr_min", status: "active", approved_by: "iap"}} = Users.ensure("min@acme.test")
+      refute File.read!(path) =~ "password_hash"
+      refute File.read!(path) =~ "reset"
     end
 
     test "a missing file starts empty and an unreadable one is logged" do
@@ -217,7 +214,7 @@ defmodule SymphonyElixir.UsersCoverageTest do
       log = capture_log(fn -> isolated_users!(path: path) end)
       assert log =~ "User accounts load failed"
 
-      log = capture_log(fn -> register!("ada", "ada@acme.test") end)
+      log = capture_log(fn -> account!("ada@acme.test") end)
       assert log =~ "User accounts save failed"
       assert [%{username: "ada"}] = Users.list()
     end
@@ -264,20 +261,22 @@ defmodule SymphonyElixir.UsersCoverageTest do
     end
 
     test "mode honours server.auth and treats any 127.x address as loopback" do
-      assert Auth.mode(%{server: %{auth: "accounts", host: "127.0.0.1"}}) == :accounts
+      assert Auth.mode(%{server: %{auth: "accounts", host: "127.0.0.1"}}) == :iap
       assert Auth.mode(%{server: %{auth: "local", host: "0.0.0.0"}}) == :local
       assert Auth.mode(%{server: %{auth: nil, host: "127.0.0.42"}}) == :local
-      assert Auth.mode(%{server: %{auth: nil, host: "10.0.0.1"}}) == :accounts
+      assert Auth.mode(%{server: %{auth: nil, host: "10.0.0.1"}}) == :iap
     end
 
-    test "user_for_id reports pending and defaults the session version" do
-      admin = register!("ada", "ada@acme.test")
-      pending = register!("mia", "mia@acme.test")
+    test "user_for_id reports disabled accounts and defaults the session version" do
+      admin = account!("ada@acme.test")
+      mia = account!("mia@acme.test")
+      {:ok, _} = Users.disable(mia.id, "ada")
 
       write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
       assert {:ok, %Auth.User{id: id, teams: []}} = Auth.user_for_id(admin.id)
       assert id == admin.id
-      assert Auth.user_for_id(pending.id) == {:error, :pending}
+      assert Auth.user_for_id(mia.id) == {:error, :disabled}
+      assert Auth.user_for_id(nil) == {:error, :signed_out}
     end
 
     test "user_for_account maps every Linear lookup result" do
@@ -304,8 +303,24 @@ defmodule SymphonyElixir.UsersCoverageTest do
       assert {:ok, %Auth.User{email: "mia@acme.test", teams: []}} = Auth.user_for_account(account.("mia@acme.test"))
     end
 
-    test "check_linear_member rejects non-string emails" do
-      assert Auth.check_linear_member(nil) == {:error, :not_in_workspace}
+    test "user_for_email lets people in with Symphony's grants while Linear is unreachable" do
+      write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear", tracker_api_token: "server-key")
+
+      capture_log(fn ->
+        assert {:ok, %Auth.User{email: "down@acme.test", teams: []}} = Auth.user_for_email("down@acme.test")
+      end)
+    end
+
+    test "dev_user only applies while no IAP audience is configured" do
+      saved = System.get_env("SYMPHONY_DEV_USER")
+      on_exit(fn -> restore_env("SYMPHONY_DEV_USER", saved) end)
+      System.put_env("SYMPHONY_DEV_USER", " Dev@Acme.test ")
+
+      write_workflow_file!(Workflow.workflow_file_path(), server_host: "0.0.0.0", server_iap_audiences: [])
+      assert Auth.dev_user() == "dev@acme.test"
+
+      write_workflow_file!(Workflow.workflow_file_path(), server_host: "0.0.0.0")
+      assert Auth.dev_user() == nil
     end
 
     test "permission helpers cover admins, malformed identifiers and anonymous users" do

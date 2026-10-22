@@ -704,9 +704,13 @@ This section is intentionally redundant so a coding agent can implement the conf
   instructions, optional skill, harness/effort/agent-cap defaults) and connections (moved by
   `agent|human`, criteria). Only `queue` and `agent` stages are dispatched; the agent prompt gets
   the current stage's instructions and allowed moves.
-- `server.auth` (extension): dashboard sign-in, `local` or `accounts` (username/password
-  accounts tied to Linear users by email; teams and admin rights come from Linear); defaults
-  to `local` on loopback hosts
+- `server.auth` (extension): dashboard sign-in, `local` or `iap` (Google Identity-Aware Proxy
+  in front; the signed IAP header's email picks an account tied to the Linear user with that
+  email; teams and admin rights come from Linear); `accounts` is the old name for `iap`;
+  defaults to `local` on loopback hosts
+- `server.iap_audiences` (extension): list of IAP audiences
+  (`/projects/<number>/global/backendServices/<id>`) the signed header must carry; without one,
+  `iap` mode accepts no one
 - `polling.interval_ms`: integer, default `30000`
 - `workspace.root`: path, default `<system-temp>/symphony_workspaces`
 - `worker.ssh_hosts` (extension): list of SSH host strings, optional; when omitted, work runs

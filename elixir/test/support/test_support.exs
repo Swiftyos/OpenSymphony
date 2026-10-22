@@ -1,5 +1,6 @@
 defmodule SymphonyElixir.TestSupport do
   @workflow_prompt "You are an agent for this repository."
+  @iap_audience "/projects/1234/global/backendServices/5678"
 
   defmacro __using__(_opts) do
     quote do
@@ -32,6 +33,11 @@ defmodule SymphonyElixir.TestSupport do
           write_symphony_config_file!: 1,
           write_symphony_config_file!: 2,
           restore_env: 2,
+          iap_audience: 0,
+          iap_token: 1,
+          iap_token: 2,
+          iap_conn: 1,
+          iap_account!: 1,
           stop_default_http_server: 0,
           stop_default_orchestrator: 0
         ]
@@ -166,6 +172,63 @@ defmodule SymphonyElixir.TestSupport do
       ensure_default_app!(attempts - 1)
     end
   end
+
+  @doc """
+  The IAP audience test configs accept (`server.iap_audiences`).
+  """
+  def iap_audience, do: @iap_audience
+
+  @doc """
+  A signed IAP assertion for `email`, with a test key that `SymphonyElixir.Iap`
+  trusts (`:iap_jwks`). `claims` overrides any claim; `nil` drops it.
+  """
+  def iap_token(email, claims \\ %{}) do
+    {public, private} = iap_test_key()
+    Application.put_env(:symphony_elixir, :iap_jwks, [iap_jwk(public)])
+    now = System.system_time(:second)
+
+    payload =
+      %{"iss" => "https://cloud.google.com/iap", "aud" => @iap_audience, "email" => email, "sub" => "accounts.google.com:" <> email, "iat" => now, "exp" => now + 600}
+      |> Map.merge(claims)
+      |> Map.reject(fn {_key, value} -> is_nil(value) end)
+
+    signing_input = b64(Jason.encode!(%{"alg" => "ES256", "kid" => "test-key", "typ" => "JWT"})) <> "." <> b64(Jason.encode!(payload))
+    der = :crypto.sign(:ecdsa, :sha256, signing_input, [private, :secp256r1])
+    signing_input <> "." <> b64(raw_signature(der))
+  end
+
+  @doc """
+  A conn that came through IAP signed in as `email` (or an account's email).
+  """
+  def iap_conn(%{email: email}), do: iap_conn(email)
+  def iap_conn(email) when is_binary(email), do: Plug.Conn.put_req_header(Phoenix.ConnTest.build_conn(), "x-goog-iap-jwt-assertion", iap_token(email))
+
+  @doc """
+  The account for `email`, as on its first IAP visit.
+  """
+  def iap_account!(email) do
+    {:ok, account} = SymphonyElixir.Users.ensure(email)
+    account
+  end
+
+  defp iap_test_key do
+    case :persistent_term.get({__MODULE__, :iap_key}, nil) do
+      nil -> tap(:crypto.generate_key(:ecdh, :secp256r1), &:persistent_term.put({__MODULE__, :iap_key}, &1))
+      key -> key
+    end
+  end
+
+  defp iap_jwk(<<4, x::binary-size(32), y::binary-size(32)>>),
+    do: %{"kty" => "EC", "crv" => "P-256", "alg" => "ES256", "kid" => "test-key", "x" => b64(x), "y" => b64(y)}
+
+  # DER ECDSA-Sig-Value -> JOSE r || s, 32 bytes each.
+  defp raw_signature(der) do
+    {:"ECDSA-Sig-Value", r, s} = :public_key.der_decode(:"ECDSA-Sig-Value", der)
+    pad32(:binary.encode_unsigned(r)) <> pad32(:binary.encode_unsigned(s))
+  end
+
+  defp pad32(bytes), do: :binary.copy(<<0>>, 32 - byte_size(bytes)) <> bytes
+  defp b64(bytes), do: Base.url_encode64(bytes, padding: false)
 
   def restore_env(key, nil), do: System.delete_env(key)
   def restore_env(key, value), do: System.put_env(key, value)
@@ -306,6 +369,7 @@ defmodule SymphonyElixir.TestSupport do
           server_host: nil,
           server_api_token: nil,
           server_trust_proxy: nil,
+          server_iap_audiences: [@iap_audience],
           instance_name: nil,
           prompt: @workflow_prompt
         ],
@@ -390,6 +454,7 @@ defmodule SymphonyElixir.TestSupport do
     server_host = Keyword.get(config, :server_host)
     server_api_token = Keyword.get(config, :server_api_token)
     server_trust_proxy = Keyword.get(config, :server_trust_proxy)
+    server_iap_audiences = Keyword.get(config, :server_iap_audiences)
     git_mirror = Keyword.get(config, :git_mirror)
     instance_name = Keyword.get(config, :instance_name)
     prompt = Keyword.get(config, :prompt)
@@ -474,7 +539,7 @@ defmodule SymphonyElixir.TestSupport do
           log_tool_details: telemetry_log_tool_details,
           attrs: telemetry_resource_attributes
         }),
-        server_yaml(server_port, server_host, server_api_token, server_trust_proxy),
+        server_yaml(server_port, server_host, server_api_token, server_trust_proxy, server_iap_audiences),
         git_mirror_yaml(git_mirror),
         instance_yaml(instance_name),
         "---",
@@ -596,6 +661,7 @@ defmodule SymphonyElixir.TestSupport do
           server_host: nil,
           server_api_token: nil,
           server_trust_proxy: nil,
+          server_iap_audiences: [@iap_audience],
           instance_name: nil,
           projects: [
             %{
@@ -676,6 +742,7 @@ defmodule SymphonyElixir.TestSupport do
     server_host = Keyword.get(config, :server_host)
     server_api_token = Keyword.get(config, :server_api_token)
     server_trust_proxy = Keyword.get(config, :server_trust_proxy)
+    server_iap_audiences = Keyword.get(config, :server_iap_audiences)
     instance_name = Keyword.get(config, :instance_name)
 
     projects =
@@ -760,7 +827,7 @@ defmodule SymphonyElixir.TestSupport do
           log_tool_details: telemetry_log_tool_details,
           attrs: telemetry_resource_attributes
         }),
-        server_yaml(server_port, server_host, server_api_token, server_trust_proxy),
+        server_yaml(server_port, server_host, server_api_token, server_trust_proxy, server_iap_audiences),
         instance_yaml(instance_name),
         "projects: #{yaml_value(projects)}"
       ]
@@ -942,15 +1009,16 @@ defmodule SymphonyElixir.TestSupport do
     "  resource_attributes:\n" <> lines
   end
 
-  defp server_yaml(nil, nil, nil, nil), do: nil
+  defp server_yaml(nil, nil, nil, nil, _iap_audiences), do: nil
 
-  defp server_yaml(port, host, api_token, trust_proxy) do
+  defp server_yaml(port, host, api_token, trust_proxy, iap_audiences) do
     [
       "server:",
       port && "  port: #{yaml_value(port)}",
       host && "  host: #{yaml_value(host)}",
       api_token && "  api_token: #{yaml_value(api_token)}",
-      trust_proxy && "  trust_proxy: #{yaml_value(trust_proxy)}"
+      trust_proxy && "  trust_proxy: #{yaml_value(trust_proxy)}",
+      if(iap_audiences not in [nil, []], do: "  iap_audiences: #{yaml_value(iap_audiences)}")
     ]
     |> Enum.reject(&is_nil/1)
     |> Enum.join("\n")

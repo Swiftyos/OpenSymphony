@@ -10,7 +10,6 @@ defmodule SymphonyElixir.McpToolsTest do
   alias SymphonyElixirWeb.{McpAuth, RateLimit}
 
   @endpoint SymphonyElixirWeb.Endpoint
-  @password "correct horse battery"
   @orchestrator Module.concat(__MODULE__, :Orchestrator)
 
   defmodule FakeLinear do
@@ -264,7 +263,7 @@ defmodule SymphonyElixir.McpToolsTest do
 
     test "unknown tools and the error texts", %{mia: mia} do
       {:ok, user} = Auth.user_for_id(mia.id)
-      assert {:error, "Unknown tool nope."} = Tools.call("nope", %{}, %{user: user, scopes: ["read"], actor: "mia", via: "via test"})
+      assert {:error, "Unknown tool nope."} = Tools.call("nope", %{}, %{user: user, actor: "mia", via: "via test"})
 
       reasons = [:not_admin, :invalid_team, :not_team_member, :signed_out, :pending, :state_not_found]
 
@@ -295,12 +294,12 @@ defmodule SymphonyElixir.McpToolsTest do
       # Its name and its teams' labels are looked up in Linear in the background.
       assert_receive {:graphql, "query SymphonyProjectTeams" <> _, %{slugs: ["0a1b2c3d4e5f"]}}, 1_000
       assert eventually(fn -> SymphonyElixir.LabelSync.project_names()["0a1b2c3d4e5f"] == "Project 0a1b2c3d4e5f" end)
-      assert [%{added_by: "ada via MCP (agent)"}] = SymphonyElixir.ProjectRoutes.list()
+      assert [%{added_by: "ada via MCP"}] = SymphonyElixir.ProjectRoutes.list()
 
       # This test runs Symphony with a single WORKFLOW.md, where stored projects aren't live.
       assert %{"projects" => projects} = ok!(mia, "list_projects")
 
-      assert Enum.any?(projects, &match?(%{"project" => "0a1b2c3d4e5f", "source" => "mcp", "active" => false, "added_by" => "ada via MCP (agent)"}, &1))
+      assert Enum.any?(projects, &match?(%{"project" => "0a1b2c3d4e5f", "source" => "mcp", "active" => false, "added_by" => "ada via MCP"}, &1))
 
       repos = [%{"repo" => "acme/widgets-api", "name" => "api", "description" => "The API"}]
 
@@ -347,7 +346,7 @@ defmodule SymphonyElixir.McpToolsTest do
   describe "the manual" do
     test "documents every tool in its tool reference" do
       assert {:ok, reference} = Manual.section("mcp-tool-reference")
-      names = ["read", "write"] |> Tools.list() |> Enum.map(& &1.name)
+      names = Enum.map(Tools.list(), & &1.name)
 
       assert length(names) == 18
       missing = Enum.reject(names, &String.contains?(reference, "| `#{&1}` |"))
@@ -418,165 +417,115 @@ defmodule SymphonyElixir.McpToolsTest do
   end
 
   describe "token store" do
-    test "saves only hashes, reloads them, and refuses expired or broken records", %{mia: mia} do
+    test "saves hashes and encrypted copies, reloads them, and refuses expired or broken records", %{mia: mia} do
       dir = Path.join(System.tmp_dir!(), "mcp-tokens-#{System.unique_integer([:positive])}")
       path = Path.join(dir, "mcp_tokens.json")
       on_exit(fn -> File.rm_rf(dir) end)
       restart_store(path)
 
-      {:ok, secret, token} = McpTokens.create(mia.id, "keeper", ["read"], 7, ["PAY"])
+      {:ok, secret, token} = McpTokens.current(mia.id)
       body = File.read!(path)
       refute body =~ secret
       assert body =~ token.id
+      assert %{"version" => 2, "tokens" => [%{"sealed" => sealed}]} = Jason.decode!(body)
+      assert is_binary(sealed)
 
       # Use is recorded, at most once a minute.
       McpTokens.touch(token.id, "10.0.0.1")
       McpTokens.touch(token.id, "10.0.0.2")
       :sys.get_state(McpTokens)
-      assert [%{last_used_ip: "10.0.0.1"}] = McpTokens.list(mia.id)
+      assert {:ok, ^secret, %{last_used_ip: "10.0.0.1"}} = McpTokens.current(mia.id)
       McpTokens.touch("tok_gone", nil)
 
       expired = %{"hash" => sha("symp_old"), "id" => "tok_old", "account_id" => mia.id, "scopes" => ["read"], "expires_at" => "2020-01-01T00:00:00Z"}
       broken = %{"hash" => sha("symp_broken"), "id" => "tok_broken", "account_id" => mia.id, "expires_at" => "soon"}
-      tokens = Jason.decode!(body)["tokens"] ++ [expired, broken, %{"id" => "no-hash"}]
-      File.write!(path, Jason.encode!(%{version: 1, tokens: tokens}))
+      tokens = Jason.decode!(File.read!(path))["tokens"] ++ [expired, broken, %{"id" => "no-hash"}]
+      File.write!(path, Jason.encode!(%{version: 2, tokens: tokens}))
       restart_store(path)
 
-      assert {:ok, %{id: id}} = McpTokens.verify(secret)
+      # The same token comes back after a restart.
+      assert {:ok, ^secret, %{id: id}} = McpTokens.current(mia.id)
       assert id == token.id
       assert {:error, :expired_token} = McpTokens.verify("symp_old")
       assert {:error, :expired_token} = McpTokens.verify("symp_broken")
       assert {:error, :invalid_token} = McpTokens.verify(nil)
+      assert McpTokens.legacy_count(mia.id) == 0
 
       conn = post_json("symp_old", %{jsonrpc: "2.0", id: 1, method: "ping"})
       assert %{"error" => %{"message" => message}} = json_response(conn, 401)
       assert message =~ "expired"
 
+      # A copy encrypted under another secret_key_base can't be shown; the page
+      # gets a new token, and the old one keeps working for agents.
+      foreign = %{"hash" => sha("symp_foreign"), "id" => "tok_foreign", "account_id" => "usr_other", "sealed" => "not-decryptable"}
+      File.write!(path, Jason.encode!(%{version: 2, tokens: [foreign]}))
+      restart_store(path)
+      assert {:ok, %{id: "tok_foreign"}} = McpTokens.verify("symp_foreign")
+      assert {:ok, fresh, _token} = McpTokens.current("usr_other")
+      assert fresh != "symp_foreign"
+      assert {:ok, _} = McpTokens.verify("symp_foreign")
+
       File.write!(path, "not json")
       assert capture_log(fn -> restart_store(path) end) =~ "MCP token load failed"
-      assert McpTokens.list(mia.id) == []
+      assert McpTokens.verify(secret) == {:error, :invalid_token}
 
       restart_store("/dev/null/nope/tokens.json")
-      assert capture_log(fn -> {:ok, _, _} = McpTokens.create(mia.id, "x", ["read"], 7, ["PAY"]) end) =~ "MCP token save failed"
+      assert capture_log(fn -> {:ok, _, _} = McpTokens.current(mia.id) end) =~ "MCP token save failed"
     end
 
-    test "rejects bad input and other accounts' revokes", %{mia: mia, admin: admin} do
-      {:ok, _secret, token} = McpTokens.create(mia.id, "mine", ["read"], 7, ["PAY"])
-      assert {:error, :not_found} = McpTokens.revoke(admin.id, token.id)
-      assert {:error, :invalid_account} = McpTokens.create(nil, "x", ["read"], 7, ["PAY"])
-      assert {:error, :name_required} = McpTokens.create(mia.id, nil, ["read"], 7, ["PAY"])
-      assert {:error, :name_too_long} = McpTokens.create(mia.id, String.duplicate("n", 61), ["read"], 7, ["PAY"])
-      assert {:error, :invalid_name} = McpTokens.create(mia.id, "bad\nname", ["read"], 7, ["PAY"])
-      assert {:error, :invalid_scopes} = McpTokens.create(mia.id, "x", [], 7, ["PAY"])
-      assert {:error, :invalid_scopes} = McpTokens.create(mia.id, "x", "read", 7, ["PAY"])
-      assert {:error, :invalid_lifetime} = McpTokens.create(mia.id, "x", ["read"], "7", ["PAY"])
+    test "rejects bad accounts" do
+      assert {:error, :invalid_account} = McpTokens.current(nil)
+      assert {:error, :invalid_account} = McpTokens.rotate("")
     end
   end
 
-  describe "scoping tokens to teams and projects" do
-    test "members pick only their teams; only admins can give everything", %{mia: mia, admin: admin} do
-      page = session_for(mia) |> get("/account/mcp") |> html_response(200)
-      assert page =~ "Team PAY"
-      refute page =~ "Everything (admin)"
-      assert session_for(admin) |> get("/account/mcp") |> html_response(200) =~ "Everything (admin)"
-
-      for resources <- [["*"], ["WEB"], ["PAY", "project:elsewhere"]] do
-        denied = session_for(mia) |> post("/account/mcp-tokens", %{"name" => "x", "days" => "7", "resources" => resources})
-        assert html_response(denied, 422) =~ "only give a token teams and projects you work in"
-      end
-
-      assert session_for(mia) |> post("/account/mcp-tokens", %{"name" => "x", "days" => "7"}) |> html_response(422) =~ "Pick what the token can reach"
-      assert {:error, :invalid_resources} = McpTokens.create(mia.id, "x", ["read"], 7, ["../etc"])
-      assert {:error, :invalid_resources} = McpTokens.create(mia.id, "x", ["read"], 7, "PAY")
-      assert {:error, :invalid_resources} = McpTokens.create(mia.id, "x", ["read"], 7, Enum.map(1..51, &"T#{&1}"))
-      assert {:ok, _, %{resources: ["*"]}} = McpTokens.create(admin.id, "x", ["read"], 7, ["PAY", "*"])
-      assert {:ok, _, %{resources: ["PAY", "project:checkout"]}} = McpTokens.create(mia.id, "y", ["read"], 7, [" pay", "project: checkout"])
-      assert {:error, :invalid_resources} = McpTokens.create(mia.id, "z", ["read"], 7, [5])
-      refute Auth.token_resource_allowed?(nil, "PAY")
-    end
-
-    test "an admin's team token loses admin rights and everything outside the team", %{admin: admin} do
-      {:ok, secret, _token} = McpTokens.create(admin.id, "pay only", ["read", "write"], 7, ["PAY"])
+  describe "what a token reaches" do
+    test "exactly what its account reaches", %{mia: mia, admin_token: admin_token, mia_token: token} do
       observe!("PAY-2", "In Progress", ["factory/merge"])
       observe!("WEB-1", "In Review")
 
-      assert %{"flows" => [%{"key" => "PAY"}]} = ok!(secret, "list_flows")
-      assert %{"issues" => [%{"identifier" => "PAY-2"}]} = ok!(secret, "list_issues")
-      assert error!(secret, "get_issue", %{"identifier" => "WEB-1"}) =~ "not found"
-      assert error!(secret, "get_flow", %{"scope" => "DEFAULT"}) =~ "No flow"
-      assert error!(secret, "reset_flow", %{"scope" => "DEFAULT"}) =~ "Only this team's members"
-      assert error!(secret, "move_issue", %{"issue" => "id-PAY-2", "to" => "done"}) =~ "Only admins can force it"
+      assert %{"issues" => [%{"identifier" => "PAY-2"}]} = ok!(token, "list_issues")
+      assert error!(token, "get_issue", %{"identifier" => "WEB-1"}) =~ "not found"
+      assert %{"identifier" => "WEB-1"} = ok!(admin_token, "get_issue", %{"identifier" => "WEB-1"})
 
       %{"result" => %{"instructions" => instructions}} =
-        json_response(post_json(secret, %{jsonrpc: "2.0", id: 1, method: "initialize", params: %{}}), 200)
+        json_response(post_json(token, %{jsonrpc: "2.0", id: 1, method: "initialize", params: %{}}), 200)
 
-      assert instructions =~ "limited to PAY"
-    end
+      assert instructions =~ "with their permissions (PAY)"
 
-    test "a project token reaches only that project's issues", %{mia: mia} do
-      observe!("PAY-5", "In Review", [], "checkout")
-      observe!("PAY-6", "In Review", [], "billing")
-      {:ok, secret, _token} = McpTokens.create(mia.id, "checkout", ["read", "write"], 7, ["project:checkout"])
-
-      assert %{"issues" => [%{"identifier" => "PAY-5"}]} = ok!(secret, "list_issues")
-      assert %{"identifier" => "PAY-5", "session" => nil} = ok!(secret, "get_issue", %{"identifier" => "PAY-5"})
-      assert error!(secret, "get_issue", %{"identifier" => "PAY-6"}) =~ "not found"
-      assert %{"sent" => true} = ok!(secret, "send_agent_message", %{"identifier" => "PAY-5", "text" => "hi"})
-      assert error!(secret, "send_agent_message", %{"identifier" => "PAY-6", "text" => "hi"}) =~ "not found"
-      assert error!(secret, "set_stage_control", %{"scope" => "PAY", "stage" => "todo", "field" => "paused", "value" => true}) =~ "Only this team"
-    end
-
-    test "tokens stop working when their owner loses what they were limited to", %{mia: mia} do
-      {:ok, everything, _} = McpTokens.create(mia.id, "x", ["read"], 7, ["*"])
-      {:ok, web, _} = McpTokens.create(mia.id, "y", ["read"], 7, ["WEB"])
-
-      for secret <- [everything, web] do
-        assert %{"error" => %{"message" => message}} = json_response(post_json(secret, %{jsonrpc: "2.0", id: 1, method: "ping"}), 401)
-        assert message =~ "no longer has access"
-      end
+      # Access granted later applies to the same token at once.
+      {:ok, _} = Users.set_access(mia.id, "WEB", true, "ada")
+      Auth.clear_cache()
+      assert %{"identifier" => "WEB-1"} = ok!(token, "get_issue", %{"identifier" => "WEB-1"})
     end
   end
 
   describe "account page" do
-    test "links to the token page and no longer shows the token form", %{mia: mia} do
-      page = session_for(mia) |> get("/account") |> html_response(200)
-      assert page =~ ~s(href="/account/mcp")
-      assert page =~ "Agents and tools connect with"
-      refute page =~ "Create token"
-      refute page =~ "MCP tokens for agents"
-    end
-
-    test "explains errors and hides itself when MCP is off", %{mia: mia} do
-      bad = session_for(mia) |> post("/account/mcp-tokens", %{"name" => "", "access" => "read", "days" => "abc"})
-      assert html_response(bad, 422) =~ "Give the token a name"
-      assert session_for(mia) |> post("/account/mcp-tokens", %{"name" => "x", "resources" => ["PAY"]}) |> html_response(422) =~ "how long"
-      assert session_for(mia) |> post("/account/mcp-tokens/tok_nope/revoke") |> html_response(404) =~ "doesn&#39;t exist"
-
-      write_config!(nil)
-      refute session_for(mia) |> get("/account") |> html_response(200) =~ "MCP tokens"
-      assert session_for(mia) |> get("/account/mcp") |> redirected_to() == "/"
-      assert session_for(mia) |> post("/account/mcp-tokens", %{"name" => "x"}) |> redirected_to() == "/"
-      assert session_for(mia) |> post("/account/mcp-tokens/tok_x/revoke") |> redirected_to() == "/"
-    end
-
-    test "the token page shows tokens and the create form", %{mia: mia} do
-      {:ok, _secret, token} = McpTokens.create(mia.id, "existing bot", ["read"], 7, ["PAY"])
+    test "/account is the MCP setup page", %{mia: mia} do
+      assert session_for(mia) |> get("/account") |> redirected_to() == "/account/mcp"
       page = session_for(mia) |> get("/account/mcp") |> html_response(200)
-      assert page =~ "MCP tokens"
-      assert page =~ "existing bot"
-      assert page =~ token.hint
-      assert page =~ "Create token"
-      assert page =~ ~s(href="/account")
+      {:ok, secret, _token} = McpTokens.current(mia.id)
+      assert page =~ secret
+      assert page =~ "Rotate token"
+      refute page =~ "password"
     end
 
-    test "the local operator gets a token page when MCP is on" do
+    test "hides itself when MCP is off", %{mia: mia} do
+      write_config!(nil)
+      assert session_for(mia) |> get("/account") |> redirected_to() == "/"
+      assert session_for(mia) |> get("/account/mcp") |> redirected_to() == "/"
+      assert session_for(mia) |> post("/account/mcp-token/rotate") |> redirected_to() == "/"
+    end
+
+    test "the local operator gets a setup page when MCP is on" do
       write_config!("    enabled: true", server_host: "127.0.0.1")
       assert build_conn() |> get("/account") |> redirected_to() == "/account/mcp"
-      assert build_conn() |> get("/account/mcp") |> html_response(200) =~ "MCP tokens"
+      page = build_conn() |> get("/account/mcp") |> html_response(200)
+      {:ok, secret, %{account_id: "local"}} = McpTokens.current("local")
+      assert page =~ secret
 
-      created = build_conn() |> post("/account/mcp-tokens", %{"name" => "ops", "days" => "7", "resources" => ["*"]}) |> html_response(200)
-      assert created =~ "shown again"
-      assert [%{name: "ops", account_id: "local", resources: ["*"]}] = McpTokens.list("local")
+      rotated = build_conn() |> post("/account/mcp-token/rotate") |> html_response(200)
+      refute rotated =~ secret
 
       write_config!(nil, server_host: "127.0.0.1")
       assert build_conn() |> get("/account") |> redirected_to() == "/"
@@ -640,8 +589,7 @@ defmodule SymphonyElixir.McpToolsTest do
   end
 
   defp token!(account) do
-    resources = if account.username == "ada", do: ["*"], else: ["PAY"]
-    {:ok, secret, _token} = McpTokens.create(account.id, "agent", ["read", "write"], 30, resources)
+    {:ok, secret, _token} = McpTokens.current(account.id)
     secret
   end
 
@@ -662,14 +610,12 @@ defmodule SymphonyElixir.McpToolsTest do
     Process.put(:token_store, pid)
   end
 
+  # Usernames come from the email, so `username` documents the expected one.
   defp register!(username, email) do
-    params = %{"username" => username, "email" => email, "password" => @password, "setup_code" => Users.setup_code()}
-    {:ok, account} = Users.register(params, &Auth.check_linear_member/1)
-    {:ok, account} = if account.status == "pending", do: Users.approve(account.id, "test"), else: {:ok, account}
+    account = iap_account!(email)
+    ^username = account.username
     account
   end
 
-  defp session_for(account) do
-    build_conn() |> Plug.Test.init_test_session(%{"user_id" => account.id, "session_version" => Users.get(account.id).session_version})
-  end
+  defp session_for(account), do: iap_conn(account)
 end

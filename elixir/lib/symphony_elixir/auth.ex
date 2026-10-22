@@ -2,10 +2,12 @@ defmodule SymphonyElixir.Auth do
   @moduledoc """
   Who is using the dashboard and what they may do.
 
-  Symphony keeps username/password accounts (`SymphonyElixir.Users`), but
-  everything about *who someone is* comes from Linear: an account is tied to the
-  Linear user with the same email, and that user's teams and admin flag decide
-  permissions. Profiles are re-read from Linear every 10 minutes using Symphony's
+  Google Identity-Aware Proxy in front of the dashboard signs people in; the
+  signed IAP header (`SymphonyElixir.Iap`) gives Symphony a verified email, and
+  the account with that email (`SymphonyElixir.Users`, created on first visit)
+  holds what Symphony grants on top of Linear. Everything about *who someone is*
+  comes from Linear: the Linear user with the same email decides teams and the
+  admin flag. Profiles are re-read from Linear every 10 minutes using Symphony's
   own tracker key, so changes in Linear (new team, removed admin, deactivated
   user) apply without touching Symphony.
 
@@ -13,9 +15,10 @@ defmodule SymphonyElixir.Auth do
 
     * `:local` - no sign-in; the local operator has full control. The default
       when the server binds to a loopback address.
-    * `:accounts` - username/password sign-in. The default for any other address.
+    * `:iap` - IAP sign-in. The default for any other address.
 
-  `server.auth: local | accounts` overrides the default.
+  `server.auth: local | iap` overrides the default (`accounts` is the old name
+  for `iap`).
   """
 
   use GenServer
@@ -93,14 +96,33 @@ defmodule SymphonyElixir.Auth do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
   end
 
-  @spec mode(map() | nil) :: :local | :accounts
+  @spec mode(map() | nil) :: :local | :iap
   def mode(settings \\ nil) do
     settings = settings || Config.settings!()
 
     case settings.server.auth do
-      "accounts" -> :accounts
+      auth when auth in ["iap", "accounts"] -> :iap
       "local" -> :local
-      _ -> if loopback?(settings.server.host), do: :local, else: :accounts
+      _ -> if loopback?(settings.server.host), do: :local, else: :iap
+    end
+  end
+
+  @doc """
+  The IAP audiences signed headers must carry (`server.iap_audiences`).
+  """
+  @spec iap_audiences() :: [String.t()]
+  def iap_audiences, do: Config.settings!().server.iap_audiences || []
+
+  @doc """
+  The email to act as when no IAP audience is configured: `SYMPHONY_DEV_USER`,
+  for running the dashboard on a laptop. Ignored once an audience is set, so it
+  can't open a deployed Symphony.
+  """
+  @spec dev_user() :: String.t() | nil
+  def dev_user do
+    case {iap_audiences(), System.get_env("SYMPHONY_DEV_USER")} do
+      {[], email} when is_binary(email) and email != "" -> String.downcase(String.trim(email))
+      _ -> nil
     end
   end
 
@@ -108,25 +130,25 @@ defmodule SymphonyElixir.Auth do
   def local_user, do: %User{id: "local", name: "Local operator", admin: true, local: true}
 
   @doc """
-  Sign-up gate: the email must belong to an active member of the Linear
-  workspace. `:skip` when Symphony has no Linear tracker to ask (development).
+  The user for an email IAP verified. The account is created on first visit;
+  the Linear workspace still decides whether the person may use Symphony.
   """
-  @spec check_linear_member(String.t()) :: :ok | :skip | {:error, atom()}
-  def check_linear_member(email) do
-    case linear_profile(email) do
-      {:ok, %{"active" => false}} -> {:error, :inactive_user}
-      {:ok, _member} -> :ok
-      other -> other
+  @spec user_for_email(String.t()) :: {:ok, User.t()} | {:error, atom()}
+  def user_for_email(email) when is_binary(email) do
+    with :ok <- linear_member(email),
+         {:ok, account} <- Users.ensure(email) do
+      user_for_id(account.id)
     end
   end
 
-  @doc """
-  Signs in with a username (or email) and password.
-  """
-  @spec sign_in(String.t(), String.t()) :: {:ok, User.t()} | {:error, atom()}
-  def sign_in(login, password) do
-    with {:ok, account} <- Users.authenticate(login, password) do
-      user_for_account(account)
+  # An email Linear doesn't know (or has deactivated) gets no account. Linear
+  # being unreachable doesn't lock people out; user_for_account/1 then gives
+  # only Symphony's grants.
+  defp linear_member(email) do
+    case linear_profile(email) do
+      {:ok, %{"active" => false}} -> {:error, :inactive_user}
+      {:error, :not_in_workspace} -> {:error, :not_in_workspace}
+      _member_skip_or_unreachable -> :ok
     end
   end
 
@@ -136,15 +158,15 @@ defmodule SymphonyElixir.Auth do
   @spec user_for_id(String.t() | nil, pos_integer() | nil) :: {:ok, User.t()} | {:error, atom()}
   def user_for_id(account_id, session_version \\ nil) do
     case Users.get(account_id) do
-      # A password change or disable bumps the version and ends older sessions.
+      # Disabling bumps the version and ends older sessions.
       %{session_version: version} when is_integer(session_version) and version != session_version ->
         {:error, :signed_out}
 
       %{status: "active"} = account ->
         user_for_account(account)
 
-      %{status: "pending"} ->
-        {:error, :pending}
+      %{status: "disabled"} ->
+        {:error, :disabled}
 
       _ ->
         {:error, :signed_out}
@@ -321,52 +343,6 @@ defmodule SymphonyElixir.Auth do
   def can_grant?(%User{team_admin: admin_of} = user, scope) when is_binary(scope), do: can_control?(user) or scope in admin_of
   def can_grant?(user, _scope), do: can_control?(user)
 
-  @doc """
-  Whether the user may give an MCP token access to `resource`: `"*"`
-  (everything) for admins only, a team key for its members, `project:<slug>`
-  for people who may work in that project. Admins may pick any team or project.
-  """
-  @spec token_resource_allowed?(User.t() | nil, String.t()) :: boolean()
-  def token_resource_allowed?(user, "*"), do: can_control?(user)
-  def token_resource_allowed?(%User{local: true}, _resource), do: true
-  def token_resource_allowed?(%User{admin: true}, _resource), do: true
-
-  def token_resource_allowed?(%User{teams: teams, projects: projects}, "project:" <> slug),
-    do: slug in projects or Enum.any?(teams, &(&1.key in project_teams(slug)))
-
-  def token_resource_allowed?(%User{teams: teams}, team) when is_binary(team), do: Enum.any?(teams, &(&1.key == team))
-  def token_resource_allowed?(_user, _resource), do: false
-
-  @doc """
-  The user as an MCP token limited to `resources` sees them: `["*"]` keeps an
-  admin's full access; otherwise only the listed teams and projects the user
-  may still work in, and never admin rights. Fails when nothing is left, or
-  when a `"*"` token's owner is no longer an admin.
-  """
-  @spec restrict_to(User.t(), [String.t()]) :: {:ok, User.t()} | {:error, :scope_unavailable}
-  def restrict_to(user, ["*"]), do: if(can_control?(user), do: {:ok, user}, else: {:error, :scope_unavailable})
-
-  def restrict_to(user, resources) do
-    case Enum.filter(resources, &(&1 != "*" and token_resource_allowed?(user, &1))) do
-      [] ->
-        {:error, :scope_unavailable}
-
-      allowed ->
-        {project_scopes, teams} = Enum.split_with(allowed, &String.starts_with?(&1, "project:"))
-        known = Map.new(user.teams, &{&1.key, &1})
-
-        {:ok,
-         %{
-           user
-           | admin: false,
-             local: false,
-             teams: Enum.map(teams, &(known[&1] || %{id: nil, key: &1, name: nil})),
-             team_admin: Enum.filter(user.team_admin, &(&1 in teams)),
-             projects: Enum.map(project_scopes, &String.replace_prefix(&1, "project:", ""))
-         }}
-    end
-  end
-
   defp project_teams(slug), do: get_in(UsageLedger.projects(), [slug, :teams]) || []
 
   @doc false
@@ -380,6 +356,7 @@ defmodule SymphonyElixir.Auth do
   def init(_opts) do
     :ets.new(@table, [:named_table, :public, :set, read_concurrency: true])
     SymphonyElixirWeb.RateLimit.create_table()
+    SymphonyElixir.Iap.create_table()
     {:ok, %{}}
   end
 

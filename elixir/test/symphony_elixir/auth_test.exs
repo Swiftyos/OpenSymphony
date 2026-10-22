@@ -5,10 +5,9 @@ defmodule SymphonyElixir.AuthTest do
   import Phoenix.LiveViewTest
 
   alias SymphonyElixir.{Auth, FactoryControls, UsageLedger, Users}
-  alias SymphonyElixirWeb.RateLimit
+  alias SymphonyElixirWeb.{RateLimit, UserAuth}
 
   @endpoint SymphonyElixirWeb.Endpoint
-  @password "correct horse battery"
 
   defmodule FakeLinear do
     @org %{"id" => "org-1", "urlKey" => "acme", "name" => "Acme"}
@@ -137,20 +136,6 @@ defmodule SymphonyElixir.AuthTest do
     )
   end
 
-  defp register!(username, email) do
-    Users.register(
-      %{
-        "username" => username,
-        "email" => email,
-        "password" => @password,
-        "password_confirmation" => @password,
-        # Only consulted (and only non-nil) while no accounts exist.
-        "setup_code" => Users.setup_code()
-      },
-      &Auth.check_linear_member/1
-    )
-  end
-
   defp start_endpoint! do
     name = Module.concat(__MODULE__, :Orchestrator)
     {:ok, _pid} = StubOrchestrator.start_link(name: name)
@@ -164,62 +149,46 @@ defmodule SymphonyElixir.AuthTest do
     start_supervised!({SymphonyElixirWeb.Endpoint, []})
   end
 
-  defp session_for(account) do
-    build_conn() |> Plug.Test.init_test_session(%{"user_id" => account.id, "session_version" => Users.get(account.id).session_version})
-  end
-
-  test "mode is local on loopback and accounts everywhere else" do
+  test "mode is local on loopback and IAP everywhere else; accounts is the old name for iap" do
     write_workflow_file!(Workflow.workflow_file_path())
     assert Auth.mode() == :local
 
     accounts_mode!()
-    assert Auth.mode() == :accounts
+    assert Auth.mode() == :iap
+    assert Auth.mode(%{server: %{auth: "accounts", host: "127.0.0.1"}}) == :iap
+    assert Auth.mode(%{server: %{auth: "iap", host: "127.0.0.1"}}) == :iap
   end
 
-  test "the first account is the admin; later sign-ups need a Linear email and approval" do
+  test "an IAP-verified email gets an account on first visit; the first is the admin; Linear still decides" do
     accounts_mode!()
 
-    assert {:ok, %{status: "active", bootstrap_admin: true}} = register!("mia", "mia@acme.test")
-    assert {:ok, %{status: "pending", bootstrap_admin: false} = ada} = register!("ada", "Ada@Acme.test")
+    assert {:ok, %Auth.User{username: "mia", admin: true}} = Auth.user_for_email("mia@acme.test")
+    assert {:ok, %Auth.User{username: "ada", name: "Ada Admin", admin: true}} = Auth.user_for_email("ada@acme.test")
+    assert %{"mia" => %{bootstrap_admin: true, status: "active"}, "ada" => %{bootstrap_admin: false}} = Map.new(Users.list(), &{&1.username, &1})
 
-    assert {:error, :not_in_workspace} = register!("eve", "eve@evil.test")
-    assert {:error, :inactive_user} = register!("gone", "gone@acme.test")
-    # Uniqueness is checked after the Linear gate, so use an always-ok gate here.
-    any_member = fn _email -> :ok end
-    params = fn username, email -> %{"username" => username, "email" => email, "password" => @password} end
-    assert {:error, :username_taken} = Users.register(params.("mia", "other@acme.test"), any_member)
-    assert {:error, :email_taken} = Users.register(params.("ada2", "ada@acme.test"), any_member)
+    # The same email is the same account.
+    assert {:ok, %Auth.User{username: "mia"}} = Auth.user_for_email("mia@acme.test")
+    assert length(Users.list()) == 2
 
-    assert {:error, :password_too_short} =
-             Users.register(%{"username" => "bob", "email" => "bob@acme.test", "password" => "short"}, fn _ -> :ok end)
-
-    assert {:error, :password_mismatch} =
-             Users.register(
-               %{"username" => "bob", "email" => "bob@acme.test", "password" => @password, "password_confirmation" => "nope nope nope"},
-               fn _ -> :ok end
-             )
-
-    assert {:error, :pending} = Auth.sign_in("ada", @password)
-    assert {:ok, _} = Users.approve(ada.id, "mia")
-    assert {:ok, %Auth.User{name: "Ada Admin", admin: true}} = Auth.sign_in("ada@acme.test", @password)
+    # Linear gates who may use Symphony, and no account is made for the rest.
+    assert {:error, :not_in_workspace} = Auth.user_for_email("eve@evil.test")
+    assert {:error, :inactive_user} = Auth.user_for_email("gone@acme.test")
+    assert length(Users.list()) == 2
   end
 
-  test "passwords are checked, hashed, and repeated failures lock the account" do
-    accounts_mode!()
-    {:ok, _} = register!("mia", "mia@acme.test")
+  test "usernames come from the email and stay unique" do
+    accounts_mode!(tracker_kind: "memory")
 
-    refute File.exists?("users.json")
-    assert {:error, :invalid_credentials} = Auth.sign_in("nobody", @password)
-
-    for _ <- 1..5, do: assert({:error, :invalid_credentials} = Auth.sign_in("mia", "wrong password!!"))
-    assert {:error, :locked} = Auth.sign_in("mia", @password)
+    assert %{username: "mia"} = iap_account!("mia@acme.test")
+    assert %{username: "mia2"} = iap_account!("mia@other.test")
+    assert %{username: "userjo"} = iap_account!("jo@acme.test")
+    assert {:error, :invalid_email} = Users.ensure("not-an-email")
   end
 
   test "permissions come from the Linear user with the account's email" do
     accounts_mode!()
-    {:ok, mia} = register!("mia", "mia@acme.test")
-    {:ok, ada} = register!("ada", "ada@acme.test")
-    {:ok, ada} = Users.approve(ada.id, "mia")
+    mia = iap_account!("mia@acme.test")
+    ada = iap_account!("ada@acme.test")
 
     # Mia is the bootstrap admin even though Linear says she is a regular member.
     {:ok, mia_user} = Auth.user_for_account(mia)
@@ -243,60 +212,51 @@ defmodule SymphonyElixir.AuthTest do
       :ok
     end
 
-    test "a fresh install goes to setup; the first account signs straight in" do
-      assert redirected_to(get(build_conn(), "/")) == "/login"
-      assert redirected_to(get(build_conn(), "/login")) == "/signup"
-      assert html_response(get(build_conn(), "/signup"), 200) =~ "this account will be the admin"
+    test "the dashboard is for people IAP signed in; there is no sign-in of its own" do
+      html = html_response(get(build_conn(), "/"), 401)
+      assert html =~ "Sign in through Symphony"
+      refute html =~ "password"
 
-      signup = %{"username" => "mia", "email" => "mia@acme.test", "password" => @password, "password_confirmation" => @password}
+      assert html_response(get(iap_conn("mia@acme.test"), "/"), 200) =~ "Mia Member"
+      assert %{username: "mia"} = hd(Users.list())
 
-      # The first account needs the setup code from the server log.
-      assert html_response(post(build_conn(), "/signup", signup), 422) =~ "setup code"
-      assert html_response(post(build_conn(), "/signup", Map.put(signup, "setup_code", "AAAA-BBBB")), 422) =~ "setup code"
+      for path <- ["/login", "/signup", "/reset/abc"], do: assert(get(iap_conn("mia@acme.test"), path).status == 404)
+      assert post(iap_conn("mia@acme.test"), "/logout").status in [403, 404]
 
-      conn = post(build_conn(), "/signup", Map.put(signup, "setup_code", Users.setup_code()))
-      assert redirected_to(conn) == "/"
-      assert html_response(conn |> recycle() |> get("/"), 200) =~ "Mia Member"
-
-      conn = conn |> recycle() |> post("/logout")
-      assert redirected_to(conn) == "/login"
-      assert redirected_to(conn |> recycle() |> get("/")) == "/login"
+      # A session cookie alone isn't enough: every request needs IAP's header.
+      session = build_conn() |> Plug.Test.init_test_session(%{"user_id" => hd(Users.list()).id, "session_version" => 1})
+      assert html_response(get(session, "/"), 401)
     end
 
-    test "sign-in rejects bad passwords and pending accounts; admins approve from the rail" do
-      {:ok, mia} = register!("mia", "mia@acme.test")
+    test "Linear decides who gets in, and disabled accounts are refused" do
+      assert html_response(get(iap_conn("eve@evil.test"), "/"), 403) =~ "no Linear user"
+      assert html_response(get(iap_conn("gone@acme.test"), "/"), 403) =~ "deactivated"
+      assert Users.list() == []
 
-      conn =
-        post(build_conn(), "/signup", %{"username" => "ada", "email" => "ada@acme.test", "password" => @password, "password_confirmation" => @password})
-
-      assert html_response(conn, 200) =~ "Request sent"
-
-      assert html_response(post(build_conn(), "/login", %{"login" => "ada", "password" => @password}), 401) =~ "waiting for an admin"
-      assert html_response(post(build_conn(), "/login", %{"login" => "mia", "password" => "nope nope nope"}), 401) =~ "username or password"
-
-      {:ok, view, html} = live(session_for(mia), "/")
-      assert html =~ "Pending accounts"
-      [%{id: ada_id}] = Users.list("pending")
-
-      view |> element(~s(button[phx-value-id="#{ada_id}"]), "Approve") |> render_click()
-      assert Users.get(ada_id).status == "active"
-      # The request leaves the rail at once.
-      refute render(view) =~ "Pending accounts"
-
-      post(build_conn(), "/signup", %{"username" => "lee", "email" => "lee@acme.test", "password" => @password, "password_confirmation" => @password})
-      send(view.pid, :observability_updated)
-      assert render_async(view) =~ "Pending accounts"
-      [%{id: lee_id}] = Users.list("pending")
-      view |> element(~s(button[phx-click="reject_account"][phx-value-id="#{lee_id}"])) |> render_click()
-      assert Users.get(lee_id) == nil
-      refute render(view) =~ "Pending accounts"
-
-      conn = post(build_conn(), "/login", %{"login" => "ada", "password" => @password})
-      assert redirected_to(conn) == "/"
+      _admin = iap_account!("ada@acme.test")
+      mia = iap_account!("mia@acme.test")
+      {:ok, _} = Users.disable(mia.id, "ada")
+      assert html_response(get(iap_conn("mia@acme.test"), "/"), 403) =~ "disabled"
     end
 
-    test "the API needs a session or server.api_token" do
+    test "LiveView sockets mount from the session IAP's check set, for an hour" do
+      iap_account!("ada@acme.test")
+      mia = iap_account!("mia@acme.test")
+      assert {:ok, _view, _html} = live(iap_conn(mia), "/")
+
+      session = %{"user_id" => mia.id, "session_version" => Users.get(mia.id).session_version}
+      socket = %Phoenix.LiveView.Socket{endpoint: @endpoint}
+      now = System.system_time(:second)
+
+      assert {:cont, _socket} = UserAuth.on_mount(:require_user, %{}, Map.put(session, "iap_verified_at", now - 60), socket)
+      # An older session reloads the page, so IAP checks the person again.
+      assert {:halt, %{redirected: {:redirect, %{to: "/"}}}} = UserAuth.on_mount(:require_user, %{}, Map.put(session, "iap_verified_at", now - 3_700), socket)
+      assert {:halt, _socket} = UserAuth.on_mount(:require_user, %{}, session, socket)
+    end
+
+    test "the API needs IAP sign-in or server.api_token" do
       assert json_response(get(build_conn(), "/api/v1/state"), 401)["error"]["code"] == "unauthorized"
+      assert get(iap_conn("mia@acme.test"), "/api/v1/state").status == 200
 
       token = String.duplicate("t", 32)
       accounts_mode!(server_api_token: token)
@@ -309,11 +269,10 @@ defmodule SymphonyElixir.AuthTest do
     end
 
     test "members move their own team's issues and the move is attributed; only admins change controls" do
-      {:ok, _admin} = register!("ada", "ada@acme.test")
-      {:ok, mia} = register!("mia", "mia@acme.test")
-      {:ok, mia} = Users.approve(mia.id, "ada")
+      _admin = iap_account!("ada@acme.test")
+      mia = iap_account!("mia@acme.test")
 
-      {:ok, view, _html} = live(session_for(mia), "/")
+      {:ok, view, _html} = live(iap_conn(mia), "/")
 
       render_hook(view, "factory_move", %{"id" => "id-WEB-1", "issue" => "WEB-1", "to" => "merge"})
       assert_reply(view, %{ok: false, error: "You can only move issues from teams you belong to" <> _})
@@ -343,87 +302,47 @@ defmodule SymphonyElixir.AuthTest do
     setup do
       accounts_mode!()
       start_endpoint!()
-      {:ok, admin} = register!("ada", "ada@acme.test")
-      {:ok, mia} = register!("mia", "mia@acme.test")
-      {:ok, mia} = Users.approve(mia.id, "ada")
+      admin = iap_account!("ada@acme.test")
+      mia = iap_account!("mia@acme.test")
       %{admin: admin, mia: mia}
     end
 
-    test "changing a password signs out other sessions", %{mia: mia} do
-      old_session = session_for(mia)
-      assert html_response(get(old_session, "/account"), 200) =~ "@mia"
-
-      new_password = "a brand new passphrase"
-
-      conn =
-        post(session_for(mia), "/account/password", %{
-          "current_password" => @password,
-          "password" => new_password,
-          "password_confirmation" => new_password
-        })
-
-      assert html_response(conn, 200) =~ "Password changed"
-      # The session that made the change stays signed in.
-      assert html_response(conn |> recycle() |> get("/"), 200) =~ "Mia Member"
-      # Every older session is signed out.
-      assert redirected_to(get(old_session, "/")) == "/login"
-      assert {:ok, _} = Auth.sign_in("mia", new_password)
-      assert {:error, :invalid_credentials} = Auth.sign_in("mia", @password)
-
-      conn = post(session_for(mia), "/account/password", %{"current_password" => "wrong password!!", "password" => new_password, "password_confirmation" => new_password})
-      assert html_response(conn, 422) =~ "isn&#39;t right"
-    end
-
-    test "reset links set a new password once and then stop working", %{mia: mia} do
-      {:ok, token} = Users.create_reset_token(mia.id)
-      assert html_response(get(build_conn(), "/reset/#{token}"), 200) =~ "@mia"
-
-      new_password = "reset passphrase 123"
-      conn = post(build_conn(), "/reset/#{token}", %{"password" => new_password, "password_confirmation" => new_password})
-      assert html_response(conn, 200) =~ "Password set"
-      assert {:ok, _} = Auth.sign_in("mia", new_password)
-
-      assert html_response(get(build_conn(), "/reset/#{token}"), 404) =~ "invalid or has expired"
-      assert html_response(get(build_conn(), "/reset/not-a-token"), 404) =~ "invalid or has expired"
-    end
-
-    test "request logs never contain reset tokens or other credentials", %{mia: mia} do
-      {:ok, token} = Users.create_reset_token(mia.id)
+    test "request logs never contain IAP assertions or other credentials", %{mia: mia} do
       previous = Logger.level()
       Logger.configure(level: :debug)
+      conn = iap_conn(mia)
+      [assertion] = Plug.Conn.get_req_header(conn, "x-goog-iap-jwt-assertion")
 
       log =
         try do
           capture_log([level: :debug], fn ->
-            get(build_conn(), "/reset/#{token}")
-            post(build_conn(), "/reset/#{token}", %{"password" => "short", "password_confirmation" => "short"})
-            post(build_conn(), "/login", %{"login" => "mia", "password" => @password, "token" => "tok-secret-value"})
+            get(conn, "/")
+            post(iap_conn(mia), "/account/mcp-token/rotate", %{"token" => "tok-secret-value"})
           end)
         after
           Logger.configure(level: previous)
         end
 
-      refute log =~ token
+      refute log =~ assertion
       refute log =~ "tok-secret-value"
-      assert log =~ "POST /login"
+      assert log =~ "POST /account/mcp-token/rotate"
       assert log =~ ~s("token" => "[FILTERED]")
     end
 
     test "admins manage users; disabling signs the person out", %{admin: admin, mia: mia} do
-      assert {:error, {:redirect, %{to: "/"}}} = live(session_for(mia), "/admin/users")
+      assert {:error, {:redirect, %{to: "/"}}} = live(iap_conn(mia), "/admin/users")
 
-      mia_session = session_for(mia)
-      {:ok, view, html} = live(session_for(admin), "/admin/users")
+      {:ok, view, html} = live(iap_conn(admin), "/admin/users")
       assert html =~ "@mia"
       assert html =~ ~s(<span class="access-chip" title="Linear team membership">PAY</span>)
-
-      view |> element(~s(button[phx-click="reset"][phx-value-id="#{mia.id}"])) |> render_click()
-      assert render(view) =~ "/reset/"
+      refute html =~ "Reset password"
 
       view |> element(~s(button[phx-click="disable"][phx-value-id="#{mia.id}"])) |> render_click()
       assert Users.get(mia.id).status == "disabled"
-      assert redirected_to(get(mia_session, "/")) == "/login"
-      assert {:error, :disabled} = Auth.sign_in("mia", @password)
+      assert html_response(get(iap_conn(mia), "/"), 403) =~ "disabled"
+
+      view |> element(~s(button[phx-click="enable"][phx-value-id="#{mia.id}"])) |> render_click()
+      assert html_response(get(iap_conn(mia), "/"), 200)
 
       # The first admin can't be disabled, by anyone.
       assert {:error, :cannot_disable_bootstrap} = Users.disable(admin.id, "someone")
@@ -431,16 +350,15 @@ defmodule SymphonyElixir.AuthTest do
 
     test "admins choose team admins, who give people access to their team and its projects", %{admin: admin, mia: mia} do
       accounts_mode!(tracker_project_slug: nil, tracker_projects: [%{slug: "configured"}])
-      {:ok, lee} = register!("lee", "lee@acme.test")
-      {:ok, lee} = Users.approve(lee.id, "ada")
+      lee = iap_account!("lee@acme.test")
       Enum.each(["PAY-1", "WEB-1"], &UsageLedger.observe_issue(%SymphonyElixir.Linear.Issue{id: &1, identifier: &1, state: "Todo", project_slug: "checkout"}))
       UsageLedger.observe_issue(%SymphonyElixir.Linear.Issue{id: "OPS-1", identifier: "OPS-1", state: "Todo", project_slug: "ops-only"})
 
       # A plain member can't open the page; a Linear guest is read-only.
-      assert {:error, {:redirect, %{to: "/"}}} = live(session_for(mia), "/admin/users")
+      assert {:error, {:redirect, %{to: "/"}}} = live(iap_conn(mia), "/admin/users")
       assert {:ok, %Auth.User{guest: true, teams: []}} = Auth.user_for_id(lee.id, 1)
 
-      {:ok, admin_view, html} = live(session_for(admin), "/admin/users")
+      {:ok, admin_view, html} = live(iap_conn(admin), "/admin/users")
       assert html =~ ~s(value="admin:PAY")
       assert html =~ ~s(value="access:project:configured")
       render_change(element(admin_view, "#grant-#{mia.id}"), %{"account" => mia.id, "choice" => "admin:PAY"})
@@ -448,7 +366,7 @@ defmodule SymphonyElixir.AuthTest do
       assert %{team_admin: ["PAY"]} = Users.get(mia.id)
 
       # Mia, now a PAY admin, manages access but not accounts.
-      {:ok, view, html} = live(session_for(mia), "/admin/users")
+      {:ok, view, html} = live(iap_conn(mia), "/admin/users")
       refute html =~ ~s(phx-click="disable")
       refute html =~ "admin:PAY"
       assert html =~ ~s(value="access:PAY")
@@ -476,7 +394,7 @@ defmodule SymphonyElixir.AuthTest do
       render_hook(view, "grant", %{"account" => lee.id, "choice" => "bogus"})
       assert render(view) =~ "Pick a team or project."
       render_hook(view, "grant", %{"account" => lee.id, "choice" => ""})
-      render_hook(view, "approve", %{"id" => lee.id})
+      render_hook(view, "disable", %{"id" => lee.id})
       assert render(view) =~ "Only admins can manage accounts."
 
       view |> element(~s(button[phx-click="revoke"][phx-value-choice="access:PAY"])) |> render_click()
@@ -488,17 +406,11 @@ defmodule SymphonyElixir.AuthTest do
       admin_view |> element(~s(button[phx-click="revoke"][phx-value-choice="admin:PAY"])) |> render_click()
       assert render(admin_view) =~ "No longer a PAY admin."
 
-      # No one signed in, no rights; a session that ended is sent to sign in.
+      # No one signed in, no rights; a session that ended reloads the page through IAP.
       assert Auth.movable_projects(nil) == []
       refute Auth.can_grant?(nil, "PAY")
       {:ok, _} = Users.disable(mia.id, "ada")
-      assert {:error, {:redirect, %{to: "/login"}}} = render_hook(view, "grant", %{"account" => lee.id, "choice" => "access:PAY"})
-    end
-
-    test "repeated sign-in attempts from one address are rate limited" do
-      statuses = for _ <- 1..21, do: post(build_conn(), "/login", %{"login" => "mia", "password" => "nope nope nope"}).status
-      assert List.last(statuses) == 429
-      assert Enum.count(statuses, &(&1 == 401)) == 20
+      assert {:error, {:redirect, %{to: "/"}}} = render_hook(view, "grant", %{"account" => lee.id, "choice" => "access:PAY"})
     end
   end
 end
