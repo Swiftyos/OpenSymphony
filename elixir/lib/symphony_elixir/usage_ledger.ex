@@ -93,27 +93,28 @@ defmodule SymphonyElixir.UsageLedger do
 
   def observe_issue(%Issue{identifier: identifier} = issue, opts) when is_binary(identifier) do
     with true <- ready?(),
-         node when is_binary(node) <- factory_node(issue) do
+         node when is_binary(node) <- factory_node(issue) || observe_outside_flow(issue, opts) do
       now = System.system_time(:millisecond)
 
-      meta = issue_meta(issue)
-
       case :ets.lookup(@issues_table, identifier) do
-        # Same stage: keep where it came from, and save only if the title or
-        # approval flag changed.
+        # Same stage: keep where it came from, and save only if the title,
+        # state, label or approval flag changed.
         [{^identifier, ^node, since, old}] ->
+          meta = issue_meta(issue, old, opts)
           refresh_meta(identifier, node, since, old, meta |> Map.put(:from, old[:from]) |> Map.put(:moves, old[:moves] || []))
 
         [{^identifier, previous, _since, old}] ->
+          meta = issue_meta(issue, old, opts)
           # Counted per team and project: their flows can share stage ids.
-          key = {team_key(identifier), issue.project_slug, previous, node}
-          :ets.update_counter(@edges_table, key, {2, 1}, {key, 0})
+          # Moves of issues without the opt-in label aren't counted.
+          count_edge(meta.labeled, {team_key(identifier), issue.project_slug, previous, node})
           # The issue's own move history, in order, for knock-back counts and its report.
           moves = Enum.take((old[:moves] || []) ++ [move_entry(issue, previous, node, now, opts)], -@max_moves)
           :ets.insert(@issues_table, {identifier, node, now, meta |> Map.put(:from, previous) |> Map.put(:moves, moves)})
           mark_dirty()
 
         [] ->
+          meta = issue_meta(issue, nil, opts)
           :ets.insert(@issues_table, {identifier, node, now, meta |> Map.put(:from, nil) |> Map.put(:moves, [])})
           mark_dirty()
       end
@@ -123,6 +124,21 @@ defmodule SymphonyElixir.UsageLedger do
   end
 
   def observe_issue(_issue, _opts), do: :ok
+
+  # A tracked issue in a state its flow has no stage for (moved there in
+  # Linear) keeps its stage, but its state and labels are brought up to date.
+  defp observe_outside_flow(%Issue{identifier: identifier} = issue, opts) do
+    with true <- ready?(),
+         [{^identifier, node, since, old}] <- :ets.lookup(@issues_table, identifier) do
+      meta = issue |> issue_meta(old, opts) |> Map.put(:from, old[:from]) |> Map.put(:moves, old[:moves] || [])
+      refresh_meta(identifier, node, since, old, meta)
+    end
+
+    :ok
+  end
+
+  defp count_edge(true, key), do: :ets.update_counter(@edges_table, key, {2, 1}, {key, 0})
+  defp count_edge(_labeled, _key), do: :ok
 
   defp move_entry(issue, previous, node, now, opts) do
     if Keyword.get(opts, :external, false) and terminal_node?(issue, node) do
@@ -199,7 +215,12 @@ defmodule SymphonyElixir.UsageLedger do
   @spec projects() :: %{String.t() => %{name: String.t() | nil, teams: [String.t()]}}
   def projects do
     if ready?() do
-      (Enum.map(:ets.tab2list(@usage_table), &project_row/1) ++ Enum.map(:ets.tab2list(@issues_table), &project_row/1))
+      flow_rows =
+        for {_issue, _node, _since, meta} = row <- :ets.tab2list(@issues_table), meta[:labeled] != false do
+          project_row(row)
+        end
+
+      (Enum.map(:ets.tab2list(@usage_table), &project_row/1) ++ flow_rows)
       |> Enum.filter(fn {project, _team, _issue, _name} -> is_binary(project) end)
       |> Enum.group_by(&elem(&1, 0))
       |> Map.new(fn {project, rows} -> {project, %{name: Enum.find_value(rows, &elem(&1, 3)), teams: teams_by_issue_count(rows)}} end)
@@ -207,6 +228,17 @@ defmodule SymphonyElixir.UsageLedger do
       %{}
     end
   end
+
+  @doc """
+  Whether the ledger tracks the issue and it lacks the opt-in label
+  (`tracker.require_label`), so it must not be shown.
+  """
+  @spec hidden?(String.t()) :: boolean()
+  def hidden?(identifier) when is_binary(identifier) do
+    ready?() and match?([{_identifier, _node, _since, %{labeled: false}}], :ets.lookup(@issues_table, identifier))
+  end
+
+  def hidden?(_identifier), do: false
 
   @doc """
   The stage an issue was in before its current one, or nil.
@@ -233,6 +265,7 @@ defmodule SymphonyElixir.UsageLedger do
 
       moves =
         case :ets.lookup(@issues_table, identifier) do
+          [{^identifier, _node, _since, %{labeled: false}}] -> []
           [{^identifier, _node, _since, meta}] -> meta[:moves] || []
           [] -> []
         end
@@ -243,8 +276,19 @@ defmodule SymphonyElixir.UsageLedger do
     end
   end
 
+  @doc """
+  Usage and flow, for showing. Issues without `tracker.require_label` (the
+  opt-in label) are left out: Symphony never shows them (it still tracks them,
+  so adding the label shows them again with their history).
+  """
   @spec snapshot() :: %{usage: [map()], flow: %{edges: [map()], issues: [map()]}}
   def snapshot do
+    snapshot = all()
+    put_in(snapshot, [:flow, :issues], Enum.filter(snapshot.flow.issues, & &1.labeled))
+  end
+
+  # Everything, opted in or not: what is saved.
+  defp all do
     if ready?() do
       %{
         usage: Enum.map(:ets.tab2list(@usage_table), &usage_row/1),
@@ -356,7 +400,7 @@ defmodule SymphonyElixir.UsageLedger do
 
   defp persist_if_dirty(path) do
     if take_dirty() do
-      snapshot = snapshot()
+      snapshot = all()
       body = Jason.encode!(%{version: @format_version, usage: snapshot.usage, flow: snapshot.flow})
 
       case SymphonyElixir.StateStore.write(path, body) do
@@ -375,7 +419,10 @@ defmodule SymphonyElixir.UsageLedger do
          {:ok, %{"usage" => usage, "flow" => flow}} <- Jason.decode(body) do
       Enum.each(usage, &load_usage_row/1)
       Enum.each(Map.get(flow, "edges", []), &load_edge/1)
-      Enum.each(Map.get(flow, "issues", []), &load_flow_issue/1)
+      # Saved before the opt-in flag was kept: an issue an agent worked on was
+      # opted in; any other is hidden until the next poll reads its labels.
+      worked = MapSet.new(usage, & &1["issue"])
+      Enum.each(Map.get(flow, "issues", []), &load_flow_issue(&1, worked))
     else
       {:error, :enoent} -> :ok
       other -> Logger.warning("Usage ledger load skipped path=#{path} reason=#{inspect(other, limit: 5)}")
@@ -396,7 +443,7 @@ defmodule SymphonyElixir.UsageLedger do
   defp load_edge(%{"from" => from, "to" => to, "count" => count} = row),
     do: :ets.insert(@edges_table, {{row["team"], row["project"], from, to}, count})
 
-  defp load_flow_issue(row) do
+  defp load_flow_issue(row, worked) do
     meta = %{
       id: row["id"],
       title: row["title"],
@@ -404,6 +451,9 @@ defmodule SymphonyElixir.UsageLedger do
       team: row["team"],
       url: row["url"],
       awaiting_approval: row["awaiting_approval"] == true,
+      state: row["state"],
+      state_type: row["state_type"],
+      labeled: if(is_boolean(row["labeled"]), do: row["labeled"], else: MapSet.member?(worked, row["issue"])),
       from: row["from"],
       moves: for([from, to, at | by] <- row["moves"] || [], do: [from, to, at | Enum.take(by, 1)])
     }
@@ -441,6 +491,9 @@ defmodule SymphonyElixir.UsageLedger do
       team: meta[:team],
       url: meta[:url],
       awaiting_approval: meta[:awaiting_approval] == true,
+      state: meta[:state],
+      state_type: meta[:state_type],
+      labeled: meta[:labeled] != false,
       from: meta[:from],
       moves: meta[:moves] || []
     }
@@ -459,16 +512,36 @@ defmodule SymphonyElixir.UsageLedger do
     |> Enum.map(&elem(&1, 0))
   end
 
-  defp issue_meta(%Issue{} = issue) do
+  # An issue read back from Linear (`external: true`) carries its real labels
+  # and state type. A move Symphony made passes the labels it set and the
+  # target state's name only, so the opt-in flag and the state type are kept
+  # from the last read (a state's type is looked up in the team's states when
+  # the name changed).
+  defp issue_meta(%Issue{} = issue, old, opts) do
+    team = team_key(issue.identifier)
+    external? = Keyword.get(opts, :external, false)
+
     %{
       id: issue.id,
       title: issue.title,
       project: issue.project_slug,
-      team: team_key(issue.identifier),
+      team: team,
       url: issue.url,
-      awaiting_approval: IssueStage.awaiting_approval?(issue)
+      awaiting_approval: IssueStage.awaiting_approval?(issue),
+      state: issue.state,
+      state_type: state_type(issue, team, old, external?),
+      labeled: labeled?(issue, old, external?)
     }
   end
+
+  defp state_type(%Issue{state_type: type}, _team, _old, true) when is_binary(type), do: type
+  defp state_type(%Issue{state: state}, _team, %{state: state, state_type: type}, _external?) when is_binary(type), do: type
+  defp state_type(%Issue{state: state}, team, _old, _external?), do: SymphonyElixir.Teams.state_type(team, state)
+
+  # Issues Symphony moved were opted in when it picked them up.
+  defp labeled?(issue, _old, true), do: IssueStage.opted_in?(issue, Config.settings!())
+  defp labeled?(_issue, %{labeled: labeled}, false) when is_boolean(labeled), do: labeled
+  defp labeled?(_issue, _old, false), do: true
 
   defp team_key(identifier) when is_binary(identifier) do
     case String.split(identifier, "-", parts: 2) do

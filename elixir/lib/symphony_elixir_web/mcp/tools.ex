@@ -33,7 +33,7 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
   }
 
   alias SymphonyElixir.Factory.Store
-  alias SymphonyElixirWeb.{Endpoint, FactoryPresenter, ObservabilityPubSub, Presenter, Visibility}
+  alias SymphonyElixirWeb.{Endpoint, FactoryPresenter, ObservabilityPubSub, Overview, Presenter, Visibility}
   alias SymphonyElixirWeb.Mcp.Manual
 
   @type context :: %{user: Auth.User.t(), actor: String.t(), via: String.t()}
@@ -59,8 +59,11 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
     %{
       name: "symphony_status",
       scope: "read",
-      description: "Overview of the factory: agents running and retrying (issue, stage, harness, turns, tokens, latest event), capacity, polling, rate limits, and whether a restart is pending.",
-      properties: %{},
+      description:
+        "Overview of the factory: agents running and retrying (issue, stage, harness, turns, tokens, latest event), capacity, polling, rate limits, whether a restart is pending, and `overview`: the issues you can see across teams counted by Linear state (state type, then state name, per team) and per team, as the dashboard's overview shows them. Teams run different flows, so this groups by Linear state, not stage.",
+      properties: %{
+        teams: %{type: "array", items: %{type: "string"}, description: "Only these team keys in `overview` (default: every team you can see)."}
+      },
       required: []
     },
     %{
@@ -81,9 +84,12 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
     %{
       name: "list_issues",
       scope: "read",
-      description: "Issues Symphony is tracking that you can see, with their stage, flow, and whether they are waiting for approval.",
+      description:
+        "Issues Symphony is tracking that you can see (only issues with the install's opt-in label), with their team, Linear state and state type, stage, flow, and whether they are waiting for approval.",
       properties: %{
         scope: %{type: "string", description: "Only issues on this flow (team key or project:<slug>)."},
+        team: %{type: "string", description: "Only issues of this team (key), whichever flow they follow."},
+        state_type: %{type: "string", enum: ["triage", "backlog", "unstarted", "started", "completed", "canceled"], description: "Only issues whose Linear state is of this type."},
         stage: %{type: "string", description: "Only issues in this stage id."},
         awaiting_approval: %{type: "boolean", description: "Only issues held for a person's approval."}
       },
@@ -301,13 +307,16 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
     end
   end
 
-  defp run("symphony_status", _args, ctx) do
+  defp run("symphony_status", args, ctx) do
     with {:ok, payload} <- state(ctx) do
+      teams = args |> Map.get("teams") |> List.wrap() |> Enum.filter(&is_binary/1) |> Enum.map(&String.upcase(String.trim(&1)))
+
       {:ok,
        payload
        |> Map.take([:generated_at, :counts, :running, :retrying, :capacity, :polling, :rate_limits, :delayed_restart, :agent_totals])
        |> Map.update(:running, [], fn entries -> Enum.map(entries, &session_summary/1) end)
-       |> Map.update(:retrying, [], fn entries -> Enum.map(entries, &session_summary/1) end)}
+       |> Map.update(:retrying, [], fn entries -> Enum.map(entries, &session_summary/1) end)
+       |> Map.put(:overview, Overview.summary(get_in(payload, [:factory, :overview]) || [], teams: teams))}
     end
   end
 
@@ -358,6 +367,7 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
     with {:ok, %{factory: factory}} <- state(ctx) do
       scope = args["scope"]
       stage = args["stage"]
+      states = Map.new(factory[:overview] || [], &{&1.issue, &1})
 
       issues =
         for {key, flow} <- factory.flows,
@@ -365,8 +375,9 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
             {stage_id, node} <- flow.nodes,
             is_nil(stage) or stage_id == stage,
             issue <- node.issues,
-            args["awaiting_approval"] != true or issue.awaiting do
-          issue |> issue_summary() |> Map.merge(%{flow: key, stage: stage_id})
+            row = states[issue.issue] || %{},
+            issue_matches?(issue, row, args) do
+          issue |> issue_summary() |> Map.merge(%{flow: key, stage: stage_id, state: row[:state], state_type: row[:state_type]})
         end
 
       {:ok, %{issues: Enum.sort_by(issues, & &1.identifier), count: length(issues)}}
@@ -644,6 +655,14 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
     ])
   end
 
+  # list_issues' filters by team, Linear state type and held approval.
+  defp issue_matches?(issue, row, args) do
+    team = if is_binary(args["team"]), do: String.upcase(String.trim(args["team"]))
+
+    (is_nil(team) or issue.team == team) and (args["awaiting_approval"] != true or issue.awaiting) and
+      (not is_binary(args["state_type"]) or row[:state_type] == args["state_type"])
+  end
+
   defp issue_summary(issue) do
     %{
       identifier: issue.issue,
@@ -707,8 +726,9 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
 
   # An issue is visible by its team (as on the dashboard) or, for project
   # grants, by the project Symphony saw it in.
+  # Issues without the opt-in label are never shown, to anyone.
   defp visible(user, identifier) do
-    if Policy.can?(user, {:view_issue, identifier, ledger_project(identifier)}),
+    if not UsageLedger.hidden?(identifier) and Policy.can?(user, {:view_issue, identifier, ledger_project(identifier)}),
       do: :ok,
       else: {:error, "Issue #{identifier} not found."}
   end

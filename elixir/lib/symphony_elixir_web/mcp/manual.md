@@ -23,7 +23,10 @@ most: **Set up a new project**, **How Symphony picks the repo**, **Working acros
 | Project | A Linear project Symphony listens to (`list_projects`), mapped to one **primary** GitHub repo and optionally more repos (`repos`). |
 | Home repo | The one repo an issue is worked in: its workspace, branch, commits and PR are there. See **How Symphony picks the repo**. |
 | Reference repos | The project's other repos, checked out read-only beside the home repo under `.symphony/repos/<name>`. |
-| Flow | The stages issues move through and the moves between them. An issue follows its project's own flow if it has one, else its team's, else the organisation default (`DEFAULT`). |
+| Flow | The stages issues move through and the moves between them. An issue follows its project's own flow if it has one, else its team's, else the organisation default (`DEFAULT`). Admins edit `DEFAULT` (dashboard: Overview -> **Default flow**); a team's members and team admins edit their team's flow. |
+| Team | A Linear team Symphony knows: one with work, a flow, or added by an admin or the accounts import (no project needed). A team follows `DEFAULT` until it gets its own flow. |
+| Overview | What people who see several teams land on: issues by **Linear state** (Triage, Backlog, Todo, In progress, Done, Canceled; then each team's state names) across teams, since teams' flows differ. `symphony_status` returns the same as `overview`. |
+| Opt-in label | The install's `require_label` (e.g. `auto-build`). Issues without it are never dispatched and never shown: not on the dashboard, the overview, or by any tool here. |
 | Stage | A step in a flow, e.g. Todo, Implement, In Review. In Linear a stage is the issue's workflow state plus, where states are shared, a `factory/<stage>` label. |
 | Stage kind | `queue` (waiting for an agent), `agent` (an agent works it), `human` (waits for a person; agents never touch it), `parked` (on hold, e.g. Blocked), `done`. |
 | Transition | An allowed move between two stages, with **who** makes it (`agent` or `human`) and **when** (its criteria). |
@@ -280,10 +283,10 @@ Read:
 | Tool | Arguments | What it does |
 | --- | --- | --- |
 | `get_manual` | `section` (optional) | This manual, or one section. Also the resources `symphony://manual` and `symphony://manual/<section>`. |
-| `symphony_status` | none | Agents running and retrying (issue, stage, harness, turns, tokens, latest event), capacity, polling, rate limits, pending restart. |
+| `symphony_status` | `teams` (optional, team keys) | Agents running and retrying (issue, stage, harness, turns, tokens, latest event), capacity, polling, rate limits, pending restart, and `overview`: the issues you can see counted by Linear state type, then state name (with per-team counts), and per team, like the dashboard's overview. |
 | `list_flows` | none | The flows you can see (default, teams, projects), which flow each uses, version, stage ids, whether you may edit it. |
 | `get_flow` | `scope`: `DEFAULT`, a team key, or `project:<slug>` | A flow's definition (stages, settings, transitions, autopilot), the issues in each stage, and its `version`. |
-| `list_issues` | `scope`, `stage`, `awaiting_approval` (all optional) | Issues Symphony tracks, with stage, flow and whether a move is held for approval. |
+| `list_issues` | `scope`, `team`, `state_type`, `stage`, `awaiting_approval` (all optional) | Issues Symphony tracks (with the opt-in label), with team, Linear `state` and `state_type`, stage, flow and whether a move is held for approval. |
 | `get_issue` | `identifier` (e.g. `WEB-12`) | Stage, previous stage, move history, live session or retry, and messages to its agent. A move with `by: "external"` closed the issue outside the factory (in Linear, or a PR merge integration). |
 | `get_transcript` | `identifier`, `limit` (default 50, max 200) | The newest transcript entries: messages, thinking, commands with output, edits, tool calls, turns. |
 | `list_projects` | none | The projects Symphony listens to: primary `repo`, `repos`, branch, harness, environment, `source` (`config` or `mcp`) and whether it's active. |

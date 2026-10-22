@@ -604,8 +604,9 @@ defmodule SymphonyElixir.FactoryEditorTest do
         assert_push_event(view, "factory_assist_result", %{ref: ^ref, ok: true, suggestion: suggestion}, 5_000)
         assert %{summary: "Same flow.", changes: %{added: [], removed: []}} = suggestion
 
+        # The default flow, which every team without its own follows, is admins' only.
         render_hook(view, "factory_assist_flow", %{"team" => "DEFAULT", "request" => "x"})
-        assert_reply(view, %{ok: false, error: "Only this team's members" <> _})
+        assert_reply(view, %{ok: false, error: "Only admins can do that."})
 
         # Saving a project flow syncs its labels to the project's teams.
         render_hook(view, "factory_save", %{"team" => "project:checkout", "version" => 0, "definition" => template})

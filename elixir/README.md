@@ -930,7 +930,7 @@ symphony state export <state-dir> <out.tar.gz|->
 symphony state import <archive.tar.gz|-> [--dry-run] [--overwrite] [--skip-secret-key-base] [--state-dir <dir>]
 ```
 
-- **What moves.** Only these documents, from a fixed list (never a directory walk): `users.json`, `mcp_tokens.json`, `project_routes.json`, `factories/<scope>.json`, `usage.json`, `session_history.json`, `inbox.json` (queued messages for agents) and `secret_key_base`.
+- **What moves.** Only these documents, from a fixed list (never a directory walk): `users.json`, `mcp_tokens.json`, `project_routes.json`, `teams.json`, `factories/<scope>.json`, `usage.json`, `session_history.json`, `inbox.json` (queued messages for agents) and `secret_key_base`.
 - **What stays, and why.**
   - `sessions.json`: agent sessions to resume, pointing at this host's workspaces and agent session files.
   - `retries.json`: this host's retry queue, with its worker host and workspace paths. Issues still in an agent state are picked up again by the first poll.
@@ -1424,14 +1424,30 @@ server:
   before people first sign in (`SymphonyElixir.Users.Import`). The CSV decides the role for each
   team it lists; other grants stay, a global admin listed as a viewer stays an admin, nobody is
   removed, and running it again changes nothing. Provisioned accounts may sign in even without a
-  Linear user. Post the CSV to the running controller with an admin's MCP token, through a
-  port-forward (the load balancer keeps the path behind IAP); `?dry_run=true` only reports:
+  Linear user. Team ids are looked up in Linear with Symphony's Linear key; a team Symphony
+  didn't know yet is added (see **Teams** below) and listed in the report's `teams_added`. A team
+  the key can't see is a row error unless the row gives its key in an optional
+  `linear_team_key` column. Post the CSV to the running controller with an admin's MCP token,
+  through a port-forward (the load balancer keeps the path behind IAP); `?dry_run=true` only
+  reports:
 
   ```bash
   kubectl -n symphony port-forward deploy/symphony-controller 14000:4000 &
   curl -sS -X POST 'http://127.0.0.1:14000/admin/users/import?dry_run=true' \
     -H "Authorization: Bearer $SYMPHONY_MCP_TOKEN" -H 'Content-Type: text/csv' --data-binary @- < people.csv
   ```
+- **Teams**: Symphony knows a Linear team once it has work, its own flow, or was added: by an
+  admin on the Users page (**Add team**, by Linear key or id) or by the CSV import. No project
+  is needed. Known teams are stored in `~/.symphony/teams.json` with their Linear name and
+  workflow states, show in the team picker, can be given to people, and follow the **default
+  flow** until they get their own. Only admins edit the default flow (dashboard: **Default
+  flow →**, or MCP `save_flow` with scope `DEFAULT`); team members and team admins edit their
+  team's flow, which then overrides the default for that team.
+- **All teams**: with All teams and All projects picked, someone who sees several teams gets a
+  read-only flow whose stages are Linear states (Backlog, Todo, In Progress, In Review, Done,
+  Canceled, plus the teams' own state names), holding the issues Symphony is working on across
+  those teams. Picking one team or project shows its own flow, to act in. Only issues with
+  `tracker.require_label` are shown anywhere: the dashboard, MCP, the JSON API and traces.
 - The session cookie only carries the IAP-verified account to the dashboard's live connection,
   for an hour after IAP last checked it; after that the page reloads through IAP. It's encrypted
   and signed with `server.secret_key_base` (or `SYMPHONY_SECRET_KEY_BASE`). If neither is set,

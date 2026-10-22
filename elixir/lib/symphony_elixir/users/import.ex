@@ -13,8 +13,16 @@ defmodule SymphonyElixir.Users.Import do
     * `global_viewer` with no team: sees every team, changes nothing
       (`SymphonyElixir.Policy`).
 
-  Team ids are turned into team keys (`PAY`) through Linear, or the `teams:`
-  option (`%{id => key}`).
+  An optional `linear_team_key` column (`PAY`) names a team's key outright.
+
+  Team ids are turned into team keys (`PAY`) by the teams Symphony knows
+  (`SymphonyElixir.Teams`), else by looking the ids up in Linear, else by the
+  row's `linear_team_key`; the `teams:` option (`%{id => key}`) stands in for
+  Linear. A team Symphony didn't know yet is added to `SymphonyElixir.Teams`
+  (with its name and workflow states from Linear), so it shows in the
+  dashboard and follows the default flow; the report lists them in
+  `teams_added`. A team Linear doesn't return for Symphony's Linear API key
+  (the key can't see it) and with no `linear_team_key` is a row problem.
 
   Rules:
 
@@ -29,7 +37,7 @@ defmodule SymphonyElixir.Users.Import do
       the CSV doesn't list are only reported.
     * Running it again with the same CSV changes nothing.
     * A row with a problem (bad email, unknown role or team) is reported, and
-      nothing is written unless `skip_invalid: true`.
+      nothing (accounts or teams) is written unless `skip_invalid: true`.
 
   Options: `dry_run:` (report only), `teams:`, `skip_invalid:`, `by:` (who to
   record, `"import"` by default).
@@ -37,20 +45,11 @@ defmodule SymphonyElixir.Users.Import do
 
   require Logger
 
-  alias SymphonyElixir.{Config, Users}
+  alias SymphonyElixir.{Teams, Users}
 
   @columns ["email", "linear_team_name", "linear_team_id", "role"]
+  @optional_columns ["linear_team_key"]
   @team_roles ["member", "admin"]
-  @teams_query """
-  query SymphonyTeamKeys {
-    teams(first: 250) {
-      nodes {
-        id
-        key
-      }
-    }
-  }
-  """
 
   @type report :: %{
           dry_run: boolean(),
@@ -58,6 +57,7 @@ defmodule SymphonyElixir.Users.Import do
           rows: non_neg_integer(),
           accounts: non_neg_integer(),
           teams: non_neg_integer(),
+          teams_added: [String.t()],
           created: non_neg_integer(),
           updated: non_neg_integer(),
           unchanged: non_neg_integer(),
@@ -75,8 +75,8 @@ defmodule SymphonyElixir.Users.Import do
     with {:ok, body} <- read(path_or_binary),
          {:ok, rows} <- parse(body),
          :ok <- admin_present(),
-         {:ok, teams} <- team_keys(opts) do
-      run(rows, teams, opts)
+         {:ok, teams, new_teams} <- team_keys(rows, opts) do
+      run(rows, teams, new_teams, opts)
     end
   end
 
@@ -85,7 +85,7 @@ defmodule SymphonyElixir.Users.Import do
   def summary(report) do
     report
     |> Map.take([:dry_run, :written, :rows, :accounts, :teams, :created, :updated, :unchanged, :admins_kept])
-    |> Map.merge(%{errors: length(report.errors), not_in_csv: length(report.not_in_csv)})
+    |> Map.merge(%{errors: length(report.errors), not_in_csv: length(report.not_in_csv), teams_added: length(report.teams_added)})
   end
 
   # Contents have a line break; anything else is a path.
@@ -113,7 +113,7 @@ defmodule SymphonyElixir.Users.Import do
   defp rows_by_column(header, rows) do
     case @columns -- header do
       [] ->
-        index = Map.new(@columns, &{&1, Enum.find_index(header, fn name -> name == &1 end)})
+        index = Map.new(@columns ++ Enum.filter(@optional_columns, &(&1 in header)), &{&1, Enum.find_index(header, fn name -> name == &1 end)})
         {:ok, for({fields, line} <- Enum.with_index(rows, 2), fields not in [[], [""]], do: row(index, fields, line))}
 
       missing ->
@@ -153,38 +153,76 @@ defmodule SymphonyElixir.Users.Import do
       else: {:error, :no_admin_account}
   end
 
-  defp team_keys(opts) do
+  # Team ids to keys: teams Symphony knows, then Linear (or the `teams:`
+  # option), then the CSV's own `linear_team_key`. Teams Symphony didn't know
+  # come back to be added.
+  defp team_keys(rows, opts) do
+    wanted = team_refs(rows)
+    known = for {id, _ref} <- wanted, team = Teams.by_id(id), into: %{}, do: {id, team.key}
+    unknown = wanted |> Map.keys() |> Enum.reject(&Map.has_key?(known, &1))
+
+    with {:ok, found} <- linear_teams(unknown, opts) do
+      new_teams =
+        for id <- unknown, team = found[id] || csv_team(id, wanted[id]), is_binary(team.key) do
+          Map.update(team, :name, wanted[id].name, &(&1 || wanted[id].name))
+        end
+
+      {:ok, Map.merge(known, Map.new(new_teams, &{&1.id, &1.key})), new_teams}
+    end
+  end
+
+  # Each team id the rows name, with the name and key the CSV gives it.
+  defp team_refs(rows) do
+    for %{"linear_team_id" => id} = row <- rows, id != "", String.downcase(row["role"]) in @team_roles, reduce: %{} do
+      acc ->
+        key = row |> Map.get("linear_team_key", "") |> String.trim() |> String.upcase()
+        name = if row["linear_team_name"] == "", do: nil, else: row["linear_team_name"]
+
+        Map.update(acc, id, %{name: name, key: if(key == "", do: nil, else: key)}, fn ref ->
+          %{name: ref.name || name, key: ref.key || if(key == "", do: nil, else: key)}
+        end)
+    end
+  end
+
+  defp csv_team(id, %{key: key} = ref) when is_binary(key) do
+    if Regex.match?(~r/^[A-Z0-9][A-Z0-9_-]{0,15}$/, key), do: %{id: id, key: key, name: ref.name, states: []}
+  end
+
+  defp csv_team(_id, _ref), do: nil
+
+  defp linear_teams([], _opts), do: {:ok, %{}}
+
+  defp linear_teams(ids, opts) do
     case Keyword.get(opts, :teams) do
-      %{} = teams -> {:ok, teams}
-      nil -> linear_team_keys()
+      %{} = given ->
+        {:ok, for({id, key} <- given, id in ids, into: %{}, do: {id, %{id: id, key: key, name: nil, states: []}})}
+
+      nil ->
+        case Teams.lookup(ids, []) do
+          {:ok, found, _missing} -> {:ok, Map.new(found, &{&1.id, &1})}
+          # Without Linear, only the CSV's keys can name teams.
+          {:error, :linear_not_configured} -> {:ok, %{}}
+          {:error, reason} -> {:error, reason}
+        end
     end
   end
-
-  defp linear_team_keys do
-    settings = Config.settings!()
-
-    if settings.tracker.kind == "linear" and is_binary(settings.tracker.api_key) do
-      case client().graphql(@teams_query, %{}, []) do
-        {:ok, %{"data" => %{"teams" => %{"nodes" => nodes}}}} when is_list(nodes) -> {:ok, Map.new(nodes, &{&1["id"], &1["key"]})}
-        other -> {:error, {:linear_teams_unavailable, inspect(other, limit: 3)}}
-      end
-    else
-      {:error, :linear_not_configured}
-    end
-  end
-
-  defp client, do: Application.get_env(:symphony_elixir, :linear_client_module, SymphonyElixir.Linear.Client)
 
   # ------------------------------------------------------------------ plan
 
-  defp run(rows, teams, opts) do
+  defp run(rows, teams, new_teams, opts) do
     {wanted, errors} = Enum.reduce(rows, {%{}, []}, &collect(&1, &2, teams))
     errors = Enum.reverse(errors)
     accounts = Users.list()
     plans = for {email, want} <- Enum.sort(wanted), do: plan(email, want, Enum.find(accounts, &(&1.email == email)))
     changed = Enum.reject(plans, &(&1.action == :unchanged))
     dry_run? = Keyword.get(opts, :dry_run, false)
-    write? = not dry_run? and changed != [] and (errors == [] or Keyword.get(opts, :skip_invalid, false))
+    valid? = errors == [] or Keyword.get(opts, :skip_invalid, false)
+    write? = not dry_run? and changed != [] and valid?
+
+    # Teams first: the accounts' grants name them.
+    if not dry_run? and valid? and new_teams != [] do
+      {:ok, _teams} = Teams.register(new_teams, Keyword.get(opts, :by, "import"))
+    end
 
     if write? do
       {:ok, _accounts} = Users.provision(Enum.map(changed, &{&1.email, &1.attrs}), Keyword.get(opts, :by, "import"))
@@ -196,6 +234,7 @@ defmodule SymphonyElixir.Users.Import do
       rows: length(rows),
       accounts: map_size(wanted),
       teams: wanted |> Map.values() |> Enum.flat_map(&Map.keys(&1.teams)) |> Enum.uniq() |> length(),
+      teams_added: new_teams |> Enum.map(& &1.key) |> Enum.sort(),
       created: Enum.count(plans, &(&1.action == :created)),
       updated: Enum.count(plans, &(&1.action == :updated)),
       unchanged: Enum.count(plans, &(&1.action == :unchanged)),
@@ -228,7 +267,11 @@ defmodule SymphonyElixir.Users.Import do
         {wanted, [%{line: line, reason: "#{role} needs a linear_team_id"} | errors]}
 
       not is_binary(teams[team_id]) ->
-        {wanted, [%{line: line, reason: "unknown Linear team id #{team_id}"} | errors]}
+        reason =
+          "unknown Linear team id #{team_id}: Symphony's Linear API key can't see that team; " <>
+            "give the key access to it, or add the team's key in a linear_team_key column"
+
+        {wanted, [%{line: line, reason: reason} | errors]}
 
       true ->
         want = Map.get(wanted, email, %{global_viewer: false, teams: %{}})

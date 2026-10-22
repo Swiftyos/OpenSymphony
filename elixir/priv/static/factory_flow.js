@@ -469,6 +469,13 @@
     return (this.data && this.data.flows && this.data.flows[this.team]) || { nodes: {}, edges: {} };
   };
 
+  // The all-teams flow: Linear states across teams, drawn from the issues.
+  // Nothing in it is edited, controlled or moved; a team's own flow is.
+  Flow.prototype.derived = function () {
+    var entry = this.entry();
+    return !!(entry && entry.kind === "overview");
+  };
+
   Flow.prototype.canEdit = function () {
     return !!(this.data && this.data.can_edit && this.data.can_edit[this.team]);
   };
@@ -493,6 +500,7 @@
     var t = this.entry(key);
     if (!t) return key && key.indexOf("project:") === 0 ? key.slice(8) : key || "";
     if (t.kind === "default") return "Default flow";
+    if (t.kind === "overview") return t.name || "All teams";
     if (t.kind === "project") return t.name || t.slug;
     return t.key + (t.name ? " · " + t.name : "");
   };
@@ -542,7 +550,7 @@
         var option = el("option", null, self.scopeLabel(t.key) + suffix);
         option.value = t.key;
         option.selected = t.key === self.team;
-        if (t.kind === "default") select.appendChild(option);
+        if (t.kind === "default" || t.kind === "overview") select.appendChild(option);
         else groups[t.kind === "project" ? "project" : "team"].appendChild(option);
       });
       if (groups.team.children.length) select.appendChild(groups.team);
@@ -564,7 +572,9 @@
 
     var definition = this.definition();
     var entry = this.entry();
-    if (definition && definition.inherited && this.mode === "view") {
+    if (this.derived()) {
+      bar.appendChild(el("span", "fx-flow-meta", "Linear states across teams · read-only"));
+    } else if (definition && definition.inherited && this.mode === "view") {
       var from = this.sourceLabel(definition.source);
       bar.appendChild(el("span", "fx-flow-meta", "Using the " + from + " flow"));
     } else if (definition && definition.updated_by && this.mode === "view") {
@@ -611,7 +621,7 @@
       }));
     }
 
-    if (this.mode === "view" && definition) {
+    if (this.mode === "view" && definition && !this.derived()) {
       var auto = autopilotOf(definition);
       var chip = button(auto.enabled ? "✋ Earned autonomy · " + auto.streak + " in a row" : "✋ Earned autonomy: off", "fx-chip fx-autopilot" + (auto.enabled ? " is-on" : ""), function () {
         self.openAutopilot(chip);
@@ -1544,7 +1554,8 @@
     if (stage.instructions) drawer.appendChild(el("p", "fx-drawer-copy fx-instructions", stage.instructions));
     else drawer.appendChild(el("p", "fx-drawer-copy", KIND_HELP[stage.kind]));
 
-    if (DISPATCHABLE[stage.kind]) this.controls(drawer, stage);
+    var derived = this.derived();
+    if (DISPATCHABLE[stage.kind] && !derived) this.controls(drawer, stage);
 
     var listHead = el("div", "fx-drawer-subhead");
     listHead.appendChild(el("span", null, info.count + (info.count === 1 ? " issue" : " issues")));
@@ -1555,9 +1566,11 @@
     var out = this.definition().transitions.filter(function (t) {
       return t.from === stage.id;
     });
-    var humanMoves = out.filter(function (t) {
-      return t.by === "human";
-    });
+    var humanMoves = derived
+      ? []
+      : out.filter(function (t) {
+          return t.by === "human";
+        });
     var movesFor = function () {
       return humanMoves;
     };
@@ -1566,6 +1579,7 @@
     // Project flows hold issues from several teams: moving needs the issue's
     // team, or access to its project.
     var canMove = function (issue) {
+      if (derived) return false;
       if (movable === "all" || (Array.isArray(movable) && movable.indexOf(issue.team) !== -1)) return true;
       return !!issue.project && movableProjects.indexOf(issue.project) !== -1;
     };
@@ -1583,6 +1597,11 @@
       }
       line.appendChild(idEl);
       if (issue.backend) line.appendChild(el("span", "fx-dot h-" + issue.backend));
+      if (derived) {
+        var where = el("span", "fx-issue-age", issue.team + (issue.stage_name ? " · " + issue.stage_name : ""));
+        where.title = "Team, and stage in the team's own flow";
+        line.appendChild(where);
+      }
       line.appendChild(el("span", "fx-issue-title", issue.title || ""));
       var kb = issue.knockbacks || {};
       var kbText = Object.keys(kb)

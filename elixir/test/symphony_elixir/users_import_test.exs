@@ -14,10 +14,16 @@ defmodule SymphonyElixir.UsersImportTest do
   defmodule FakeLinear do
     def graphql(query, variables, _opts \\ []) do
       cond do
-        query =~ "SymphonyTeamKeys" -> {:ok, %{"data" => %{"teams" => %{"nodes" => [%{"id" => "t-pay", "key" => "PAY"}, %{"id" => "t-web", "key" => "WEB"}]}}}}
+        query =~ "SymphonyTeamsLookup" -> {:ok, %{"data" => %{"teams" => %{"nodes" => Enum.filter(teams(), &(&1["id"] in variables.ids))}}}}
         query =~ "SymphonyMemberByEmail" -> {:ok, %{"data" => %{"users" => %{"nodes" => member(variables[:email])}}}}
         true -> {:ok, %{"data" => %{}}}
       end
+    end
+
+    # The Linear API key sees PAY and WEB, not OPS.
+    defp teams do
+      states = %{"nodes" => [%{"name" => "Todo", "type" => "unstarted", "position" => 1}, %{"name" => "In Review", "type" => "started", "position" => 3}]}
+      [%{"id" => "t-pay", "key" => "PAY", "name" => "Payments", "states" => states}, %{"id" => "t-web", "key" => "WEB", "name" => "Web", "states" => states}]
     end
 
     # Only the bootstrap admin is in Linear; everyone else signs in as provisioned.
@@ -115,7 +121,8 @@ defmodule SymphonyElixir.UsersImportTest do
 
     assert {:ok, %{written: false, errors: errors}} = Import.from_csv(csv, teams: @teams)
     assert Enum.map(errors, & &1.line) == [9, 10, 11, 12]
-    assert Enum.map(errors, & &1.reason) == ["invalid email", "unknown Linear team id t-nope", ~s(unknown role "owner"), "member needs a linear_team_id"]
+    assert [_, "unknown Linear team id t-nope: Symphony's Linear API key can't see that team; " <> _, _, _] = Enum.map(errors, & &1.reason)
+    assert Enum.map(errors, & &1.reason) |> List.delete_at(1) == ["invalid email", ~s(unknown role "owner"), "member needs a linear_team_id"]
     assert Users.get_by_email("pia@acme.test") == nil
 
     assert {:ok, %{written: true, created: 4}} = Import.from_csv(csv, teams: @teams, skip_invalid: true)

@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.DurableRunsProcessTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.Factory.{Definition, Store}
   alias SymphonyElixir.RunEvents
   alias SymphonyElixir.RunLauncher
   alias SymphonyElixir.RunLauncher.Process, as: ProcessLauncher
@@ -428,6 +429,31 @@ defmodule SymphonyElixir.DurableRunsProcessTest do
 
     assert_receive {:fake_start, %RunSpec{environment: environment}, _ref}, 5_000
     assert %{name: "default", image: "registry.example.com/default:1"} = environment
+
+    GenServer.stop(pid)
+  end
+
+  test "an issue of a team that only has the default flow carries the default flow in its run spec" do
+    on_exit(fn -> Store.reset() end)
+    Store.reset()
+    {:ok, _} = SymphonyElixir.Teams.register([%{key: "DFL", name: "Default only"}], "test")
+
+    renamed =
+      Definition.default_template() |> Map.update!("stages", fn stages -> Enum.map(stages, &if(&1["id"] == "implement", do: Map.put(&1, "name", "Build it"), else: &1)) end)
+
+    {:ok, default} = Store.put("DEFAULT", renamed, 0, "ada")
+
+    issue = Support.issue_fixture("issue-default-flow", "DFL-1")
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    Application.put_env(:symphony_elixir, :run_launcher, FakeLauncher)
+    FakeLauncher.on_start(:ok, self())
+
+    {:ok, pid} = Orchestrator.start_link(name: Module.concat(__MODULE__, "DefaultFlowOrchestrator"))
+
+    assert_receive {:fake_start, %RunSpec{flow: %{"scope" => "DFL", "definition" => definition}}, _ref}, 5_000
+    assert %{"source" => "DEFAULT", "inherited" => true} = definition
+    assert definition["stages"] == default["stages"]
+    assert Enum.find(definition["stages"], &(&1["id"] == "implement"))["name"] == "Build it"
 
     GenServer.stop(pid)
   end

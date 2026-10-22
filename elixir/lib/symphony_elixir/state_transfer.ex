@@ -16,6 +16,7 @@ defmodule SymphonyElixir.StateTransfer do
     * `users.json`, `mcp_tokens.json` (SHA-256 hashes, so tokens keep working
       on any controller, plus copies encrypted with `secret_key_base`, which
       the setup page shows only where that key matches), `project_routes.json`,
+      `teams.json`,
       `factories/<scope>.json`, `usage.json`, `session_history.json` and
       `inbox.json` (queued messages, keyed by issue);
     * `secret_key_base`, unless the target is configured with
@@ -45,7 +46,7 @@ defmodule SymphonyElixir.StateTransfer do
   @manifest "manifest.json"
   @documents_prefix "state/"
   @secret_key "secret_key_base"
-  @json_keys ~w(users.json mcp_tokens.json project_routes.json usage.json session_history.json inbox.json)
+  @json_keys ~w(users.json mcp_tokens.json project_routes.json teams.json usage.json session_history.json inbox.json)
   @factory_key ~r/\Afactories\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\.json\z/
   @min_secret_bytes 64
 

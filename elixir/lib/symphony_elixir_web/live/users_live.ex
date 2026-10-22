@@ -10,12 +10,16 @@ defmodule SymphonyElixirWeb.UsersLive do
 
   Linear roles and team memberships are shown but not edited here: they come
   from Linear for each account's email. Symphony's grants add to them.
+
+  The Teams panel lists the Linear teams Symphony knows (`SymphonyElixir.Teams`)
+  and which flow each follows; admins add a team by its Linear key or id (a
+  team needs no project to be added; it follows the default flow).
   """
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
   import SymphonyElixirWeb.Topbar
 
-  alias SymphonyElixir.{Auth, Config, Policy, UsageLedger, Users}
+  alias SymphonyElixir.{Auth, Config, Policy, Teams, UsageLedger, Users}
   alias SymphonyElixir.Factory.Store
   alias SymphonyElixirWeb.{ObservabilityPubSub, UserAuth}
 
@@ -49,6 +53,20 @@ defmodule SymphonyElixirWeb.UsersLive do
 
       {:error, _reason} ->
         {:noreply, redirect(socket, to: "/")}
+    end
+  end
+
+  # Adds Linear teams (keys or ids, comma or space separated) to the teams
+  # Symphony knows, looked up in Linear with Symphony's API key.
+  def handle_event("add_team", %{"team" => refs}, socket) when is_binary(refs) do
+    with {:ok, user} <- UserAuth.refresh_user(socket),
+         true <- Policy.can?(user, :control) || {:error, :not_admin},
+         refs when refs != [] <- String.split(refs, ~r/[\s,]+/, trim: true) |> Enum.take(50) do
+      {:noreply, socket |> add_teams(refs) |> load_accounts()}
+    else
+      [] -> {:noreply, assign(socket, :flash_message, "Give a Linear team key (like PAY) or id.")}
+      {:error, :not_admin} -> {:noreply, assign(socket, :flash_message, "Only admins can add teams.")}
+      {:error, _reason} -> {:noreply, redirect(socket, to: "/")}
     end
   end
 
@@ -119,6 +137,22 @@ defmodule SymphonyElixirWeb.UsersLive do
       else: socket |> result(Users.disable(id, actor(socket)), "Disabled and signed out.") |> tap(fn _ -> UserAuth.disconnect_sessions(id) end)
   end
 
+  defp add_teams(socket, refs) do
+    case Teams.add_from_linear(refs, actor(socket)) do
+      {:ok, added, missing} ->
+        added_text = if added == [], do: nil, else: "Added #{Enum.map_join(added, ", ", & &1.key)}: they follow the default flow until they get their own."
+        missing_text = if missing == [], do: nil, else: "Linear didn't return #{Enum.join(missing, ", ")}: Symphony's Linear API key can't see it, or it doesn't exist."
+        message = Enum.join(Enum.reject([added_text, missing_text], &is_nil/1), " ")
+        if added == [], do: assign(socket, :flash_message, message), else: broadcast_and_flash(socket, message)
+
+      {:error, :linear_not_configured} ->
+        assign(socket, :flash_message, "Teams are looked up in Linear, and Linear isn't configured.")
+
+      {:error, reason} ->
+        assign(socket, :flash_message, "Couldn't look the team up in Linear: #{inspect(reason, limit: 3)}")
+    end
+  end
+
   defp result(socket, {:ok, _account}, message), do: broadcast_and_flash(socket, message)
   defp result(socket, {:error, :cannot_disable_bootstrap}, _), do: assign(socket, :flash_message, "The first admin account can't be disabled.")
   defp result(socket, {:error, reason}, _), do: assign(socket, :flash_message, "That didn't work: #{inspect(reason)}")
@@ -161,10 +195,23 @@ defmodule SymphonyElixirWeb.UsersLive do
     assign(socket,
       groups: groups,
       admin?: admin?,
+      sees_all?: sees_all?,
+      known_teams: if(sees_all?, do: known_teams(), else: []),
       team_options: if(admin?, do: teams, else: []),
       grantable: grantable(viewer, teams, projects)
     )
   end
+
+  # The teams Symphony knows, with the flow each follows.
+  defp known_teams do
+    for team <- Teams.list() do
+      flow = Store.get(team.key)
+      Map.put(team, :flow, if(flow["inherited"], do: flow_source(flow["source"]), else: "Own flow (v#{flow["version"]})"))
+    end
+  end
+
+  defp flow_source("template"), do: "Default flow (built-in)"
+  defp flow_source(_source), do: "Default flow"
 
   # Teams and projects Symphony knows of: from Linear memberships, saved
   # flows, observed work, and configured projects.
@@ -176,6 +223,7 @@ defmodule SymphonyElixirWeb.UsersLive do
       |> Enum.flat_map(&Map.get(&1.linear, :teams, []))
       |> Enum.map(& &1.key)
       |> Kernel.++(Store.teams() -- [Store.default_team()])
+      |> Kernel.++(Teams.keys())
       |> Kernel.++(Enum.flat_map(Map.values(seen), & &1.teams))
       |> Enum.uniq()
       |> Enum.sort()
@@ -352,6 +400,45 @@ defmodule SymphonyElixirWeb.UsersLive do
             </tbody>
           </table>
         </div>
+      </section>
+
+      <section :if={@sees_all?} id="teams" class="panel">
+        <div class="panel-head">
+          <h2 class="panel-title">Teams <span class="numeric muted">{length(@known_teams)}</span></h2>
+          <p class="panel-hint">
+            Linear teams Symphony knows. A team follows the default flow until it gets its own; the accounts import adds the teams its CSV names.
+          </p>
+        </div>
+
+        <form :if={@admin?} id="add-team" phx-submit="add_team" class="access-add team-add">
+          <input type="text" name="team" placeholder="Linear team key or id, e.g. PAY" aria-label="Linear team key or id" autocomplete="off" />
+          <button type="submit" class="fx-action">Add team</button>
+        </form>
+
+        <p :if={@known_teams == []} class="empty-state">No teams added yet.</p>
+        <table :if={@known_teams != []} class="data-table users-table">
+          <thead>
+            <tr>
+              <th>Team</th>
+              <th>Flow</th>
+              <th>Linear states</th>
+              <th class="num">Added</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr :for={team <- @known_teams}>
+              <td>
+                <div class="issue-cell">
+                  <a class="issue-id" href={"/?team=" <> team.key}>{team.key}</a>
+                  <span class="issue-project">{team.name}</span>
+                </div>
+              </td>
+              <td><span class="muted">{team.flow}</span></td>
+              <td><span class="muted">{team.states |> Enum.sort_by(& &1.position) |> Enum.map_join(" · ", & &1.name)}</span></td>
+              <td class="num numeric muted">{team.added_by} · {String.slice(team.added_at || "", 0, 10)}</td>
+            </tr>
+          </tbody>
+        </table>
       </section>
     </section>
     """

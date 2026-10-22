@@ -8,12 +8,13 @@ defmodule SymphonyElixirWeb.FactoryPresenter do
   round-trip.
   """
 
-  alias SymphonyElixir.Factory.Store
-  alias SymphonyElixir.{IssueStage, Pricing, UsageLedger}
+  alias SymphonyElixir.Factory.{Definition, Store}
+  alias SymphonyElixir.{IssueStage, Pricing, Teams, UsageLedger}
 
   # Fixed harness order: color follows the harness, never its rank.
   @harnesses ["codex", "claude", "opencode"]
   @issues_per_stage 40
+  @overview_settled_ms 14 * 86_400_000
 
   @doc """
   `opts[:teams]` adds teams to show even before they have any issues (e.g. the
@@ -30,14 +31,18 @@ defmodule SymphonyElixirWeb.FactoryPresenter do
     pricing = Map.get(settings, :pricing) || %{}
     running_by_issue = Map.new(running, &{&1.issue_identifier, &1})
     teams = team_keys(ledger.flow.issues, Keyword.get(opts, :teams, []))
+    team_names = Teams.names()
     projects = project_entries(settings)
     own_flow = MapSet.new(Store.projects())
+    # The default flow is always on offer (admins edit it; every team without
+    # its own follows it), ahead of the teams.
+    scopes = [Store.default_team() | teams]
 
     definitions =
-      Map.new(teams, &{&1, Store.get(&1)})
+      Map.new(scopes, &{&1, Store.get(&1)})
       |> Map.merge(Map.new(projects, &{&1.key, Store.get(&1.key, List.first(&1.teams))}))
 
-    team_flows = Map.new(teams, &{&1, team_flow(&1, definitions[&1], ledger.flow, running_by_issue, own_flow)})
+    team_flows = Map.new(scopes, &{&1, team_flow(&1, definitions[&1], ledger.flow, running_by_issue, own_flow)})
     project_flows = Map.new(projects, &{&1.key, project_flow(&1.slug, definitions[&1.key], ledger.flow, running_by_issue)})
 
     %{
@@ -48,31 +53,101 @@ defmodule SymphonyElixirWeb.FactoryPresenter do
       controls_enabled: controls_enabled?(settings),
       priced: map_size(pricing) > 0,
       usage: Enum.map(ledger.usage, &(&1 |> price_row(pricing) |> Map.update(:url, nil, fn url -> https_url(url) end))),
-      team: List.first(teams),
+      team: List.first(teams) || Store.default_team(),
       teams:
-        Enum.map(teams, &%{key: &1, kind: team_kind(&1), name: if(&1 == Store.default_team(), do: "Default flow"), custom: Store.custom?(&1)}) ++
+        Enum.map(scopes, &%{key: &1, kind: team_kind(&1), name: if(&1 == Store.default_team(), do: "Default flow", else: team_names[&1]), custom: Store.custom?(&1)}) ++
           Enum.map(projects, &Map.take(&1, [:key, :kind, :name, :slug, :teams, :custom])),
       definitions: definitions,
       flows: Map.merge(team_flows, project_flows),
       linear_states: linear_states(settings, definitions),
       label_prefix: IssueStage.label_prefix(settings),
-      approval_label: IssueStage.approval_label(settings)
+      approval_label: IssueStage.approval_label(settings),
+      # Server-rendered (the overview), never sent to the browser as JSON.
+      overview: overview_rows(ledger.flow.issues, definitions, running_by_issue)
     }
   end
 
-  # Teams with work, teams with their own flow, and any extra (viewer's) teams.
-  # With none at all, show the organisation's default flow.
+  # Teams with work, teams with their own flow, teams Symphony knows
+  # (`SymphonyElixir.Teams`), and any extra (viewer's) teams.
   defp team_keys(issues, extra) do
     issues
     |> Enum.map(& &1.team)
     |> Kernel.++(Store.teams())
+    |> Kernel.++(Teams.keys())
     |> Kernel.++(extra)
     |> Enum.filter(&(is_binary(&1) and &1 != Store.default_team()))
     |> Enum.uniq()
     |> Enum.sort()
-    |> case do
-      [] -> [Store.default_team()]
-      teams -> teams
+  end
+
+  # Every tracked issue (already only those with the opt-in label), by its
+  # Linear state, for the overview across teams. Finished and canceled issues
+  # stay for @overview_settled_ms.
+  defp overview_rows(issues, definitions, running_by_issue) do
+    settled_after = System.system_time(:millisecond) - @overview_settled_ms
+
+    for issue <- issues, is_binary(issue.team) do
+      overview_row(issue, definitions, running_by_issue)
+    end
+    |> Enum.reject(&(&1.state_type in ["completed", "canceled"] and &1.since_ms < settled_after))
+  end
+
+  defp overview_row(issue, definitions, running_by_issue) do
+    scope = Store.scope_for(issue.team, issue.project)
+    stage = Definition.stage(definitions[scope] || Store.get(scope, issue.team), issue.node)
+    state = issue[:state] || stage_state(stage) || node_state(issue.node)
+    agent = Map.get(running_by_issue, issue.issue)
+
+    %{
+      issue: issue.issue,
+      id: issue[:id],
+      title: issue.title,
+      url: https_url(issue.url),
+      team: issue.team,
+      project: issue.project,
+      state: state,
+      state_type: issue[:state_type] || Teams.state_type(issue.team, state) || guess_state_type(state, stage),
+      stage: issue.node,
+      stage_name: (stage && stage["name"]) || issue.node,
+      since_ms: issue.since_ms,
+      running: agent != nil,
+      backend: agent && agent.backend,
+      awaiting: issue[:awaiting_approval] == true
+    }
+  end
+
+  defp stage_state(%{"linear_state" => state}), do: state
+  defp stage_state(_stage), do: nil
+
+  defp node_state("canceled"), do: "Canceled"
+  defp node_state("backlog"), do: "Backlog"
+  defp node_state(_node), do: nil
+
+  @state_types_by_name %{
+    "canceled" => "canceled",
+    "cancelled" => "canceled",
+    "duplicate" => "canceled",
+    "closed" => "canceled",
+    "done" => "completed",
+    "completed" => "completed",
+    "merged" => "completed",
+    "backlog" => "backlog",
+    "triage" => "triage",
+    "todo" => "unstarted",
+    "to do" => "unstarted",
+    "ready" => "unstarted"
+  }
+
+  # Rows saved before states were kept: the type from the stage, else the name.
+  defp guess_state_type(_state, %{"kind" => "done"}), do: "completed"
+
+  defp guess_state_type(state, stage) do
+    name = if is_binary(state), do: String.downcase(String.trim(state))
+
+    cond do
+      Map.has_key?(@state_types_by_name, name) -> @state_types_by_name[name]
+      match?(%{"kind" => "queue"}, stage) -> "unstarted"
+      true -> "started"
     end
   end
 

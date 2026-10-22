@@ -33,6 +33,7 @@ defmodule SymphonyElixir.Policy do
   """
 
   alias SymphonyElixir.Auth.User
+  alias SymphonyElixir.Factory.Store
   alias SymphonyElixir.{LabelSync, UsageLedger}
 
   @type role :: :admin | :global_viewer | :member | :guest | :api
@@ -131,7 +132,14 @@ defmodule SymphonyElixir.Policy do
   defp authorize_change(user, {:message_agent, identifier, project}),
     do: check(role(user) == :admin or in_teams?(user, identifier) or granted_project?(user, project), :not_team_member)
 
-  defp authorize_change(user, {:edit_flow, scope}), do: check(role(user) == :admin or flow_member?(user, scope), :not_team_editor)
+  defp authorize_change(user, {:edit_flow, scope}) do
+    cond do
+      role(user) == :admin -> :ok
+      default_flow?(scope) -> {:error, :not_admin}
+      true -> check(flow_member?(user, scope), :not_team_editor)
+    end
+  end
+
   defp authorize_change(user, {:grant, scope}), do: check(role(user) == :admin or team_admin_for?(user, scope), :not_team_admin)
   defp authorize_change(_user, _action), do: {:error, :not_allowed}
 
@@ -203,13 +211,16 @@ defmodule SymphonyElixir.Policy do
   defp granted_project?(_user, _project), do: false
 
   # A project's flow: people given the project, and members of any team whose
-  # issues are in it. A team's flow: its members. The default flow: admins.
+  # issues are in it. A team's flow: its members (team admins are members).
+  # The default flow, which every team without its own follows: admins only.
   defp flow_member?(%User{} = user, "project:" <> slug) do
     slug in (user.projects || []) or Enum.any?(user.teams, &(&1.key in project_teams(slug)))
   end
 
-  defp flow_member?(%User{teams: teams}, team) when is_binary(team), do: Enum.any?(teams, &(&1.key == team))
+  defp flow_member?(%User{teams: teams}, team) when is_binary(team), do: Enum.any?(teams, &(&1.key == String.upcase(String.trim(team))))
   defp flow_member?(_user, _scope), do: false
+
+  defp default_flow?(scope), do: is_nil(scope) or (is_binary(scope) and String.upcase(String.trim(scope)) == Store.default_team())
 
   # Team admins grant their teams and the projects their teams work in.
   defp team_admin_for?(user, "project:" <> slug), do: Enum.any?(project_teams(slug), &(&1 in team_admin_of(user)))

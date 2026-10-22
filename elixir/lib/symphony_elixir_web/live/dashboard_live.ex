@@ -23,7 +23,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   alias SymphonyElixir.{SessionHistory, Transcript}
   alias SymphonyElixir.UsageLedger
   alias SymphonyElixir.Users
-  alias SymphonyElixirWeb.{Endpoint, FactoryPresenter, ObservabilityPubSub, Presenter, UserAuth, Visibility}
+  alias SymphonyElixirWeb.{Endpoint, FactoryPresenter, ObservabilityPubSub, Overview, Presenter, UserAuth, Visibility}
   alias SymphonyElixirWeb.ScopePicker
   @runtime_tick_ms 1_000
   # Ended sessions change only when a run ends; they're re-read this often
@@ -78,7 +78,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   # a new orchestrator snapshot; live updates keep that payload fresh.
   @impl true
   def handle_params(params, _uri, socket) do
-    socket = assign(socket, :scope_params, Map.take(params, ["team", "project"]))
+    socket = assign(socket, :scope_params, Map.take(params, ["team", "project", "flow"]))
     socket = if socket.assigns[:visible], do: assign_scope(socket), else: assign_payload(socket)
     {:noreply, assign_ended(socket)}
   end
@@ -377,12 +377,15 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   # Per-user view of the factory payload: what this person may change, and
   # team names from their Linear memberships.
-  defp factory_json(factory, user, scope) do
+  defp factory_json(factory, user, scope, overview) do
     enabled? = FactoryPresenter.controls_enabled?(Config.settings!())
     names = Map.new(user.teams, &{&1.key, &1.name})
-    editable = Map.new(factory.teams, &{&1.key, enabled? and Policy.can?(user, {:edit_flow, &1.key})})
+    factory = with_overview_flow(factory, overview)
+    # The all-teams flow is derived from Linear states: nothing in it is edited.
+    editable = Map.new(factory.teams, &{&1.key, enabled? and &1[:kind] != "overview" and Policy.can?(user, {:edit_flow, &1.key})})
 
     factory
+    |> Map.delete(:overview)
     |> Map.update!(:teams, fn teams -> Enum.map(teams, &Map.put(&1, :name, &1.name || names[&1.key])) end)
     |> Map.put(:controls_enabled, enabled? and Policy.can?(user, :control))
     |> Map.put(:movable_teams, if(enabled?, do: Policy.movable_teams(user), else: []))
@@ -393,6 +396,21 @@ defmodule SymphonyElixirWeb.DashboardLive do
     |> Map.put(:scope, scope)
     |> Jason.encode!()
   end
+
+  defp with_overview_flow(factory, nil), do: factory
+
+  defp with_overview_flow(factory, %{entry: entry, definition: definition, flow: flow}) do
+    %{
+      factory
+      | teams: [entry | factory.teams],
+        definitions: Map.put(factory.definitions, entry.key, definition),
+        flows: Map.put(factory.flows, entry.key, flow)
+    }
+  end
+
+  defp flow_title(true, _overview?), do: "Default flow"
+  defp flow_title(_default?, true), do: "Flow · all teams by Linear state"
+  defp flow_title(_default?, _overview?), do: "Flow"
 
   defp describe_error(reason), do: IssueMoves.describe_error(reason)
 
@@ -475,7 +493,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
           id="factory-data"
           phx-hook="FactoryData"
           data-target="factory"
-          data-json={factory_json(@payload.factory, @current_user, @flow_scope)}
+          data-json={factory_json(@payload.factory, @current_user, @flow_scope, @overview)}
           hidden
         >
         </div>
@@ -495,8 +513,15 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <div class="factory-main">
             <section class="panel flow-panel">
               <div class="panel-head">
-                <h2 class="panel-title">Flow</h2>
-                <p class="panel-hint">Click a stage to manage it or move its issues. Solid lines are agent moves, dotted lines are person moves.</p>
+                <h2 class="panel-title">{flow_title(@default_flow?, @overview?)}</h2>
+                <p :if={@overview?} class="panel-hint">
+                  Every team you can see, by Linear state: what Symphony is working on, and where it's up to. Pick a team or project at the top for its own flow.
+                  <a :if={@default_visible?} href="/?flow=default">Default flow →</a>
+                </p>
+                <p :if={!@default_flow? and !@overview?} class="panel-hint">Click a stage to manage it or move its issues. Solid lines are agent moves, dotted lines are person moves.</p>
+                <p :if={@default_flow?} class="panel-hint">
+                  Every team without its own flow follows this one, and so does every team added later. <a href="/">← Overview</a>
+                </p>
               </div>
               <div id="fx-diagram" data-fx="diagram" phx-update="ignore"></div>
             </section>
@@ -861,15 +886,44 @@ defmodule SymphonyElixirWeb.DashboardLive do
         do: Visibility.scope_to_project(visible, project),
         else: Visibility.scope_to_team(visible, team)
 
+    all? = is_nil(team) and is_nil(project)
+    default? = all? and default_flow?(socket.assigns[:scope_params], visible)
+
     socket
     |> assign(:team_choices, choices)
     |> assign(:team_filter, team)
     |> assign(:project_choices, projects)
     |> assign(:project_filter, project)
-    |> assign(:flow_scope, ScopePicker.flow_scope(team, project))
+    |> assign(:flow_scope, if(default?, do: Store.default_team(), else: ScopePicker.flow_scope(team, project)))
+    |> assign(:default_flow?, default?)
+    |> assign(:default_visible?, default_visible?(visible))
     |> assign(:payload, payload)
+    |> assign(:overview?, all? and not default? and multi_team?(user, choices))
+    |> assign_overview()
     |> assign_sessions()
   end
+
+  # `?flow=default` opens the default flow (every team without its own
+  # follows it), for those who can see it.
+  defp default_flow?(%{"flow" => flow}, visible) when is_binary(flow), do: String.downcase(flow) == "default" and default_visible?(visible)
+  defp default_flow?(_params, _visible), do: false
+
+  defp default_visible?(%{factory: %{teams: entries}}), do: Enum.any?(entries, &(&1[:kind] == "default"))
+  defp default_visible?(_visible), do: false
+
+  # Someone who sees every team, or several, lands on the overview; one team
+  # (picked, or the only one someone has) shows that team's flow.
+  defp multi_team?(user, choices), do: Policy.visible_teams(user) == :all or length(choices) > 1
+
+  # All teams and all projects: the flow drawn is the Linear-state one
+  # (`SymphonyElixirWeb.Overview`), across the teams the viewer can see.
+  defp assign_overview(%{assigns: %{overview?: true}} = socket) do
+    %{payload: payload, team_choices: choices} = socket.assigns
+    rows = get_in(payload, [:factory, :overview]) || []
+    socket |> assign(:overview, Overview.flow(rows, team_keys: Enum.map(choices, & &1.key))) |> assign(:flow_scope, Overview.scope())
+  end
+
+  defp assign_overview(socket), do: assign(socket, :overview, nil)
 
   # Ended sessions in the chosen window (counted even on the live view), for
   # the viewer and the picked team or project; a search looks through all.

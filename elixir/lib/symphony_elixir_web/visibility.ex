@@ -10,7 +10,7 @@ defmodule SymphonyElixirWeb.Visibility do
   worker hosts, agent accounts). Someone with no teams sees none of it.
   """
 
-  alias SymphonyElixir.{Auth, Policy}
+  alias SymphonyElixir.{Auth, Policy, UsageLedger}
 
   @host_fields [
     :workspace_path,
@@ -26,6 +26,10 @@ defmodule SymphonyElixirWeb.Visibility do
   def filter_payload(%{error: _} = payload, _user), do: payload
 
   def filter_payload(payload, user) do
+    # An agent still running on an issue that lost the opt-in label is
+    # stopped on the next poll; until then it isn't shown either.
+    payload = update_sessions(payload, &Enum.reject(&1, fn e -> UsageLedger.hidden?(e.issue_identifier) end))
+
     case Policy.visible_teams(user) do
       :all -> payload
       teams -> restrict(payload, MapSet.new(teams), user.projects)
@@ -94,11 +98,17 @@ defmodule SymphonyElixirWeb.Visibility do
   def scope_sessions(sessions, team, _project) when is_binary(team), do: Enum.filter(sessions, &(team(&1.issue_identifier) == team))
   def scope_sessions(sessions, _team, _project), do: sessions
 
+  @doc """
+  One issue's payload, if the person may see it. An issue without the opt-in
+  label (`tracker.require_label`) is hidden from everyone.
+  """
   @spec filter_issue(map(), Auth.User.t() | nil, String.t()) :: {:ok, map()} | :hidden
   def filter_issue(payload, user, identifier) do
-    case Policy.visible_teams(user) do
-      :all -> {:ok, payload}
-      teams -> if team(identifier) in teams, do: {:ok, drop_host_fields(payload)}, else: :hidden
+    cond do
+      UsageLedger.hidden?(identifier) -> :hidden
+      Policy.visible_teams(user) == :all -> {:ok, payload}
+      team(identifier) in Policy.visible_teams(user) -> {:ok, drop_host_fields(payload)}
+      true -> :hidden
     end
   end
 
@@ -177,10 +187,11 @@ defmodule SymphonyElixirWeb.Visibility do
       factory
       | usage: Enum.filter(factory.usage, &visible?.(&1.issue, &1[:project])),
         teams: keep,
-        team: keep |> Enum.find(&(Map.get(&1, :kind) != "project")) |> then(&(&1 && &1.key)),
+        team: keep |> Enum.find(&(Map.get(&1, :kind) == "team")) |> then(&(&1 && &1.key)),
         definitions: Map.take(factory.definitions, keys),
         flows: factory.flows |> Map.take(keys) |> Map.new(fn {key, flow} -> {key, restrict_flow(flow, visible?)} end)
     }
+    |> Map.update(:overview, [], fn rows -> Enum.filter(rows, &visible?.(&1.issue, &1.project)) end)
   end
 
   # Only the project's own entry; its flow already holds only its issues.
@@ -198,6 +209,7 @@ defmodule SymphonyElixirWeb.Visibility do
         definitions: Map.take(factory.definitions, keys),
         flows: Map.take(factory.flows, keys)
     }
+    |> Map.update(:overview, [], fn rows -> Enum.filter(rows, &(&1.project == slug)) end)
   end
 
   # Projects can span teams: show one when it was granted or any of its teams

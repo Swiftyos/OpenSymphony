@@ -45,6 +45,8 @@ defmodule SymphonyElixir.TestSupport do
       setup do
         Application.delete_env(:symphony_elixir, :app_mode)
         SymphonyElixir.TestSupport.ensure_default_app!()
+        # Known teams are app-wide state; every test starts without any.
+        SymphonyElixir.Teams.reset()
 
         workflow_root =
           Path.join(

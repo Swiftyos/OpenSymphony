@@ -337,6 +337,7 @@ under Ecto's migration lock.
 | `usage.json` | `UsageLedger` | Token usage and cost. |
 | `mcp_tokens.json` | `McpTokens` | MCP token hashes and encrypted copies, one per account. |
 | `project_routes.json` | `ProjectRoutes` | Projects added at runtime. |
+| `teams.json` | `Teams` | Linear teams Symphony knows (key, id, name, workflow states), added by an admin or the accounts import. |
 | `factories/*.json` | `Factory.Store` | Flows per team, project and default. |
 | `secret_key_base` | `HttpServer` | Session and run-token secret, created once. |
 
