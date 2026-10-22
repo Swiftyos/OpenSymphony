@@ -446,14 +446,14 @@ defmodule SymphonyElixir.McpToolsTest do
       # The same token comes back after a restart.
       assert {:ok, ^secret, %{id: id}} = McpTokens.current(mia.id)
       assert id == token.id
-      assert {:error, :expired_token} = McpTokens.verify("symp_old")
-      assert {:error, :expired_token} = McpTokens.verify("symp_broken")
+      assert {:error, :invalid_token} = McpTokens.verify("symp_old")
+      assert {:error, :invalid_token} = McpTokens.verify("symp_broken")
       assert {:error, :invalid_token} = McpTokens.verify(nil)
-      assert McpTokens.legacy_count(mia.id) == 0
+      refute File.read!(path) =~ "tok_broken"
 
       conn = post_json("symp_old", %{jsonrpc: "2.0", id: 1, method: "ping"})
       assert %{"error" => %{"message" => message}} = json_response(conn, 401)
-      assert message =~ "expired"
+      assert message =~ "rotated"
 
       # A copy encrypted under another secret_key_base can't be shown; the page
       # gets a new token, and the old one keeps working for agents.

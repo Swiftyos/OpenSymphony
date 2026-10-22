@@ -17,8 +17,9 @@ defmodule SymphonyElixir.McpTokens do
   mode 0600 or a Postgres row).
 
   Tokens from before this design (several per account, with scopes, shown only
-  once and stored only as a hash) keep working, with their account's full
-  access, until they expire or their owner rotates.
+  once and stored only as a hash) are dropped when the store loads: they would
+  otherwise gain their account's full access. Their owners get a new token on
+  their next dashboard visit.
   """
 
   use GenServer
@@ -37,10 +38,7 @@ defmodule SymphonyElixir.McpTokens do
           created_at: String.t(),
           last_used_at: String.t() | nil,
           last_used_ip: String.t() | nil,
-          # Encrypted secret; nil for tokens from before it was kept.
-          sealed: String.t() | nil,
-          # Only tokens from before rotation existed expire.
-          expires_at: String.t() | nil
+          sealed: String.t()
         }
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -61,21 +59,13 @@ defmodule SymphonyElixir.McpTokens do
   def rotate(account_id), do: GenServer.call(__MODULE__, {:rotate, account_id})
 
   @doc """
-  How many of the account's tokens from before rotation existed still work.
+  Looks up a presented secret.
   """
-  @spec legacy_count(String.t()) :: non_neg_integer()
-  def legacy_count(account_id) when is_binary(account_id) do
-    Enum.count(records(), &(&1.account_id == account_id and is_nil(&1.sealed) and not expired?(&1)))
-  end
-
-  @doc """
-  Looks up a presented secret. Expired tokens are refused.
-  """
-  @spec verify(String.t()) :: {:ok, token()} | {:error, :invalid_token | :expired_token}
+  @spec verify(String.t()) :: {:ok, token()} | {:error, :invalid_token}
   def verify(@prefix <> _rest = secret) do
     with true <- ready?(),
          [{_hash, record}] <- :ets.lookup(@table, hash(secret)) do
-      if expired?(record), do: {:error, :expired_token}, else: {:ok, record}
+      {:ok, record}
     else
       _ -> {:error, :invalid_token}
     end
@@ -152,8 +142,7 @@ defmodule SymphonyElixir.McpTokens do
       created_at: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601(),
       last_used_at: nil,
       last_used_ip: nil,
-      sealed: Plug.Crypto.encrypt(key_base(), @encryption_salt, secret),
-      expires_at: nil
+      sealed: Plug.Crypto.encrypt(key_base(), @encryption_salt, secret)
     }
 
     :ets.insert(@table, {hash(secret), record})
@@ -164,14 +153,12 @@ defmodule SymphonyElixir.McpTokens do
 
   # A token whose copy can't be decrypted (the secret_key_base changed) still
   # works for agents; the page then issues a new one to show.
-  defp unseal(%{sealed: sealed} = record) when is_binary(sealed) do
+  defp unseal(%{sealed: sealed} = record) do
     case Plug.Crypto.decrypt(key_base(), @encryption_salt, sealed, max_age: :infinity) do
       {:ok, secret} when is_binary(secret) -> {secret, record}
       _ -> nil
     end
   end
-
-  defp unseal(_record), do: nil
 
   # The running endpoint's key (what sessions use); without an endpoint, the
   # persisted one.
@@ -199,15 +186,6 @@ defmodule SymphonyElixir.McpTokens do
 
   defp hash(secret), do: :crypto.hash(:sha256, secret) |> Base.encode16(case: :lower)
 
-  defp expired?(%{expires_at: nil}), do: false
-
-  defp expired?(%{expires_at: expires_at}) do
-    case DateTime.from_iso8601(expires_at) do
-      {:ok, at, _offset} -> DateTime.compare(at, DateTime.utc_now()) != :gt
-      _ -> true
-    end
-  end
-
   defp default_path, do: Application.get_env(:symphony_elixir, :mcp_tokens_path, Path.expand("~/.symphony/mcp_tokens.json"))
 
   defp persist(nil), do: :ok
@@ -230,19 +208,23 @@ defmodule SymphonyElixir.McpTokens do
   defp load(path) do
     with {:ok, body} <- SymphonyElixir.StateStore.read(path),
          {:ok, %{"tokens" => tokens}} when is_list(tokens) <- Jason.decode(body) do
-      Enum.each(tokens, &load_record/1)
+      dropped = Enum.count(tokens, &(load_record(&1) == :dropped))
+
+      if dropped > 0 do
+        Logger.warning("MCP tokens from before rotation dropped count=#{dropped}")
+        persist(path)
+      end
     else
       {:error, :enoent} -> :ok
       other -> Logger.error("MCP token load failed path=#{path} reason=#{inspect(other, limit: 5)}")
     end
   end
 
-  # Version 1 records (no sealed copy) load as older tokens: their scopes and
-  # resources are ignored, and they keep their expiry.
-  defp load_record(%{"hash" => hash, "id" => id, "account_id" => account_id} = raw)
-       when is_binary(hash) and is_binary(id) and is_binary(account_id) do
-    sealed = if is_binary(raw["sealed"]), do: raw["sealed"]
-
+  # Only tokens with an encrypted copy load. Version 1 records (several per
+  # account, scoped, hash only) are dropped rather than gaining their account's
+  # full access.
+  defp load_record(%{"hash" => hash, "id" => id, "account_id" => account_id, "sealed" => sealed} = raw)
+       when is_binary(hash) and is_binary(id) and is_binary(account_id) and is_binary(sealed) do
     record = %{
       id: id,
       account_id: account_id,
@@ -250,13 +232,11 @@ defmodule SymphonyElixir.McpTokens do
       created_at: raw["created_at"],
       last_used_at: raw["last_used_at"],
       last_used_ip: raw["last_used_ip"],
-      sealed: sealed,
-      # A v1 record without an expiry is treated as expired, as before.
-      expires_at: if(sealed, do: nil, else: raw["expires_at"] || "")
+      sealed: sealed
     }
 
     :ets.insert(@table, {hash, record})
   end
 
-  defp load_record(_raw), do: :ok
+  defp load_record(_raw), do: :dropped
 end

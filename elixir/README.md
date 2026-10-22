@@ -938,7 +938,7 @@ symphony state import <archive.tar.gz|-> [--dry-run] [--overwrite] [--skip-secre
   - `accounts/`: managed account logins that the agent CLIs read from disk. They are plain files, not state documents. Set them up again on the new controller (`symphony accounts login|import`).
   - Logs, workspaces, repo caches and transcripts: not state documents.
 - **The session secret.** `secret_key_base` signs session cookies, so importing it keeps people signed in. It is skipped when the importing environment sets `SYMPHONY_SECRET_KEY_BASE`. Pass `--skip-secret-key-base` when the secret is set as `server.secret_key_base` in the config file instead. Runner tokens also use it, but no runs move.
-- **MCP tokens keep working.** Tokens verify by their SHA-256, so the same tokens work on the new controller. The setup page can show a token again only where `secret_key_base` matches the one it was encrypted with; elsewhere it shows a new token and the old one keeps working.
+- **MCP tokens keep working.** Tokens verify by their SHA-256, so the same tokens work on the new controller. The setup page can show a token again only where `secret_key_base` matches the one it was encrypted with; elsewhere it shows a new token and the old one keeps working. Tokens from before one-token-per-person (no encrypted copy) are dropped when the store loads, so they never move.
 - **Safe to repeat.** Every document is checked before anything is written: the manifest, the checksums, that each key is on the list, and that JSON documents parse. A key that already holds the same content is `unchanged`. A key holding different content is a conflict: nothing is written unless `--overwrite` is given. `--dry-run` prints the plan only.
 - **No values in the output.** Summaries print keys and sizes, never contents.
 - **The archive is a secret.** It holds token hashes, encrypted tokens and the session secret, and is written at mode 0600. Delete copies when the move is done.
@@ -1466,8 +1466,9 @@ with the new one.
 Symphony stores each token's SHA-256 for lookups and a copy encrypted with `secret_key_base`, so
 the page can always show it, in `~/.symphony/mcp_tokens.json` (0600). Every request re-checks the
 account, so disabling someone, or them losing a Linear team or admin rights, applies to their
-token at once. Tokens from before this design (several per person, with scopes and expiry) keep
-working with their owner's full access until they expire or the owner rotates. Without sign-in
+token at once. Tokens from before this design (several per person, with scopes and expiry) are
+dropped when Symphony starts, since they would otherwise gain their owner's full access; their
+owners get a new token on their next visit. Without sign-in
 (`local` mode), the local operator gets the same page; their token stops working if Symphony
 switches to IAP.
 

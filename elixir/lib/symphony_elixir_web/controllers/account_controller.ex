@@ -59,7 +59,6 @@ defmodule SymphonyElixirWeb.AccountController do
       secret: secret,
       token: token,
       notice: notice,
-      legacy: McpTokens.legacy_count(token_owner(user)),
       mcp_url: McpSetup.url("#{conn.scheme}://#{conn.host}:#{conn.port}"),
       csrf_token: CSRFProtection.get_csrf_token(),
       instance: Config.instance_name() || "Symphony"
@@ -97,9 +96,6 @@ defmodule SymphonyElixirWeb.AccountController do
               </span>
             </div>
             <McpSetup.instructions url={@mcp_url} token={@secret} />
-            <p :if={@legacy > 0} class="login-help">
-              {@legacy} older {if @legacy == 1, do: "token", else: "tokens"} from before rotation still work. Rotating stops them too.
-            </p>
             <form class="login-form" method="post" action="/account/mcp-token/rotate">
               <input type="hidden" name="_csrf_token" value={@csrf_token} />
               <button

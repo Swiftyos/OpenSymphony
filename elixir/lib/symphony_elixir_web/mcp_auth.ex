@@ -92,7 +92,6 @@ defmodule SymphonyElixirWeb.McpAuth do
     {error, message} =
       case reason do
         :missing_token -> {"invalid_request", "Send Authorization: Bearer <token>. Your token is on Symphony's MCP setup page (/account/mcp)."}
-        :expired_token -> {"invalid_token", "This token has expired. Your current token is on Symphony's MCP setup page (/account/mcp)."}
         :account_unavailable -> {"invalid_token", "This token's account can't use Symphony any more."}
         _ -> {"invalid_token", "That token isn't valid. It may have been rotated; your current token is on Symphony's MCP setup page (/account/mcp)."}
       end

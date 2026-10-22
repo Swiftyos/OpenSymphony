@@ -320,19 +320,17 @@ defmodule SymphonyElixir.McpTest do
       assert Users.get(lee.id).mcp_welcomed_at == nil
     end
 
-    test "tokens from before rotation keep working, with their account's access, until rotation or expiry", %{mia: mia} do
+    test "tokens from before rotation are dropped at load, even unexpired ones", %{mia: mia} do
       dir = Path.join(System.tmp_dir!(), "mcp-legacy-#{System.unique_integer([:positive])}")
       File.mkdir_p!(dir)
       on_exit(fn -> File.rm_rf(dir) end)
       path = Path.join(dir, "mcp_tokens.json")
       future = DateTime.utc_now() |> DateTime.add(86_400) |> DateTime.to_iso8601()
-      past = DateTime.utc_now() |> DateTime.add(-60) |> DateTime.to_iso8601()
       hash = &(:crypto.hash(:sha256, &1) |> Base.encode16(case: :lower))
 
       tokens = [
-        # A read-only token limited to WEB, from the old design: now it has Mia's access.
+        # A read-only token limited to WEB, from the old design: it must not gain Mia's access.
         %{hash: hash.("symp_legacy-read"), id: "tok_old", name: "old", account_id: mia.id, scopes: ["read"], resources: ["WEB"], expires_at: future},
-        %{hash: hash.("symp_legacy-expired"), id: "tok_gone", name: "gone", account_id: mia.id, scopes: ["read"], resources: ["PAY"], expires_at: past},
         %{hash: hash.("symp_legacy-forever"), id: "tok_nodate", account_id: mia.id, scopes: ["read"], resources: ["PAY"]}
       ]
 
@@ -341,22 +339,14 @@ defmodule SymphonyElixir.McpTest do
       on_exit(fn -> Supervisor.restart_child(SymphonyElixir.Supervisor, McpTokens) end)
       start_supervised!({McpTokens, path: path})
 
-      assert McpTokens.legacy_count(mia.id) == 1
-      assert json_response(rpc("symp_legacy-read", "ping"), 200)
-      assert %{"result" => %{"isError" => false}} = json_response(call("symp_legacy-read", "send_agent_message", %{"identifier" => "PAY-1", "text" => "hi"}), 200)
-      assert %{"error" => %{"message" => expired}} = json_response(rpc("symp_legacy-expired", "ping"), 401)
-      assert expired =~ "expired"
-      assert json_response(rpc("symp_legacy-forever", "ping"), 401)
-
-      # The page shows a new, current token and counts the old one.
-      page = iap_conn(mia) |> get("/account/mcp") |> html_response(200)
-      assert page =~ "1 older token from before rotation still work"
-      assert json_response(rpc("symp_legacy-read", "ping"), 200)
-
-      {:ok, _secret, _token} = McpTokens.rotate(mia.id)
-      assert McpTokens.legacy_count(mia.id) == 0
       assert json_response(rpc("symp_legacy-read", "ping"), 401)
+      assert json_response(rpc("symp_legacy-forever", "ping"), 401)
       refute File.read!(path) =~ "tok_old"
+
+      # Mia's first visit gives her a working token.
+      page = iap_conn(mia) |> get("/account/mcp") |> html_response(200)
+      assert [secret] = Regex.run(~r/symp_[A-Za-z0-9_-]{20,}/, page)
+      assert json_response(rpc(secret, "ping"), 200)
     end
   end
 
