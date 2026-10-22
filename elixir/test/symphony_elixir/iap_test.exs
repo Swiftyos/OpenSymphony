@@ -107,6 +107,13 @@ defmodule SymphonyElixir.IapTest do
       assert [%{email: "mia@acme.test"}] = Users.list()
     end
 
+    test "the readiness probe needs no IAP header, while the dashboard does" do
+      write_workflow_file!(Workflow.workflow_file_path(), server_host: "0.0.0.0", tracker_kind: "memory")
+
+      assert response(get(build_conn(), "/readyz"), 200) == "ok"
+      assert html_response(get(build_conn(), "/"), 401)
+    end
+
     test "every configured audience is accepted" do
       audiences = [@other_audience, iap_audience()]
       config = [server_host: "0.0.0.0", tracker_kind: "memory", server_iap_audiences: audiences]

@@ -102,6 +102,23 @@ defmodule SymphonyElixir.Users do
 
   defp scope_key(_scope, _kind), do: {:error, :invalid_scope}
 
+  @doc """
+  Whether the accounts store is up and its document readable from the state
+  store (Postgres in a cluster), for the controller's readiness probe.
+  """
+  @spec readable?() :: boolean()
+  def readable? do
+    path = GenServer.call(__MODULE__, :path)
+
+    case if(path, do: SymphonyElixir.StateStore.read(path), else: {:ok, ""}) do
+      {:ok, _body} -> true
+      {:error, :enoent} -> true
+      {:error, _reason} -> false
+    end
+  catch
+    :exit, _reason -> false
+  end
+
   @spec get(String.t() | nil) :: user() | nil
   def get(id) when is_binary(id) do
     case lookup(id) do
@@ -152,6 +169,8 @@ defmodule SymphonyElixir.Users do
   end
 
   @impl true
+  def handle_call(:path, _from, state), do: {:reply, state.path, state}
+
   def handle_call({:ensure, email}, _from, state) do
     records = all_records()
 

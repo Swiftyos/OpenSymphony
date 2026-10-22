@@ -55,6 +55,7 @@ defmodule SymphonyElixirWeb.Router do
   end
 
   scope "/", SymphonyElixirWeb do
+    get("/readyz", HealthController, :ready)
     get("/dashboard.css", StaticAssetController, :dashboard_css)
     get("/factory.js", StaticAssetController, :factory_js)
     get("/factory_flow.js", StaticAssetController, :factory_flow_js)
