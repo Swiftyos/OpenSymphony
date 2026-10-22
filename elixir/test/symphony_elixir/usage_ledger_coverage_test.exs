@@ -62,7 +62,17 @@ defmodule SymphonyElixir.UsageLedgerCoverageTest do
         ],
         flow: %{
           edges: [%{from: "todo", to: "implement", count: 2}],
-          issues: [%{issue: "PAY-1", id: "id-1", node: "implement", since_ms: 5, title: "Loaded", project: "proj"}]
+          issues: [
+            %{
+              issue: "PAY-1",
+              id: "id-1",
+              node: "implement",
+              since_ms: 5,
+              title: "Loaded",
+              project: "proj",
+              moves: [["todo", "implement", 1], ["implement", "done", 2, "external"], ["bad"]]
+            }
+          ]
         }
       })
     )
@@ -76,6 +86,9 @@ defmodule SymphonyElixir.UsageLedgerCoverageTest do
                issues: [%{issue: "PAY-1", id: "id-1", node: "implement", since_ms: 5, project: "proj", team: nil}]
              }
            } = UsageLedger.snapshot()
+
+    # A move made outside the factory keeps its marker; malformed moves are dropped.
+    assert UsageLedger.issue_history("PAY-1").moves == [["todo", "implement", 1], ["implement", "done", 2, "external"]]
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_command: "codex --model gpt-5.1 app-server")
 

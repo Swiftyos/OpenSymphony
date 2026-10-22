@@ -121,11 +121,12 @@ defmodule SymphonyElixir.IssueReport do
   # ------------------------------------------------------------------ rounds
 
   @doc """
-  Knock-backs and rounds from an issue's moves (`[from, to, at]`).
+  Knock-backs and rounds from an issue's moves (`[from, to, at]`, or
+  `[from, to, at, by]` for one made outside the factory).
   """
   @spec rounds([list()], map()) :: rounds()
   def rounds(moves, definition) do
-    knockbacks = for [from, to, _at] <- moves, order(definition, to) < order(definition, from), do: from
+    knockbacks = for [from, to, _at | _by] <- moves, order(definition, to) < order(definition, from), do: from
     outer = Enum.max_by(knockbacks, &order(definition, &1), fn -> nil end)
 
     inner =

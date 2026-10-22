@@ -10,6 +10,8 @@ defmodule SymphonyElixir.Linear.Issue do
     :description,
     :priority,
     :state,
+    # Linear's workflow state type (`started`, `completed`, `canceled`, ...).
+    :state_type,
     :project_id,
     :project_slug,
     :project_name,
@@ -37,6 +39,7 @@ defmodule SymphonyElixir.Linear.Issue do
           description: String.t() | nil,
           priority: integer() | nil,
           state: String.t() | nil,
+          state_type: String.t() | nil,
           project_id: String.t() | nil,
           project_slug: String.t() | nil,
           project_name: String.t() | nil,

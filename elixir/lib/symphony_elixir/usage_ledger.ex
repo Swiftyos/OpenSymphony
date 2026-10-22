@@ -17,6 +17,7 @@ defmodule SymphonyElixir.UsageLedger do
   require Logger
 
   alias SymphonyElixir.{AgentMetrics, Config, IssueStage, Pricing}
+  alias SymphonyElixir.Factory.{Definition, Store}
   alias SymphonyElixir.Linear.Issue
 
   @usage_table :symphony_usage_ledger
@@ -81,9 +82,16 @@ defmodule SymphonyElixir.UsageLedger do
   @doc """
   Records where an issue currently sits in the factory and counts the transition
   when that changed since the last observation.
+
+  Pass `external: true` when the issue was read back from the tracker rather
+  than moved by Symphony: a move it shows into a terminal node (the flow's done
+  stage, or `canceled`) was made outside the factory (a person in Linear, a PR
+  merge integration) and is recorded as `[from, to, at, "external"]`.
   """
-  @spec observe_issue(Issue.t()) :: :ok
-  def observe_issue(%Issue{identifier: identifier} = issue) when is_binary(identifier) do
+  @spec observe_issue(Issue.t(), keyword()) :: :ok
+  def observe_issue(issue, opts \\ [])
+
+  def observe_issue(%Issue{identifier: identifier} = issue, opts) when is_binary(identifier) do
     with true <- ready?(),
          node when is_binary(node) <- factory_node(issue) do
       now = System.system_time(:millisecond)
@@ -101,7 +109,7 @@ defmodule SymphonyElixir.UsageLedger do
           key = {team_key(identifier), issue.project_slug, previous, node}
           :ets.update_counter(@edges_table, key, {2, 1}, {key, 0})
           # The issue's own move history, in order, for knock-back counts and its report.
-          moves = Enum.take((old[:moves] || []) ++ [[previous, node, now]], -@max_moves)
+          moves = Enum.take((old[:moves] || []) ++ [move_entry(issue, previous, node, now, opts)], -@max_moves)
           :ets.insert(@issues_table, {identifier, node, now, meta |> Map.put(:from, previous) |> Map.put(:moves, moves)})
           mark_dirty()
 
@@ -114,7 +122,41 @@ defmodule SymphonyElixir.UsageLedger do
     :ok
   end
 
-  def observe_issue(_issue), do: :ok
+  def observe_issue(_issue, _opts), do: :ok
+
+  defp move_entry(issue, previous, node, now, opts) do
+    if Keyword.get(opts, :external, false) and terminal_node?(issue, node) do
+      Logger.info("Issue reached #{node} outside the factory: issue_identifier=#{issue.identifier} from=#{previous} state=#{issue.state}")
+      [previous, node, now, "external"]
+    else
+      [previous, node, now]
+    end
+  end
+
+  defp terminal_node?(_issue, "canceled"), do: true
+  defp terminal_node?(issue, node), do: done_stage?(IssueStage.definition(issue), node)
+
+  defp done_stage?(definition, node), do: match?(%{"kind" => "done"}, Definition.stage(definition, node))
+
+  @doc """
+  Linear ids of the issues the ledger still shows in an open stage of their
+  flow: not its done stage, `canceled`, or `backlog`. The poll only reads issues
+  in active states, so one that left them (to Done in Linear, say) is re-read by
+  id to bring its stage up to date.
+  """
+  @spec unsettled_issue_ids() :: [String.t()]
+  def unsettled_issue_ids do
+    if ready?() do
+      for {_identifier, node, _since, %{id: id} = meta} <- :ets.tab2list(@issues_table),
+          is_binary(id) and not settled?(node, meta),
+          do: id
+    else
+      []
+    end
+  end
+
+  defp settled?(node, _meta) when node in ["canceled", "backlog"], do: true
+  defp settled?(node, meta), do: done_stage?(Store.get(Store.scope_for(meta[:team], meta[:project])), node)
 
   defp refresh_meta(_identifier, _node, _since, meta, meta), do: :ok
 
@@ -124,21 +166,31 @@ defmodule SymphonyElixir.UsageLedger do
   end
 
   @doc """
-  Maps an issue to its node in its team's factory diagram: the stage id from
-  the team's definition, or `canceled` / `backlog` for states outside the flow.
+  Maps an issue to its node in its flow's diagram: the stage id from the flow,
+  or `canceled` / `backlog` for states outside it.
+
+  A Linear state of type `completed` the flow has no stage for still counts as
+  the flow's done stage, and a canceled one (type `canceled`, or a canceled-like
+  name) is the flow's stage in that state if it has one, else `canceled`.
   """
   @spec factory_node(Issue.t()) :: node_name() | nil
   def factory_node(%Issue{state: state_name} = issue) when is_binary(state_name) do
     normalized = state_name |> String.trim() |> String.downcase()
 
     cond do
-      normalized in ["canceled", "cancelled", "duplicate", "closed"] -> "canceled"
+      normalized in ["canceled", "cancelled", "duplicate", "closed"] or issue.state_type == "canceled" -> IssueStage.stage(issue) || "canceled"
       normalized == "backlog" -> "backlog"
-      true -> IssueStage.stage(issue)
+      true -> IssueStage.stage(issue) || completed_stage(issue)
     end
   end
 
   def factory_node(_issue), do: nil
+
+  defp completed_stage(%Issue{state_type: "completed"} = issue) do
+    Enum.find_value(IssueStage.definition(issue)["stages"], &(&1["kind"] == "done" && &1["id"]))
+  end
+
+  defp completed_stage(_issue), do: nil
 
   @doc """
   Projects seen in usage or flow, by slug, with their display name and the teams
@@ -353,7 +405,7 @@ defmodule SymphonyElixir.UsageLedger do
       url: row["url"],
       awaiting_approval: row["awaiting_approval"] == true,
       from: row["from"],
-      moves: for([from, to, at] <- row["moves"] || [], do: [from, to, at])
+      moves: for([from, to, at | by] <- row["moves"] || [], do: [from, to, at | Enum.take(by, 1)])
     }
 
     :ets.insert(@issues_table, {row["issue"], row["node"], row["since_ms"], meta})

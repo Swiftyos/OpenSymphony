@@ -5,7 +5,7 @@ defmodule SymphonyElixir.McpToolsTest do
   import Plug.Conn, only: [put_req_header: 3]
 
   alias SymphonyElixir.{AgentInbox, Auth, IssueMoves, McpTokens, Transcript, UsageLedger, Users}
-  alias SymphonyElixir.Factory.Store
+  alias SymphonyElixir.Factory.{Definition, Store}
   alias SymphonyElixirWeb.Mcp.{Manual, Tools}
   alias SymphonyElixirWeb.{McpAuth, RateLimit}
 
@@ -37,6 +37,8 @@ defmodule SymphonyElixir.McpToolsTest do
            case identifier do
              "PAY-2" -> {"In Progress", ["factory/merge"]}
              "PAY-3" -> {"In Progress", ["factory/merge", "needs-approval"]}
+             "PAY-20" -> {"In Progress", ["factory/blocked"]}
+             "PAY-21" -> {"Done", ["factory/blocked"]}
              _ -> {"In Review", []}
            end
 
@@ -173,6 +175,14 @@ defmodule SymphonyElixir.McpToolsTest do
       assert error!(token, "get_issue", %{}) =~ "required"
     end
 
+    test "a move made outside the factory says so", %{mia_token: token} do
+      observe!("PAY-5", "In Review")
+      closed = %Issue{id: "id-PAY-5", identifier: "PAY-5", title: "PAY-5", state: "Done", state_type: "completed", labels: []}
+      UsageLedger.observe_issue(closed, external: true)
+
+      assert %{"stage" => "done", "moves" => [%{"from" => "review", "to" => "done", "by" => "external"}]} = ok!(token, "get_issue", %{"identifier" => "PAY-5"})
+    end
+
     test "transcripts are limited to the newest entries", %{mia_token: token} do
       for n <- 1..3, do: {:ok, _} = AgentInbox.send_message("PAY-1", "note #{n}", "Mia")
 
@@ -217,6 +227,41 @@ defmodule SymphonyElixir.McpToolsTest do
       assert %{"reviewed" => true} = ok!(token, "review_issue", %{"issue" => "id-PAY-3", "verdict" => "send_back"})
       assert error!(token, "review_issue", %{"issue" => "id-PAY-2", "verdict" => "approve"}) =~ "isn't waiting"
       assert error!(token, "review_issue", %{"issue" => "id-PAY-3", "verdict" => "maybe"}) =~ "approve or send_back"
+    end
+
+    test "moves are checked against the issue's own flow: its project's when it has one", %{mia_token: token} do
+      # The project's flow lets a person close a blocked or in-review issue; the team's doesn't.
+      project_only = [human("blocked", "done"), human("review", "done")]
+      template = Definition.default_template()
+      assert {:ok, _} = Store.put("project:project", %{template | "transitions" => template["transitions"] ++ project_only}, 0, "ada")
+      assert {:ok, _} = Store.put("PAY", %{template | "transitions" => template["transitions"] ++ [human("blocked", "merge")]}, 0, "ada")
+
+      # PAY-20 is blocked (In Progress + factory/blocked), PAY-1 in review.
+      assert %{"moved" => true} = ok!(token, "move_issue", %{"issue" => "id-PAY-20", "to" => "done"})
+      assert_receive {:graphql, _, %{stateName: "Done", stage: ""}}, 1_000
+      assert %{"moved" => true} = ok!(token, "move_issue", %{"issue" => "id-PAY-1", "to" => "done"})
+
+      # Only the team's flow has blocked -> merge; neither has blocked -> rework.
+      assert error!(token, "move_issue", %{"issue" => "id-PAY-20", "to" => "merge"}) ==
+               "That move (Blocked → Merge) isn't a connection in the project:project flow."
+
+      assert error!(token, "move_issue", %{"issue" => "id-PAY-20", "to" => "rework"}) =~ "(Blocked → Rework) isn't a connection in the project:project flow"
+      assert error!(token, "move_issue", %{"issue" => "id-PAY-20", "to" => "qa"}) == "That stage isn't in the project:project flow."
+
+      # Without its own flow the project follows the team's.
+      Store.reset_team("project:project")
+      assert error!(token, "move_issue", %{"issue" => "id-PAY-20", "to" => "done"}) =~ "(Blocked → Done) isn't a connection in the PAY team flow"
+      assert %{"moved" => true} = ok!(token, "move_issue", %{"issue" => "id-PAY-20", "to" => "merge"})
+    end
+
+    test "an issue Linear already closed can be moved to done, catching the factory up", %{mia_token: token} do
+      # PAY-21 went to Done in Linear with its factory/blocked label; the factory still shows it blocked.
+      observe!("PAY-21", "In Progress", ["factory/blocked"], "project")
+      assert %{"stage" => "blocked"} = ok!(token, "get_issue", %{"identifier" => "PAY-21"})
+
+      assert %{"moved" => true} = ok!(token, "move_issue", %{"issue" => "id-PAY-21", "to" => "done"})
+      assert_receive {:graphql, _, %{stateName: "Done", stage: ""}}, 1_000
+      assert %{"stage" => "done", "previous_stage" => "blocked"} = ok!(token, "get_issue", %{"identifier" => "PAY-21"})
     end
 
     test "flow edits validate their input", %{mia_token: token, admin_token: admin_token} do
@@ -570,6 +615,8 @@ defmodule SymphonyElixir.McpToolsTest do
     conn = Enum.reduce(headers, conn, fn {key, value}, acc -> put_req_header(acc, key, value) end)
     post(conn, "/mcp", Jason.encode!(body))
   end
+
+  defp human(from, to), do: %{"from" => from, "to" => to, "by" => "human", "criteria" => "A person closed it"}
 
   defp observe!(identifier, state, labels \\ [], project \\ nil) do
     issue = %Issue{id: "id-" <> identifier, identifier: identifier, title: identifier, state: state, labels: labels}

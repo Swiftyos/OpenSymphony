@@ -112,6 +112,8 @@ defmodule SymphonyElixir.IssueMoves do
   def describe_error(:not_team_editor), do: "Only this team's members and Linear admins can change its flow."
   def describe_error(:unknown_target), do: "That stage isn't in this team's flow."
   def describe_error(:not_a_move), do: "That move isn't a connection in this team's flow."
+  def describe_error({:unknown_target, definition}), do: "That stage isn't in #{flow_name(definition)}."
+  def describe_error({:not_a_move, definition, from, to}), do: "That move (#{stage_name(definition, from)} → #{stage_name(definition, to)}) isn't a connection in #{flow_name(definition)}."
   def describe_error(:agent_move), do: "Agents make that move. Only admins can force it."
   def describe_error(:not_awaiting_approval), do: "That issue isn't waiting for approval any more."
   def describe_error(:unknown_origin), do: "Symphony doesn't know which stage that came from. Move it from its stage instead."
@@ -125,16 +127,33 @@ defmodule SymphonyElixir.IssueMoves do
   def describe_error(reason), do: inspect(reason)
 
   # Members make the person-moved connections of their flow; admins can make
-  # any connection the flow defines.
+  # any connection the flow defines. The flow and the stage the issue is in are
+  # the ones it has in Linear now (its project's flow when the project has its
+  # own). An issue already in the target stage (closed in Linear before the
+  # factory caught up, say) is simply set to it again: that clears stale stage
+  # labels and brings the factory up to date.
   defp allowed_move(user, issue, to) do
     definition = IssueStage.definition(issue)
     from = IssueStage.stage(issue)
 
-    with %{} = target <- Definition.stage(definition, to) || {:error, :unknown_target},
-         %{} = transition <- Enum.find(definition["transitions"], &(&1["from"] == from and &1["to"] == to)) || {:error, :not_a_move} do
+    with %{} = target <- Definition.stage(definition, to) || {:error, {:unknown_target, definition}},
+         %{} = transition <- find_transition(definition, from, to) || {:error, {:not_a_move, definition, from, to}} do
       if transition["by"] == "human" or Auth.can_control?(user), do: {:ok, target}, else: {:error, :agent_move}
     end
   end
+
+  defp find_transition(_definition, stage, stage), do: %{"by" => "human"}
+  defp find_transition(definition, from, to), do: Enum.find(definition["transitions"], &(&1["from"] == from and &1["to"] == to))
+
+  # The flow the issue follows, by where it came from: a project's own flow,
+  # a team's, or the default one it inherits.
+  defp flow_name(%{"source" => "project:" <> _ = source}), do: "the #{source} flow"
+  defp flow_name(%{"source" => "template"}), do: "the built-in default flow"
+  defp flow_name(%{"source" => source}) when is_binary(source), do: if(source == Store.default_team(), do: "the default flow", else: "the #{source} team flow")
+  defp flow_name(_definition), do: "this issue's flow"
+
+  defp stage_name(_definition, nil), do: "no stage"
+  defp stage_name(definition, id), do: (Definition.stage(definition, id) || %{})["name"] || id
 
   defp actor(user, opts), do: Keyword.get(opts, :actor) || user.username || "local"
 

@@ -149,6 +149,8 @@ defmodule SymphonyElixir.OrchestratorAsyncTest do
     Application.delete_env(:symphony_elixir, :async_tracker_crash_on_fetch)
     Application.delete_env(:symphony_elixir, :async_tracker_state_delays)
     Application.put_env(:symphony_elixir, :async_tracker_gate, :open)
+    # Issues earlier tests left in the ledger would be re-read by id on the first poll.
+    SymphonyElixir.UsageLedger.reset()
 
     on_exit(fn ->
       restore_app_env(:linear_client_module, previous.linear_client_module)

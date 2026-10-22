@@ -41,6 +41,7 @@ defmodule SymphonyElixir.Orchestrator do
   @poll_timeout_multiplier 5
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
+  @tracked_refresh_interval_ms 60_000
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
   @empty_codex_totals %{
@@ -93,7 +94,10 @@ defmodule SymphonyElixir.Orchestrator do
       agent_totals: nil,
       rate_limits: nil,
       # Rejected environments already reported, {issue_id, message} => monotonic ms.
-      environment_rejections: %{}
+      environment_rejections: %{},
+      # When the poll last re-read the issues the ledger shows in an open stage
+      # (monotonic ms; nil: on the next poll, as after a requested refresh).
+      tracked_refreshed_at_ms: nil
     ]
   end
 
@@ -119,7 +123,9 @@ defmodule SymphonyElixir.Orchestrator do
         poll_check_in_progress: false,
         refresh_pending: false,
         tick_timer_ref: nil,
-        tick_token: nil
+        tick_token: nil,
+        # The first polls after a start are for dispatch; tracked issues are re-read a minute in.
+        tracked_refreshed_at_ms: now_ms
       }
       |> initialize_backend_totals(config)
       |> restore_retries()
@@ -416,6 +422,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp start_poll_task(%State{} = state) do
     running_ids = Map.keys(state.running)
     fingerprint = state.config_fingerprint
+    {tracked_ids, state} = tracked_issue_ids(state)
 
     task =
       Task.Supervisor.async_nolink(SymphonyElixir.TaskSupervisor, fn ->
@@ -424,7 +431,8 @@ defmodule SymphonyElixir.Orchestrator do
         %{
           running_ids: running_ids,
           running_result: fetch_running_states(running_ids, candidates_result),
-          candidates_result: candidates_result
+          candidates_result: candidates_result,
+          tracked_result: fetch_tracked_states(tracked_ids, running_ids, candidates_result)
         }
       end)
 
@@ -461,6 +469,36 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp fetch_running_states(running_ids, _candidates_result), do: Tracker.fetch_issue_states_by_ids(running_ids)
 
+  # The candidate fetch only returns issues in active states, so one that left
+  # them outside the factory (closed in Linear, moved to Done by a PR merge
+  # integration) would keep its last stage forever. Every
+  # @tracked_refresh_interval_ms, and on a requested refresh, the issues the
+  # ledger still shows in an open stage are re-read by id.
+  defp tracked_issue_ids(%State{tracked_refreshed_at_ms: last} = state) do
+    now_ms = System.monotonic_time(:millisecond)
+
+    if is_nil(last) or now_ms - last >= @tracked_refresh_interval_ms do
+      {UsageLedger.unsettled_issue_ids(), %{state | tracked_refreshed_at_ms: now_ms}}
+    else
+      {[], state}
+    end
+  end
+
+  # Only the ones neither the candidate fetch nor the running refresh read.
+  defp fetch_tracked_states([], _running_ids, _candidates_result), do: {:ok, []}
+
+  defp fetch_tracked_states(tracked_ids, running_ids, {:ok, candidates}) when is_list(candidates) do
+    seen = MapSet.new(running_ids ++ for(%Issue{id: id} <- candidates, do: id))
+
+    case Enum.reject(tracked_ids, &MapSet.member?(seen, &1)) do
+      [] -> {:ok, []}
+      ids -> Tracker.fetch_issue_states_by_ids(ids)
+    end
+  end
+
+  # Linear is failing already: don't add to it.
+  defp fetch_tracked_states(_tracked_ids, _running_ids, _candidates_result), do: {:ok, []}
+
   defp handle_poll_result(state, poll_task, result) do
     state = refresh_runtime_config(state)
     state = %{state | poll_task: nil, poll_check_in_progress: false}
@@ -475,6 +513,7 @@ defmodule SymphonyElixir.Orchestrator do
       state =
         state
         |> apply_running_states(poll_task.running_ids, result.running_result)
+        |> apply_tracked_issues(Map.get(result, :tracked_result))
         |> apply_candidate_issues(result.candidates_result)
 
       state = schedule_after_poll(state, state.poll_interval_ms)
@@ -528,7 +567,7 @@ defmodule SymphonyElixir.Orchestrator do
     # closed or vanished), so a pending delayed restart is checked every poll too.
     if state.delayed_restart, do: send(self(), :delayed_restart_check)
 
-    Enum.each(issues, &UsageLedger.observe_issue/1)
+    Enum.each(issues, &UsageLedger.observe_issue(&1, external: true))
     # A cast: the unblocking (tracker reads and writes) happens in its own tasks.
     Unblocker.observe(issues)
     RepoLabelCheck.observe(issues)
@@ -546,6 +585,92 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp apply_candidate_issues(state, _result), do: state
+
+  # Issues re-read because the ledger showed them in an open stage. Their stage
+  # is brought up to date (a terminal one recorded as a move made outside the
+  # factory), and one that reached a terminal state loses what parked or queued
+  # it: stale stage and approval labels, and a pending retry.
+  defp apply_tracked_issues(state, {:ok, issues}) when is_list(issues) do
+    terminal_states = terminal_state_set()
+
+    Enum.reduce(issues, state, fn
+      %Issue{id: issue_id} = issue, acc when is_binary(issue_id) ->
+        UsageLedger.observe_issue(issue, external: true)
+
+        if terminal_tracker_issue?(issue, terminal_states) and not Map.has_key?(acc.running, issue_id) do
+          clear_stale_stage_labels(issue)
+          drop_retry(acc, issue)
+        else
+          acc
+        end
+
+      _issue, acc ->
+        acc
+    end)
+  end
+
+  defp apply_tracked_issues(state, {:error, reason}) do
+    Logger.debug("Failed to refresh tracked issue states: #{inspect(reason)}")
+    state
+  end
+
+  defp apply_tracked_issues(state, _result), do: state
+
+  defp terminal_tracker_issue?(%Issue{} = issue, terminal_states) do
+    terminal_issue_state?(issue.state, terminal_states) or issue.state_type in ["completed", "canceled"]
+  end
+
+  # A closed issue keeps no parked marker: a `<prefix>/blocked` label (or the
+  # approval label) left on it would park it again if it were ever reopened.
+  # The label of the stage it's in now, if any, stays.
+  defp clear_stale_stage_labels(%Issue{} = issue) do
+    keep = stage_label(IssueStage.stage_definition(issue))
+    if stale_stage_labels?(issue, keep), do: run_async(fn -> set_closed_issue_stage(issue, keep) end)
+    :ok
+  end
+
+  defp stale_stage_labels?(%Issue{labels: labels}, keep) do
+    prefix = IssueStage.label_prefix() <> "/"
+    approval = IssueStage.approval_label()
+    labels |> List.wrap() |> Enum.map(&String.downcase/1) |> Enum.any?(&(&1 == approval or (String.starts_with?(&1, prefix) and &1 != prefix <> (keep || ""))))
+  end
+
+  defp set_closed_issue_stage(%Issue{} = issue, keep) do
+    case Tracker.set_stage(issue.id, issue.state, keep, drop_labels: [IssueStage.approval_label()]) do
+      :ok -> Logger.info("Cleared stage labels on closed issue: #{issue_context(issue)} state=#{issue.state}")
+      {:error, reason} -> Logger.warning("Clearing stage labels failed: #{issue_context(issue)} reason=#{inspect(reason)}")
+    end
+  end
+
+  defp stage_label(%{"label" => label}) when is_binary(label), do: String.downcase(label)
+  defp stage_label(_stage), do: nil
+
+  defp drop_retry(%State{} = state, %Issue{id: issue_id} = issue) do
+    case Map.get(state.retry_attempts, issue_id) do
+      nil ->
+        release_issue_claim(state, issue_id)
+
+      entry ->
+        if is_reference(entry[:timer_ref]), do: Process.cancel_timer(entry.timer_ref)
+        Logger.info("Dropping retry for closed issue: #{issue_context(issue)} state=#{issue.state}")
+
+        state
+        |> release_issue_claim(issue_id)
+        |> put_retry_attempts(Map.delete(state.retry_attempts, issue_id))
+    end
+  end
+
+  @doc false
+  @spec apply_tracked_issues_for_test(term(), {:ok, [Issue.t()]} | {:error, term()}) :: term()
+  def apply_tracked_issues_for_test(%State{} = state, result), do: apply_tracked_issues(state, result)
+
+  @doc false
+  @spec fetch_tracked_states_for_test([String.t()], [String.t()], term()) :: {:ok, [term()]} | {:error, term()}
+  def fetch_tracked_states_for_test(tracked_ids, running_ids, candidates_result), do: fetch_tracked_states(tracked_ids, running_ids, candidates_result)
+
+  @doc false
+  @spec tracked_issue_ids_for_test(term()) :: {[String.t()], term()}
+  def tracked_issue_ids_for_test(%State{} = state), do: tracked_issue_ids(state)
 
   @doc false
   @spec fetch_running_states_for_test([String.t()], term()) :: {:ok, [term()]} | {:error, term()}
@@ -612,7 +737,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_issue_state(%Issue{} = issue, state, active_states, terminal_states) do
-    UsageLedger.observe_issue(issue)
+    UsageLedger.observe_issue(issue, external: true)
 
     cond do
       terminal_issue_state?(issue.state, terminal_states) ->
@@ -2089,7 +2214,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp handle_retry_issue_lookup(%Issue{} = issue, state, issue_id, attempt, metadata) do
     terminal_states = terminal_state_set()
-    UsageLedger.observe_issue(issue)
+    UsageLedger.observe_issue(issue, external: true)
 
     cond do
       terminal_issue_state?(issue.state, terminal_states) ->
@@ -2575,7 +2700,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   def handle_call(:request_refresh, _from, state) do
-    {coalesced, state} = queue_refresh(state)
+    # A refresh someone asked for also re-reads the issues tracked in open stages.
+    {coalesced, state} = queue_refresh(%{state | tracked_refreshed_at_ms: nil})
 
     {:reply,
      %{

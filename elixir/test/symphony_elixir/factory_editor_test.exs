@@ -48,10 +48,11 @@ defmodule SymphonyElixir.FactoryEditorTest do
            case identifier do
              "PAY-2" -> ["factory/merge"]
              "PAY-3" -> ["factory/merge", "needs-approval"]
+             "PAY-20" -> ["factory/blocked"]
              _ -> []
            end
 
-         state = if identifier in ["PAY-2", "PAY-3"], do: "In Progress", else: "In Review"
+         state = if identifier in ["PAY-2", "PAY-3", "PAY-20"], do: "In Progress", else: "In Review"
 
          %SymphonyElixir.Linear.Issue{
            id: id,
@@ -440,10 +441,10 @@ defmodule SymphonyElixir.FactoryEditorTest do
       assert_reply(view, %{ok: true})
 
       render_hook(view, "factory_move", %{"id" => "id-PAY-1", "to" => "done"})
-      assert_reply(view, %{ok: false, error: "That move isn't a connection in this team's flow."})
+      assert_reply(view, %{ok: false, error: "That move (In Review → Done) isn't a connection in the built-in default flow."})
 
       render_hook(view, "factory_move", %{"id" => "id-PAY-1", "to" => "nowhere"})
-      assert_reply(view, %{ok: false, error: "That stage isn't in this team's flow."})
+      assert_reply(view, %{ok: false, error: "That stage isn't in the built-in default flow."})
 
       # PAY-2 is in Merge: merge -> done is an agent move.
       render_hook(view, "factory_move", %{"id" => "id-PAY-2", "to" => "done"})
@@ -452,6 +453,25 @@ defmodule SymphonyElixir.FactoryEditorTest do
       {:ok, admin_view, _html} = live(session_for(ada), "/")
       render_hook(admin_view, "factory_move", %{"id" => "id-PAY-2", "to" => "done"})
       assert_reply(admin_view, %{ok: true})
+    end
+
+    test "dashboard moves follow the issue's project flow, not its team's", %{mia: mia} do
+      template = Definition.default_template()
+      close = %{"from" => "blocked", "to" => "done", "by" => "human", "criteria" => "A person closed it"}
+      {:ok, _} = Store.put("project:project", %{template | "transitions" => template["transitions"] ++ [close]}, 0, "mia")
+      {:ok, view, _html} = live(session_for(mia), "/")
+
+      # PAY-20 is blocked; the project's flow lets a person close it.
+      render_hook(view, "factory_move", %{"id" => "id-PAY-20", "to" => "done"})
+      assert_reply(view, %{ok: true})
+
+      # The team's (default) flow has blocked -> review; the project's flow doesn't.
+      {:ok, _} = Store.put("project:project", %{template | "transitions" => Enum.reject(template["transitions"], &(&1["to"] == "review" and &1["from"] == "blocked")) ++ [close]}, 1, "mia")
+      render_hook(view, "factory_move", %{"id" => "id-PAY-20", "to" => "review"})
+      assert_reply(view, %{ok: false, error: "That move (Blocked → In Review) isn't a connection in the project:project flow."})
+
+      render_hook(view, "factory_move", %{"id" => "id-PAY-20", "to" => "merge"})
+      assert_reply(view, %{ok: false, error: "That move (Blocked → Merge) isn't a connection in the project:project flow."})
     end
 
     test "people approve or send back a held issue, and stages earn autonomy", %{mia: mia} do

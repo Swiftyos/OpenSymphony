@@ -654,9 +654,13 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
       title: ledger.title,
       url: ledger.url,
       project: ledger.project,
-      moves: Enum.map(ledger.moves, fn [from, to, at] -> %{from: from, to: to, at_ms: at} end)
+      moves: Enum.map(ledger.moves, &move_summary/1)
     }
   end
+
+  # `by: "external"`: made outside the factory (in Linear, or by an integration).
+  defp move_summary([from, to, at]), do: %{from: from, to: to, at_ms: at}
+  defp move_summary([from, to, at, by]), do: %{from: from, to: to, at_ms: at, by: by}
 
   defp message_summary(message), do: Map.take(message, [:id, :author, :text, :at, :status, :delivered_at, :delivery])
 

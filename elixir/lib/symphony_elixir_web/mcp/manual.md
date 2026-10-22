@@ -283,7 +283,7 @@ Read:
 | `list_flows` | none | The flows you can see (default, teams, projects), which flow each uses, version, stage ids, whether you may edit it. |
 | `get_flow` | `scope`: `DEFAULT`, a team key, or `project:<slug>` | A flow's definition (stages, settings, transitions, autopilot), the issues in each stage, and its `version`. |
 | `list_issues` | `scope`, `stage`, `awaiting_approval` (all optional) | Issues Symphony tracks, with stage, flow and whether a move is held for approval. |
-| `get_issue` | `identifier` (e.g. `WEB-12`) | Stage, previous stage, move history, live session or retry, and messages to its agent. |
+| `get_issue` | `identifier` (e.g. `WEB-12`) | Stage, previous stage, move history, live session or retry, and messages to its agent. A move with `by: "external"` closed the issue outside the factory (in Linear, or a PR merge integration). |
 | `get_transcript` | `identifier`, `limit` (default 50, max 200) | The newest transcript entries: messages, thinking, commands with output, edits, tool calls, turns. |
 | `list_projects` | none | The projects Symphony listens to: primary `repo`, `repos`, branch, harness, environment, `source` (`config` or `mcp`) and whether it's active. |
 
@@ -295,7 +295,7 @@ Change (what your account may change):
 | `set_stage_control` | `scope`, `stage`, `field` (`paused`, `max_agents`, `backend`, `effort`, `approval`), `value` | Changes one runtime control of a stage; `null` clears it. |
 | `set_autopilot` | `scope`, `enabled`, `streak` | Turns earned autonomy on or off; resets every stage's streak. |
 | `reset_flow` | `scope` | Deletes a team's or project's own flow so it inherits again. |
-| `move_issue` | `issue` (identifier or id), `to` (stage id) | Moves an issue along a connection of its flow. |
+| `move_issue` | `issue` (identifier or id), `to` (stage id) | Moves an issue along a connection of its flow (its project's when the project has its own), from the stage it is in in Linear now. Moving it to the stage it is already in just sets that stage again. |
 | `review_issue` | `issue`, `verdict` (`approve` or `send_back`) | Decides a move held for approval. |
 | `send_agent_message` | `identifier`, `text` (max 8000) | Messages the agent on an issue. |
 | `refresh` | none | Polls Linear now instead of at the next tick. |

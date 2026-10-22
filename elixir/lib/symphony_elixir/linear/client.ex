@@ -27,6 +27,7 @@ defmodule SymphonyElixir.Linear.Client do
         priority
         state {
           name
+          type
         }
         project {
           id
@@ -81,6 +82,7 @@ defmodule SymphonyElixir.Linear.Client do
         priority
         state {
           name
+          type
         }
         project {
           id
@@ -613,6 +615,7 @@ defmodule SymphonyElixir.Linear.Client do
       description: issue["description"],
       priority: parse_priority(issue["priority"]),
       state: get_in(issue, ["state", "name"]),
+      state_type: get_in(issue, ["state", "type"]),
       project_id: project_field(project, "id"),
       project_slug: project_field(project, "slugId"),
       project_name: project_field(project, "name"),
