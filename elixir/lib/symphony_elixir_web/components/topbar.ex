@@ -24,7 +24,7 @@ defmodule SymphonyElixirWeb.Topbar do
     <header class="topbar">
       <a class="brand" href="/">
         <img :if={logo?()} class="brand-logo" src="/branding/logo" alt="" />
-        <Brand.tile :if={!logo?()} id="brand-tile" class="brand-tile" />
+        <Brand.logo :if={!logo?()} id="brand-crane" class="brand-crane" />
         <h1 class="ops-title">
           <span class="sr-only">Agent Factory</span>
           <span class="brand-name" aria-hidden="true">Agent Factory</span>

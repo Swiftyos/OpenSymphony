@@ -169,13 +169,6 @@ pre {
   flex: none;
 }
 
-.brand-tile {
-  display: block;
-  width: 34px;
-  height: 34px;
-  flex: none;
-}
-
 .login-crane {
   display: block;
   height: 44px;

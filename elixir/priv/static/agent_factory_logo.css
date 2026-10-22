@@ -125,29 +125,3 @@ html.afl-played .afl-mid, html.afl-played .afl-pieces, html.afl-played .afl-snap
   .afl-full   { animation: none; visibility: visible; }
   .afl-hook   { animation: none; transform: translateY(-15px); }
 }
-
-/* The header's tile (Brand.tile/1): the favicon's design. It rests on the
-   finished mark and replays the crane + snap each time its link is hovered.
-   Ink tile, n8n pink crane (#EA4B71), white mark; the favicon files match.
-   `.is-playing` plays it without a hover (previews, screenshots). */
-.afl.is-tile { aspect-ratio: 1; color: #fff; }
-.afl.is-tile .afl-svg { overflow: hidden; border-radius: 22%; }
-.afl.is-tile .afl-tile-bg { fill: #1f1f1f; }
-.afl.is-tile .afl-crane { color: #ea4b71; }
-
-.afl.is-tile .afl-mid, .afl.is-tile .afl-pieces, .afl.is-tile .afl-snap { animation: none; }
-.afl.is-tile .afl-pieces { visibility: hidden; }
-.afl.is-tile .afl-full { animation: none; visibility: visible; }
-.afl.is-tile .afl-hook { animation: none; transform: translateY(-15px); }
-
-@media (prefers-reduced-motion: no-preference) {
-  a:hover > .afl.is-tile .afl-mid, .afl.is-tile.is-playing .afl-mid { transform: translateY(-10px); animation: afl-lower 0.9s ease-in-out 0.2s both; }
-  a:hover > .afl.is-tile .afl-hook, .afl.is-tile.is-playing .afl-hook {
-    transform: translateY(-10px);
-    animation: afl-lower 0.9s ease-in-out 0.2s both,
-               afl-rise  0.4s ease-in-out 1.1s forwards;
-  }
-  a:hover > .afl.is-tile .afl-pieces, .afl.is-tile.is-playing .afl-pieces { visibility: visible; animation: afl-hide 1ms step-end 1.1s forwards; }
-  a:hover > .afl.is-tile .afl-full, .afl.is-tile.is-playing .afl-full { visibility: hidden; animation: afl-full 2.483s step-end 1.1s forwards; }
-  a:hover > .afl.is-tile .afl-snap, .afl.is-tile.is-playing .afl-snap { visibility: hidden; animation: afl-show 2.100s step-end 1.467s, afl-snap 2.133s step-end 1.45s; }
-}
