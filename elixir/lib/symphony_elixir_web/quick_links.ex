@@ -152,6 +152,12 @@ defmodule SymphonyElixirWeb.QuickLinks do
     else
       _ -> nil
     end
+  rescue
+    # Runs while a page mounts: a failing Linear call costs the workspace
+    # link, never the page.
+    _ -> nil
+  catch
+    :exit, _ -> nil
   end
 
   defp client, do: Application.get_env(:symphony_elixir, :linear_client_module, SymphonyElixir.Linear.Client)

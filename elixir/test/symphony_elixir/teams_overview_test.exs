@@ -19,6 +19,10 @@ defmodule SymphonyElixir.TeamsOverviewTest do
   @endpoint SymphonyElixirWeb.Endpoint
   @orchestrator Module.concat(__MODULE__, :Orchestrator)
 
+  defmodule CrashingLinear do
+    def graphql(_query, _variables, _opts), do: raise("Linear is down")
+  end
+
   # ada: Linear admin. tia: PAY and WEB member, Symphony admin of PAY. wes: WEB
   # member. vic: global viewer. Linear's key sees PAY, WEB and OPS, not SEC.
   defmodule FakeLinear do
@@ -487,6 +491,16 @@ defmodule SymphonyElixir.TeamsOverviewTest do
       # Someone who can't see the project gets none of its links.
       {:ok, _view, html} = live(iap_conn(people.wes), "/")
       refute html =~ "github.com/acme/checkout"
+    end
+
+    test "a failing Linear workspace lookup costs the link, not the page", %{people: people} do
+      # No issue URL to read the workspace from, and a Linear client that crashes.
+      UsageLedger.reset()
+      SymphonyElixirWeb.QuickLinks.reset()
+      Application.put_env(:symphony_elixir, :linear_client_module, CrashingLinear)
+
+      {:ok, _view, html} = live(iap_conn(people.vic), "/")
+      refute html =~ ~s(href="https://linear.app/)
     end
 
     test "admins and the project's team admins remove a project; it stays gone", %{people: people, issue: issue} do
