@@ -80,10 +80,13 @@ defmodule SymphonyElixir.RunTracePropagationTest do
 
     assert_receive {:trace_start, %RunSpec{run_id: run_id, telemetry: telemetry}, run_pid}, 5_000
     root = RunTrace.root(run_id)
+    started_on = telemetry["started_on"]
+    assert started_on =~ ~r|^\d{4}/\d{2}/\d{2}$|
 
     assert telemetry == %{
              "traceparent" => RunTrace.traceparent(root),
              "launcher" => "trace_launcher",
+             "started_on" => started_on,
              "otlp_endpoint" => @pod_collector,
              "otlp_protocol" => "http/protobuf"
            }
@@ -106,6 +109,8 @@ defmodule SymphonyElixir.RunTracePropagationTest do
     assert attribute(run, "langfuse.trace.name") == "symphony.run MT-TRACE attempt 0"
     assert run["resource"]["symphony.run.id"] == run_id
     assert run["resource"]["symphony.run.launcher"] == "trace_launcher"
+    assert run["resource"]["symphony.run.started_on"] == started_on
+    assert dispatch["resource"]["symphony.run.started_on"] == started_on
     assert run["resource"]["linear.issue.identifier"] == "MT-TRACE"
     assert run["resource"]["service.name"] == "symphony"
   end
@@ -128,7 +133,8 @@ defmodule SymphonyElixir.RunTracePropagationTest do
     issue = Support.issue_fixture("issue-adopt-trace", "MT-ADOPT-TRACE")
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
     run_id = "run-adopt-trace"
-    started_at_ms = System.system_time(:millisecond) - 60_000
+    # Started on an earlier day: the date comes from the registry, not now.
+    started_at_ms = DateTime.to_unix(~U[2026-01-02 23:00:00Z], :millisecond)
 
     :ok =
       RunRegistry.record(issue.id, %{
@@ -153,6 +159,7 @@ defmodule SymphonyElixir.RunTracePropagationTest do
     assert run["spanId"] == RunTrace.root_span_id(run_id)
     assert run["startTimeUnixNano"] == Integer.to_string(started_at_ms * 1_000_000)
     assert run["resource"]["symphony.run.attempt"] == "3"
+    assert run["resource"]["symphony.run.started_on"] == "2026/01/02"
   end
 
   test "a run recovered as already finished still closes its trace", %{root: root} do

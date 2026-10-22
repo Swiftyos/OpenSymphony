@@ -350,7 +350,7 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodSpecTest do
   describe "telemetry" do
     test "with telemetry on, the runner gets the run's trace context and the pod collector", %{spec: spec} do
       traceparent = "00-#{String.duplicate("a", 32)}-#{String.duplicate("b", 16)}-01"
-      spec = %{spec | issue: %{spec.issue | project_slug: "proj"}, telemetry: %{"traceparent" => traceparent, "launcher" => "kubernetes"}}
+      spec = %{spec | issue: %{spec.issue | project_slug: "proj"}, telemetry: %{"traceparent" => traceparent, "launcher" => "kubernetes", "started_on" => "2026/10/22"}}
 
       settings =
         settings!(%{"otlp_endpoint" => "http://otel-collector.symphony.svc:4318"}, %{
@@ -366,7 +366,8 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodSpecTest do
       assert env["OTEL_EXPORTER_OTLP_PROTOCOL"] == "http/protobuf"
 
       attributes = env["OTEL_RESOURCE_ATTRIBUTES"]
-      assert attributes =~ "symphony.run.id=Run+ABC_1"
+      assert attributes =~ "symphony.run.id=Run%20ABC_1"
+      assert attributes =~ "symphony.run.started_on=2026/10/22"
       assert attributes =~ "symphony.run.attempt=1"
       assert attributes =~ "symphony.run.launcher=kubernetes"
       assert attributes =~ "symphony.project=proj"

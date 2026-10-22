@@ -1438,7 +1438,17 @@ defmodule SymphonyElixir.Orchestrator do
     run_id = RunRegistry.new_run_id()
     epoch = RunRegistry.next_epoch(issue.id)
     # The run's trace: its id comes from the run id, so an adopted run keeps it.
-    trace = RunTrace.root(run_id, attempt: normalize_retry_attempt(attempt), launcher: launcher, issue: issue, backend: route.backend)
+    # Its start date comes from started_at, which the registry keeps.
+    started_at = DateTime.utc_now()
+
+    trace =
+      RunTrace.root(run_id,
+        attempt: normalize_retry_attempt(attempt),
+        launcher: launcher,
+        started_at: started_at,
+        issue: issue,
+        backend: route.backend
+      )
 
     fun = fn ->
       AgentRunner.run(
@@ -1478,7 +1488,7 @@ defmodule SymphonyElixir.Orchestrator do
 
         running_entry =
           new_running_entry(issue, pid, ref, worker_host, attempt, route, account)
-          |> Map.merge(%{run_id: run_id, epoch: epoch, launcher: launcher, run_ref: run_ref})
+          |> Map.merge(%{run_id: run_id, epoch: epoch, launcher: launcher, run_ref: run_ref, started_at: started_at})
 
         :ok = RunRegistry.record(issue.id, registry_entry(running_entry))
 
@@ -1522,6 +1532,7 @@ defmodule SymphonyElixir.Orchestrator do
       RunTrace.root(run_id,
         attempt: Map.get(running_entry, :retry_attempt),
         launcher: Map.get(running_entry, :launcher),
+        started_at: Map.get(running_entry, :started_at),
         issue: Map.get(running_entry, :issue),
         backend: Map.get(running_entry, :backend)
       )

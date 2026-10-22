@@ -21,9 +21,12 @@ defmodule SymphonyElixir.RunTrace do
       W3C context from its environment nests its spans under it.
 
   The run's resource attributes (`symphony.run.id`, `symphony.run.attempt`,
-  `symphony.run.launcher`, `symphony.project`, `symphony.trace_id`) go on
-  every Symphony span and into the agent's `OTEL_RESOURCE_ATTRIBUTES`, so a
-  CLI that ignores `TRACEPARENT` can still be joined to its run.
+  `symphony.run.launcher`, `symphony.run.started_on`, `symphony.project`,
+  `symphony.trace_id`) go on every Symphony span and into the agent's
+  `OTEL_RESOURCE_ATTRIBUTES`, so a CLI that ignores `TRACEPARENT` can still be
+  joined to its run. `symphony.run.started_on` is the run's start date in UTC
+  as `YYYY/MM/DD`, from its `started_at` (kept by the run registry, so it is
+  the same after a restart); the trace archive files a run's signals under it.
 
   The controller hands the context to a separate runner in the run spec's
   `telemetry` map (`to_spec_map/2`); `from_spec/1` reads it back.
@@ -42,6 +45,7 @@ defmodule SymphonyElixir.RunTrace do
     :run_id,
     :attempt,
     :launcher,
+    :started_on,
     :issue_id,
     :identifier,
     :project,
@@ -55,6 +59,7 @@ defmodule SymphonyElixir.RunTrace do
           run_id: String.t(),
           attempt: non_neg_integer() | nil,
           launcher: String.t() | nil,
+          started_on: String.t() | nil,
           issue_id: String.t() | nil,
           identifier: String.t() | nil,
           project: String.t() | nil,
@@ -96,8 +101,9 @@ defmodule SymphonyElixir.RunTrace do
 
   @doc """
   The root context of a run: its trace and `symphony.run` span. `opts`:
-  `:attempt`, `:launcher` (a launcher module or name), `:issue` (for its id,
-  identifier and project slug), `:backend`.
+  `:attempt`, `:launcher` (a launcher module or name), `:started_at` (the
+  run's start, a `DateTime`), `:issue` (for its id, identifier and project
+  slug), `:backend`.
   """
   @spec root(String.t(), keyword()) :: t()
   def root(run_id, opts \\ []) when is_binary(run_id) do
@@ -110,12 +116,18 @@ defmodule SymphonyElixir.RunTrace do
       run_id: run_id,
       attempt: Keyword.get(opts, :attempt),
       launcher: launcher_name(Keyword.get(opts, :launcher)),
+      started_on: started_on(Keyword.get(opts, :started_at)),
       issue_id: field(issue, :id),
       identifier: field(issue, :identifier),
       project: field(issue, :project_slug),
       backend: Keyword.get(opts, :backend)
     }
   end
+
+  @doc "A start time's UTC date as `YYYY/MM/DD` (nil without one)."
+  @spec started_on(DateTime.t() | nil) :: String.t() | nil
+  def started_on(%DateTime{} = started_at), do: started_at |> DateTime.shift_zone!("Etc/UTC") |> Calendar.strftime("%Y/%m/%d")
+  def started_on(_started_at), do: nil
 
   @doc "A child of `parent` with a new span id."
   @spec child(t()) :: t()
@@ -134,7 +146,7 @@ defmodule SymphonyElixir.RunTrace do
 
   @doc """
   The run spec's `telemetry` map: the root `traceparent`, the launcher name,
-  and the OTLP endpoint and protocol a runner should use instead of the
+  the run's start date (`started_on`), and the OTLP endpoint and protocol a runner should use instead of the
   configured ones (nil when it uses the configured ones). It never carries
   credentials: exporter authentication lives in the collector.
   """
@@ -143,6 +155,7 @@ defmodule SymphonyElixir.RunTrace do
     %{
       "traceparent" => traceparent(root),
       "launcher" => root.launcher,
+      "started_on" => root.started_on,
       "otlp_endpoint" => otlp_override && otlp_override.endpoint,
       "otlp_protocol" => otlp_override && otlp_override.protocol
     }
@@ -157,6 +170,7 @@ defmodule SymphonyElixir.RunTrace do
   def from_spec(%{run_id: run_id} = spec) when is_binary(run_id) do
     telemetry = Map.get(spec, :telemetry) || %{}
     root = root(run_id, attempt: Map.get(spec, :attempt), launcher: telemetry["launcher"], issue: Map.get(spec, :issue), backend: Map.get(spec, :backend))
+    root = %{root | started_on: spec_started_on(telemetry["started_on"])}
 
     case parse_traceparent(telemetry["traceparent"]) do
       {:ok, {trace_id, span_id}} -> %{root | trace_id: trace_id, span_id: span_id}
@@ -197,6 +211,7 @@ defmodule SymphonyElixir.RunTrace do
       {"symphony.run.id", context.run_id},
       {"symphony.run.attempt", context.attempt},
       {"symphony.run.launcher", context.launcher},
+      {"symphony.run.started_on", context.started_on},
       {"symphony.project", context.project},
       {"symphony.trace_id", context.trace_id},
       {"linear.issue.id", context.issue_id},
@@ -259,6 +274,9 @@ defmodule SymphonyElixir.RunTrace do
     <<id::binary-size(bytes), _rest::binary>> = :crypto.hash(:sha256, prefix <> <<0>> <> run_id)
     Base.encode16(id, case: :lower)
   end
+
+  defp spec_started_on(value) when is_binary(value), do: if(value =~ ~r|^\d{4}/\d{2}/\d{2}$|, do: value)
+  defp spec_started_on(_value), do: nil
 
   defp hex?(value, length), do: byte_size(value) == length and value =~ ~r/^[0-9a-f]+$/
 

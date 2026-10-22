@@ -337,6 +337,11 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodSpec do
 
   defp env(_secret_env), do: []
 
+  # As SymphonyElixir.Config encodes OTEL_RESOURCE_ATTRIBUTES: percent-encoding
+  # (OTel SDKs don't read `+` as a space), and `/` left as is, so
+  # symphony.run.started_on stays YYYY/MM/DD for SDKs that don't decode.
+  defp resource_char?(c), do: c in ?a..?z or c in ?A..?Z or c in ?0..?9 or c in ~c"-_.~/"
+
   defp telemetry_env(%RunSpec{} = spec, %Schema{telemetry: %{enabled: true} = telemetry, agent: %{kubernetes: kube}}) do
     context = RunTrace.from_spec(spec)
 
@@ -350,7 +355,7 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.PodSpec do
       context
       |> RunTrace.resource_attributes()
       |> Enum.sort()
-      |> Enum.map_join(",", fn {key, value} -> key <> "=" <> URI.encode_www_form(value) end)
+      |> Enum.map_join(",", fn {key, value} -> key <> "=" <> URI.encode(value, &resource_char?/1) end)
 
     [
       {"TRACEPARENT", RunTrace.traceparent(context)},

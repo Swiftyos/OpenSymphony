@@ -77,9 +77,13 @@ defmodule SymphonyElixir.RunTraceTest do
     assert RunTrace.to_spec_map(root) == %{
              "traceparent" => RunTrace.traceparent(root),
              "launcher" => "kubernetes",
+             "started_on" => nil,
              "otlp_endpoint" => nil,
              "otlp_protocol" => nil
            }
+
+    started = RunTrace.root("run-1", started_at: ~U[2026-10-22 07:30:00Z])
+    assert RunTrace.to_spec_map(started)["started_on"] == "2026/10/22"
 
     map = RunTrace.to_spec_map(root, %{endpoint: "http://otel.test:4318", protocol: "http/protobuf"})
     assert map["otlp_endpoint"] == "http://otel.test:4318"
@@ -98,12 +102,18 @@ defmodule SymphonyElixir.RunTraceTest do
       attempt: 3,
       issue: @issue,
       backend: "codex",
-      telemetry: %{"traceparent" => upstream, "launcher" => "process"}
+      telemetry: %{"traceparent" => upstream, "launcher" => "process", "started_on" => "2026/10/21"}
     }
 
     context = RunTrace.from_spec(spec)
     assert {context.trace_id, context.span_id} == {String.duplicate("c", 32), String.duplicate("d", 16)}
     assert {context.run_id, context.attempt, context.launcher, context.backend} == {"run-9", 3, "process", "codex"}
+    assert context.started_on == "2026/10/21"
+
+    # Only a YYYY/MM/DD date is taken from a spec.
+    for bad <- ["2026-10-21", "../x", 20_261_021] do
+      assert RunTrace.from_spec(%{spec | telemetry: %{spec.telemetry | "started_on" => bad}}).started_on == nil
+    end
 
     # An older spec (no telemetry) or a bad traceparent gets the derived root.
     for telemetry <- [nil, %{"traceparent" => "garbage"}] do
@@ -123,15 +133,23 @@ defmodule SymphonyElixir.RunTraceTest do
     assert RunTrace.current() == nil
   end
 
+  test "started_on is the start's UTC date, so either side of midnight differs" do
+    {:ok, after_midnight} = DateTime.new(~D[2026-10-23], ~T[00:30:00], "Etc/UTC")
+    assert RunTrace.started_on(after_midnight) == "2026/10/23"
+    assert RunTrace.started_on(DateTime.add(after_midnight, -3600)) == "2026/10/22"
+    assert RunTrace.started_on(nil) == nil
+  end
+
   test "resource attributes name the run and leave out what is unknown" do
     assert RunTrace.resource_attributes(nil) == %{}
 
-    root = RunTrace.root("run-1", attempt: 0, launcher: "local", issue: @issue, backend: "claude")
+    root = RunTrace.root("run-1", attempt: 0, launcher: "local", started_at: ~U[2026-01-05 23:59:59Z], issue: @issue, backend: "claude")
 
     assert RunTrace.resource_attributes(root) == %{
              "symphony.run.id" => "run-1",
              "symphony.run.attempt" => "0",
              "symphony.run.launcher" => "local",
+             "symphony.run.started_on" => "2026/01/05",
              "symphony.project" => "proj",
              "symphony.trace_id" => root.trace_id,
              "linear.issue.id" => "issue-1",
