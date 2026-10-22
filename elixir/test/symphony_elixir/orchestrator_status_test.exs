@@ -1417,6 +1417,92 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     Process.exit(claude_worker, :normal)
   end
 
+  test "a Kubernetes run with its stall timeout disabled is stopped after the idle pod timeout" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", agent_backend: "codex", codex_stall_timeout_ms: 0)
+
+    pod_issue_id = "issue-idle-pod"
+    local_issue_id = "issue-idle-local"
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [
+      %Issue{id: pod_issue_id, identifier: "MT-IDLE-POD", state: "In Progress"},
+      %Issue{id: local_issue_id, identifier: "MT-IDLE-LOCAL", state: "In Progress"}
+    ])
+
+    {:ok, pid} = Orchestrator.start_link(name: Module.concat(__MODULE__, :IdlePodOrchestrator))
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    worker = fn ->
+      spawn(fn ->
+        receive do
+          :done -> :ok
+        end
+      end)
+    end
+
+    pod_worker = worker.()
+    local_worker = worker.()
+    # A day and a minute without activity, past the default idle_pod_timeout_ms.
+    idle_since = DateTime.add(DateTime.utc_now(), -(86_400 + 60), :second)
+
+    entry = fn worker_pid, identifier, launcher, run_ref ->
+      %{
+        pid: worker_pid,
+        ref: make_ref(),
+        identifier: identifier,
+        issue: %Issue{identifier: identifier, state: "In Progress"},
+        backend: "codex",
+        effort: nil,
+        stall_timeout_ms: 0,
+        launcher: launcher,
+        run_ref: run_ref,
+        session_id: "thread-" <> identifier,
+        last_codex_message: nil,
+        last_codex_timestamp: idle_since,
+        last_codex_event: :notification,
+        codex_input_tokens: 0,
+        codex_output_tokens: 0,
+        codex_total_tokens: 0,
+        codex_last_reported_input_tokens: 0,
+        codex_last_reported_output_tokens: 0,
+        codex_last_reported_total_tokens: 0,
+        started_at: idle_since
+      }
+    end
+
+    initial_state = :sys.get_state(pid)
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{
+        pod_issue_id => entry.(pod_worker, "MT-IDLE-POD", SymphonyElixir.RunLauncher.Kubernetes, "k8s:symphony-runs/run-idle"),
+        local_issue_id => entry.(local_worker, "MT-IDLE-LOCAL", nil, nil)
+      })
+      |> Map.put(:claimed, initial_state.claimed |> MapSet.put(pod_issue_id) |> MapSet.put(local_issue_id))
+    end)
+
+    log =
+      capture_log(fn ->
+        send(pid, :tick)
+        Process.sleep(100)
+      end)
+
+    state = :sys.get_state(pid)
+
+    assert log =~ "Issue stalled: issue_id=#{pod_issue_id}"
+    refute Map.has_key?(state.running, pod_issue_id)
+    assert %{error: "stalled for " <> _} = state.retry_attempts[pod_issue_id]
+    # Without a pod there is nothing to give up: a disabled stall timeout still holds.
+    assert Map.has_key?(state.running, local_issue_id)
+    assert Process.alive?(local_worker)
+
+    send(local_worker, :done)
+  end
+
   test "orchestrator snapshot aggregates mixed backend totals and includes routing metadata" do
     write_workflow_file!(Workflow.workflow_file_path(), agent_backend: "codex")
 

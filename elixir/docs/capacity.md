@@ -132,7 +132,7 @@ These come from the controller's single pod watch (`agent.launcher: kubernetes`;
   `symphony_runner_launch_failures_total{reason}`. The failure reason is a bounded step or status:
   `settings`, `runner_config`, `render`, `kube_client`, `http_<status>`, `transport`, `watcher`
   or `other`.
-- `symphony_runner_janitor_deletions_total{kind}` (`pod`, `secret`).
+- `symphony_runner_janitor_deletions_total{kind}` (`pod`, `idle_pod`, `secret`).
 - `symphony_runner_pod_watch_reconnects_total{reason}`. `closed` is the API server's normal
   five-minute watch timeout. `gone` is a 410 and triggers a relist. The others are
   `http_<status>`, `not_found`, `watch_error` (another `ERROR` event), `invalid_event`,

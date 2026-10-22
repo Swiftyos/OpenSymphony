@@ -743,9 +743,17 @@ defmodule SymphonyElixir.Orchestrator do
         restart_stalled_issue(state, issue_id, running_entry, now, timeout_ms)
 
       _ ->
-        state
+        maybe_restart_idle_pod_run(state, issue_id, running_entry, now)
     end
   end
+
+  # A Kubernetes run with its stall timeout disabled still gives up its pod
+  # after `agent.kubernetes.idle_pod_timeout_ms` without activity.
+  defp maybe_restart_idle_pod_run(state, issue_id, %{launcher: RunLauncher.Kubernetes} = running_entry, now) do
+    restart_stalled_issue(state, issue_id, running_entry, now, Config.settings!().agent.kubernetes.idle_pod_timeout_ms)
+  end
+
+  defp maybe_restart_idle_pod_run(state, _issue_id, _running_entry, _now), do: state
 
   defp restart_stalled_issue(state, issue_id, running_entry, now, timeout_ms) do
     elapsed_ms = stall_elapsed_ms(running_entry, now)

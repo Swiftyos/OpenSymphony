@@ -326,7 +326,13 @@ Kubernetes they move behind a tool gateway.
      (`Kube.list_pods/3`, `Kube.list_secrets/3`), deletes finished pods whose last
      container finished more than `finished_pod_retention_ms` (1h) ago, and deletes
      `run-*` Secrets (and the ConfigMap of the same name) that have no pod and are
-     older than ten minutes (a launch creates its Secret just before its pod).
+     older than ten minutes (a launch creates its Secret just before its pod). It
+     also deletes unfinished pods that no run in the registry owns once they have
+     shown no activity (creation, start, a container start, a condition change) for
+     `idle_pod_timeout_ms` (a day): a Pending pod is never ended by
+     `activeDeadlineSeconds`, which counts from its start. A tracked run is the
+     orchestrator's: it stops a stalled one, and with the stall timeout disabled
+     stops a Kubernetes run after `idle_pod_timeout_ms` without agent activity.
    - **Pod watch.** Polling each pod would be 200 GET/s at 1000 concurrent runs (one GET
      per run every 5s). Instead, `SymphonyElixir.RunLauncher.Kubernetes.PodWatch` keeps one
      watch over the `app.kubernetes.io/name=symphony-runner` pods in
@@ -363,7 +369,7 @@ Kubernetes they move behind a tool gateway.
      requests and limits, ephemeral storage and `emptyDir` size limits,
      `agent_tools_ephemeral_storage_request`, `run_as_user`, `queue_name`,
      `active_deadline_seconds` (default 6h), `finished_pod_retention_ms` (1h),
-     `janitor_interval_ms` (5 min), and `secret_env` references to existing Secrets.
+     `janitor_interval_ms` (5 min), `idle_pod_timeout_ms` (1 day), and `secret_env` references to existing Secrets.
      The images and `controller_url` are required only when the launcher renders a pod.
    - **RBAC.** The controller Role needs:
      - `patch` on `secrets` and `configmaps`, for the ownerReferences;

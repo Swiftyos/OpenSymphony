@@ -71,7 +71,7 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.JanitorTest do
     end
 
     Metrics.reset()
-    assert {:ok, %{pods: deleted_pods, secrets: ["run-orphan"]}} = Janitor.sweep(opts(respond))
+    assert {:ok, %{pods: deleted_pods, idle_pods: [], secrets: ["run-orphan"]}} = Janitor.sweep(opts(respond))
     assert deleted_pods == ["run-old", "run-init", "run-evicted", "run-created"]
 
     deletions =
@@ -91,6 +91,67 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.JanitorTest do
     refute_received {:deleted, @secrets <> "/run-young"}
   end
 
+  test "a sweep deletes unfinished pods no run owns after a day without activity" do
+    parent = self()
+    day_ago = "2026-10-20T11:00:00Z"
+
+    pods = [
+      # Pending for over a day (gated, unschedulable) and untracked: deleted.
+      pod("run-stuck-pending", "Pending", created: day_ago),
+      # Running, untracked, last started over a day ago: deleted.
+      pod("run-lost", "Running", created: day_ago, start_time: day_ago, running: [day_ago]),
+      # Untracked but a container restarted an hour ago: kept.
+      pod("run-restarted", "Running", created: day_ago, running: [day_ago, "2026-10-21T11:00:00Z"]),
+      # Untracked but a condition changed an hour ago: kept.
+      pod("run-scheduled", "Pending", created: day_ago, conditions: ["2026-10-21T11:00:00Z"]),
+      # Idle for a day but a registered run owns it: left to the orchestrator.
+      pod("run-tracked", "Running", created: day_ago, start_time: day_ago),
+      # Untracked and young, or without any timestamp: kept.
+      pod("run-young", "Pending", created: "2026-10-21T11:30:00Z"),
+      pod("run-untimed", "Running", created: "not-a-time")
+    ]
+
+    respond = fn
+      "GET", @pods, conn -> Req.Test.json(conn, %{"items" => pods})
+      "GET", @secrets, conn -> Req.Test.json(conn, %{"items" => []})
+      "DELETE", path, conn -> send(parent, {:deleted, path}) && Req.Test.json(conn, %{})
+    end
+
+    Metrics.reset()
+
+    log =
+      capture_log(fn ->
+        assert {:ok, %{pods: [], idle_pods: ["run-stuck-pending", "run-lost"], secrets: []}} =
+                 Janitor.sweep(Keyword.put(opts(respond), :tracked, MapSet.new(["run-tracked"])))
+      end)
+
+    assert log =~ "Runner janitor deleting untracked pod name=run-lost: no activity for 86400000ms"
+    assert_received {:deleted, @pods <> "/run-stuck-pending"}
+    assert_received {:deleted, @pods <> "/run-lost"}
+    refute_received {:deleted, @pods <> "/run-tracked"}
+
+    assert [%{value: 2}] =
+             for(%{name: "symphony_runner_janitor_deletions_total", labels: [{"kind", "idle_pod"}]} = counter <- Metrics.snapshot().counters, do: counter)
+
+    # A shorter configured timeout catches the younger pod too.
+    assert {:ok, %{idle_pods: ["run-stuck-pending", "run-lost", "run-young"]}} =
+             opts(respond)
+             |> Keyword.put(:settings, settings(%{"idle_pod_timeout_ms" => 1_800_000}))
+             |> Keyword.put(:tracked, MapSet.new(["run-tracked", "run-restarted", "run-scheduled"]))
+             |> Janitor.sweep()
+  end
+
+  test "registered runs in the runner namespace count as tracked" do
+    respond = fn
+      "GET", @pods, conn -> Req.Test.json(conn, %{"items" => [pod("run-stuck", "Pending", created: "2026-10-19T00:00:00Z")]})
+      "GET", @secrets, conn -> Req.Test.json(conn, %{"items" => []})
+      "DELETE", _path, conn -> Req.Test.json(conn, %{})
+    end
+
+    # Tests run without a registry path, so the registry is empty: nothing owns the pod.
+    assert {:ok, %{idle_pods: ["run-stuck"]}} = Janitor.sweep(Keyword.delete(opts(respond), :tracked))
+  end
+
   test "a zero retention deletes a pod as soon as it finishes" do
     respond = fn
       "GET", @pods, conn -> Req.Test.json(conn, %{"items" => [pod("run-1", "Succeeded", containers: [terminated_at("2026-10-21T12:00:00Z")])]})
@@ -98,7 +159,7 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.JanitorTest do
       "DELETE", _path, conn -> Req.Test.json(conn, %{})
     end
 
-    assert {:ok, %{pods: ["run-1"], secrets: []}} =
+    assert {:ok, %{pods: ["run-1"], idle_pods: [], secrets: []}} =
              Janitor.sweep(Keyword.put(opts(respond), :settings, settings(%{"finished_pod_retention_ms" => 0})))
   end
 
@@ -112,7 +173,7 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.JanitorTest do
 
     log =
       capture_log(fn ->
-        assert {:ok, %{pods: ["run-gone"], secrets: []}} = Janitor.sweep(opts(respond))
+        assert {:ok, %{pods: ["run-gone"], idle_pods: [], secrets: []}} = Janitor.sweep(opts(respond))
       end)
 
     assert log =~ "Runner janitor could not delete pod name=run-stuck"
@@ -161,7 +222,7 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.JanitorTest do
         GenServer.stop(janitor)
       end)
 
-    assert log =~ "Runner janitor deleted pods=1 secrets=0"
+    assert log =~ "Runner janitor deleted pods=1 idle_pods=0 secrets=0"
   end
 
   test "an empty sweep logs nothing and a failed one is logged" do
@@ -243,6 +304,8 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.JanitorTest do
       |> put_present("containerStatuses", opts[:containers])
       |> put_present("initContainerStatuses", opts[:init_containers])
       |> put_present("startTime", opts[:start_time])
+      |> put_present("conditions", opts[:conditions] && Enum.map(opts[:conditions], &%{"type" => "PodScheduled", "lastTransitionTime" => &1}))
+      |> put_running(opts[:running])
 
     %{"metadata" => %{"name" => name, "creationTimestamp" => opts[:created]}, "status" => status}
   end
@@ -250,6 +313,13 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.JanitorTest do
   defp secret(name, created), do: %{"metadata" => %{"name" => name, "creationTimestamp" => created}}
 
   defp terminated_at(at), do: %{"name" => "runner", "state" => %{"terminated" => %{"finishedAt" => at}}}
+
+  defp put_running(status, nil), do: status
+
+  defp put_running(status, started),
+    do: Map.update(status, "containerStatuses", running(started), &(&1 ++ running(started)))
+
+  defp running(started), do: Enum.map(started, &%{"name" => "runner", "state" => %{"running" => %{"startedAt" => &1}}})
 
   defp put_present(map, _key, nil), do: map
   defp put_present(map, key, value), do: Map.put(map, key, value)

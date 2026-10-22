@@ -40,7 +40,8 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes do
   - `release/1` (a run that ended) deletes the Secret and ConfigMap and keeps
     the pod for its logs; `stop/1` deletes the pod too unless it has already
     finished. `SymphonyElixir.RunLauncher.Kubernetes.Janitor` deletes finished
-    pods after `agent.kubernetes.finished_pod_retention_ms`.
+    pods after `agent.kubernetes.finished_pod_retention_ms`, and pods no run
+    owns after `agent.kubernetes.idle_pod_timeout_ms` without activity.
   """
 
   @behaviour SymphonyElixir.RunLauncher
@@ -465,12 +466,14 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes do
     end
   end
 
-  defp parse_ref(@prefix <> rest) do
+  @doc "The namespace and pod name of a run reference such as `k8s:symphony-runs/run-abc`."
+  @spec parse_ref(term()) :: {:ok, String.t(), String.t()} | :error
+  def parse_ref(@prefix <> rest) do
     case String.split(rest, "/", parts: 2) do
       [namespace, name] when namespace != "" and name != "" -> {:ok, namespace, name}
       _ -> :error
     end
   end
 
-  defp parse_ref(_ref), do: :error
+  def parse_ref(_ref), do: :error
 end

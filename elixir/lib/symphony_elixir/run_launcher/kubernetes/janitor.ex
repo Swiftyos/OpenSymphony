@@ -13,11 +13,19 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.Janitor do
     * deletes each `run-*` Secret, and the ConfigMap of the same name, that has
       no pod and is older than ten minutes. A launch creates its Secret just
       before its pod, so a younger one may belong to a pod being created.
+    * deletes each pod that has not finished, belongs to no run in
+      `SymphonyElixir.RunRegistry`, and has shown no activity (created,
+      started, a container started or a condition changed) for
+      `agent.kubernetes.idle_pod_timeout_ms` (a day by default). Nothing waits
+      on such a pod: the controller lost it, and a Pending one is never ended
+      by `activeDeadlineSeconds`, which counts from the pod's start. Its Secret
+      and ConfigMap go with it. A tracked run is left to the orchestrator,
+      which stops it when it stalls.
 
   Nothing else is touched: only objects with the runner label, in the
   configured namespace. A failed list or delete is logged and retried at the
   next sweep. Deletions are counted in
-  `symphony_runner_janitor_deletions_total{kind="pod"|"secret"}`.
+  `symphony_runner_janitor_deletions_total{kind="pod"|"idle_pod"|"secret"}`.
   """
 
   use GenServer
@@ -29,6 +37,7 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.Janitor do
   alias SymphonyElixir.Kube
   alias SymphonyElixir.RunLauncher
   alias SymphonyElixir.RunLauncher.Kubernetes
+  alias SymphonyElixir.RunRegistry
 
   @selector "app.kubernetes.io/name=symphony-runner"
   @orphan_grace_ms 600_000
@@ -42,27 +51,34 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.Janitor do
 
   @doc """
   Runs one sweep now and returns what it deleted. Options: `:settings`
-  (defaults to the loaded config), `:now` (a `DateTime`, for tests) and any
-  `SymphonyElixir.Kube` client options.
+  (defaults to the loaded config), `:now` (a `DateTime`, for tests),
+  `:tracked` (the pod names of the registered runs; read from
+  `SymphonyElixir.RunRegistry` by default) and any `SymphonyElixir.Kube`
+  client options.
   """
-  @spec sweep(keyword()) :: {:ok, %{pods: [String.t()], secrets: [String.t()]}} | {:error, term()}
+  @spec sweep(keyword()) ::
+          {:ok, %{pods: [String.t()], idle_pods: [String.t()], secrets: [String.t()]}} | {:error, term()}
   def sweep(opts \\ []) do
     with {:ok, settings} <- settings(opts),
-         {:ok, client} <- Kube.client(Keyword.drop(opts, [:settings, :now, :name, :interval_ms])),
+         {:ok, client} <- Kube.client(Keyword.drop(opts, [:settings, :now, :name, :interval_ms, :tracked])),
          kube = settings.agent.kubernetes,
          {:ok, pods} <- Kube.list_pods(client, kube.namespace, @selector),
          {:ok, secrets} <- Kube.list_secrets(client, kube.namespace, @selector) do
       now_ms = opts |> Keyword.get_lazy(:now, &DateTime.utc_now/0) |> DateTime.to_unix(:millisecond)
+      tracked = Keyword.get_lazy(opts, :tracked, fn -> tracked_pods(kube.namespace) end)
       expired = for pod <- pods, expired_pod?(pod, now_ms, kube.finished_pod_retention_ms), do: name(pod)
+      idle = for pod <- pods, idle_pod?(pod, tracked, now_ms, kube.idle_pod_timeout_ms), do: name(pod)
       pod_names = MapSet.new(pods, &name/1)
       orphans = for secret <- secrets, orphan_secret?(secret, pod_names, now_ms), do: name(secret)
 
       deleted = %{
         pods: Enum.filter(expired, &deleted?(Kube.delete_pod(client, kube.namespace, &1), :pod, &1)),
+        idle_pods: Enum.filter(idle, &delete_idle(client, kube.namespace, &1, kube.idle_pod_timeout_ms)),
         secrets: Enum.filter(orphans, &delete_orphan(client, kube.namespace, &1))
       }
 
       record_deletions("pod", deleted.pods)
+      record_deletions("idle_pod", deleted.idle_pods)
       record_deletions("secret", deleted.secrets)
       {:ok, deleted}
     end
@@ -82,11 +98,11 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.Janitor do
   def handle_info(:sweep, state) do
     if RunLauncher.launcher() == Kubernetes do
       case sweep(state.opts) do
-        {:ok, %{pods: [], secrets: []}} ->
+        {:ok, %{pods: [], idle_pods: [], secrets: []}} ->
           :ok
 
         {:ok, deleted} ->
-          Logger.info("Runner janitor deleted pods=#{length(deleted.pods)} secrets=#{length(deleted.secrets)}")
+          Logger.info("Runner janitor deleted pods=#{length(deleted.pods)} idle_pods=#{length(deleted.idle_pods)} secrets=#{length(deleted.secrets)}")
 
         {:error, reason} ->
           Logger.warning("Runner janitor sweep failed reason=#{inspect(reason, limit: 5)}")
@@ -126,6 +142,44 @@ defmodule SymphonyElixir.RunLauncher.Kubernetes.Janitor do
         nil -> false
         finished_ms -> now_ms - finished_ms >= retention_ms
       end
+  end
+
+  defp idle_pod?(pod, tracked, now_ms, timeout_ms) do
+    not Kubernetes.terminal?(pod) and is_binary(name(pod)) and not MapSet.member?(tracked, name(pod)) and
+      case last_activity_ms(pod) do
+        nil -> false
+        active_ms -> now_ms - active_ms >= timeout_ms
+      end
+  end
+
+  # The pods of the runs the registry holds, live or waiting to be adopted.
+  defp tracked_pods(namespace) do
+    for {_issue_id, %{ref: ref}} <- RunRegistry.load(),
+        {:ok, ^namespace, pod_name} <- [Kubernetes.parse_ref(ref)],
+        into: MapSet.new(),
+        do: pod_name
+  end
+
+  # The latest sign of life the pod itself shows: its creation, its start, a
+  # container (re)start or a condition change.
+  defp last_activity_ms(pod) do
+    status = Map.get(pod, "status", %{})
+
+    containers =
+      (List.wrap(status["containerStatuses"]) ++ List.wrap(status["initContainerStatuses"]))
+      |> Enum.filter(&is_map/1)
+      |> Enum.map(&get_in(&1, ["state", "running", "startedAt"]))
+
+    conditions = status["conditions"] |> List.wrap() |> Enum.filter(&is_map/1) |> Enum.map(& &1["lastTransitionTime"])
+
+    [created_ms(pod), timestamp_ms(status["startTime"]) | Enum.map(containers ++ conditions, &timestamp_ms/1)]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.max(fn -> nil end)
+  end
+
+  defp delete_idle(client, namespace, pod_name, timeout_ms) do
+    Logger.warning("Runner janitor deleting untracked pod name=#{pod_name}: no activity for #{timeout_ms}ms")
+    deleted?(Kube.delete_pod(client, namespace, pod_name), :pod, pod_name)
   end
 
   # The latest container finish time; a terminal pod without one (evicted

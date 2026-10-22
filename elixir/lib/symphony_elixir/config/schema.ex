@@ -516,6 +516,10 @@ defmodule SymphonyElixir.Config.Schema do
       # deletes it, and how often the janitor sweeps.
       field(:finished_pod_retention_ms, :integer, default: 3_600_000)
       field(:janitor_interval_ms, :integer, default: 300_000)
+      # How long a runner pod may sit without activity before it is removed:
+      # the janitor deletes an untracked one, and a tracked run whose stall
+      # timeout is disabled is stopped after it.
+      field(:idle_pod_timeout_ms, :integer, default: 86_400_000)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -544,7 +548,8 @@ defmodule SymphonyElixir.Config.Schema do
           :otlp_endpoint,
           :otlp_protocol,
           :finished_pod_retention_ms,
-          :janitor_interval_ms
+          :janitor_interval_ms,
+          :idle_pod_timeout_ms
         ],
         empty_values: []
       )
@@ -565,6 +570,7 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:run_as_user, greater_than: 0)
       |> validate_number(:finished_pod_retention_ms, greater_than_or_equal_to: 0)
       |> validate_number(:janitor_interval_ms, greater_than: 0)
+      |> validate_number(:idle_pod_timeout_ms, greater_than: 0)
       |> validate_format(:controller_url, ~r{^https?://[^\s/]+}, message: "must be an http(s) URL such as http://symphony.symphony.svc:4000")
       |> update_change(:otlp_endpoint, &Schema.normalize_optional_string/1)
       |> validate_format(:otlp_endpoint, ~r{^https?://[^\s/@]+(/\S*)?$}, message: "must be an http(s) URL without credentials such as http://otel-collector.symphony.svc:4318")
