@@ -15,7 +15,8 @@ defmodule SymphonyElixirWeb.McpAuth do
   The MCP route sits outside IAP (agents can't do Google sign-in), so no IAP
   header is read here. No cookies are read either, so the dashboard's session
   can't be used here and CSRF doesn't apply. Assigns `:current_user` and
-  `:mcp_token`.
+  `:mcp_token`. It also guards admin tasks run against the live controller
+  (`POST /admin/users/import`), which check the account is an admin.
   """
 
   import Plug.Conn

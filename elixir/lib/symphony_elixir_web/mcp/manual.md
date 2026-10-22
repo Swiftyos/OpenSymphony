@@ -263,13 +263,14 @@ a step after rotating replaces the old entry.
 
 | Action | Needs |
 | --- | --- |
-| Read tools | any token; you see the teams and projects you have access to (`list_projects` lists all) |
+| Read tools | any token; you see the teams and projects you have access to, and nothing of other teams (admins and global viewers see every team) |
 | Flow edits (`save_flow`, `set_stage_control`, `set_autopilot`, `reset_flow`) | `write`; members their teams' flows and their projects' flows, admins any (including `DEFAULT`) |
 | `move_issue`, `review_issue`, `send_agent_message` | `write`; members issues of their teams or granted projects. Members make `human` moves, admins any move |
 | `refresh` | `write` |
 | `add_project`, `remove_project` | `write` and admin |
 
-Write tools are refused while the server's controls are switched off. Flow changes apply to the
+`write` tools change Symphony: they're refused for read-only people (global viewers, Linear
+guests), and not listed to them. Write tools are refused while the server's controls are switched off. Flow changes apply to the
 next stage an agent starts; running agents finish their turn. Flow saves are version-checked.
 
 ## MCP tool reference
@@ -370,3 +371,5 @@ Blocked transitions allow. Issues blocked by other issues come back by themselve
   redo your change. Validation errors name the field to fix.
 - **"Only admins..." or "Only this team's members..."** Your account or your token's limits don't
   cover that team, project or action.
+- **"...your access is read-only"** You're a global viewer (or a Linear guest): you can read every
+  tool's answer you're shown, but not change anything.

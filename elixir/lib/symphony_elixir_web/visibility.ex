@@ -1,14 +1,16 @@
 defmodule SymphonyElixirWeb.Visibility do
   @moduledoc """
-  Trims dashboard and API payloads to what a person may see.
+  Trims dashboard and API payloads to what a person may see, by
+  `SymphonyElixir.Policy`.
 
-  Admins, the local operator, and API-token clients see everything. Everyone
-  else only sees issues, sessions, and spend from their teams (Linear teams
-  plus teams Symphony gave them) and projects they were given, and never sees
-  host details (workspace paths, worker hosts, agent accounts).
+  Admins, global viewers, the local operator, and API-token clients see
+  everything. Everyone else only sees issues, sessions, flows, projects and
+  spend from their teams (Linear teams plus teams Symphony gave them) and
+  projects they were given, and never sees host details (workspace paths,
+  worker hosts, agent accounts). Someone with no teams sees none of it.
   """
 
-  alias SymphonyElixir.Auth
+  alias SymphonyElixir.{Auth, Policy}
 
   @host_fields [
     :workspace_path,
@@ -24,7 +26,7 @@ defmodule SymphonyElixirWeb.Visibility do
   def filter_payload(%{error: _} = payload, _user), do: payload
 
   def filter_payload(payload, user) do
-    case visible_teams(user) do
+    case Policy.visible_teams(user) do
       :all -> payload
       teams -> restrict(payload, MapSet.new(teams), user.projects)
     end
@@ -76,7 +78,7 @@ defmodule SymphonyElixirWeb.Visibility do
   """
   @spec filter_sessions([map()], Auth.User.t() | nil) :: [map()]
   def filter_sessions(sessions, user) do
-    case visible_teams(user) do
+    case Policy.visible_teams(user) do
       :all ->
         sessions
 
@@ -94,17 +96,11 @@ defmodule SymphonyElixirWeb.Visibility do
 
   @spec filter_issue(map(), Auth.User.t() | nil, String.t()) :: {:ok, map()} | :hidden
   def filter_issue(payload, user, identifier) do
-    case visible_teams(user) do
+    case Policy.visible_teams(user) do
       :all -> {:ok, payload}
       teams -> if team(identifier) in teams, do: {:ok, drop_host_fields(payload)}, else: :hidden
     end
   end
-
-  # nil = API-token client: full access, like before sign-in existed.
-  defp visible_teams(nil), do: :all
-  defp visible_teams(%Auth.User{local: true}), do: :all
-  defp visible_teams(%Auth.User{admin: true}), do: :all
-  defp visible_teams(%Auth.User{teams: teams}), do: Enum.map(teams, & &1.key)
 
   # An issue is visible when its team is, or its project was granted.
   defp visible_fun(teams, projects) do
@@ -115,12 +111,36 @@ defmodule SymphonyElixirWeb.Visibility do
     visible? = visible_fun(teams, projects)
     entry_visible? = fn e -> visible?.(e.issue_identifier, Map.get(e, :project_slug)) end
 
+    payload =
+      payload
+      |> update_sessions(&(&1 |> Enum.filter(entry_visible?) |> Enum.map(fn e -> drop_host_fields(e) end)))
+      |> Map.put(:accounts, [])
+      |> Map.update(:factory, nil, &restrict_factory(&1, visible?, teams, projects))
+      |> put_counts()
+
     payload
-    |> update_sessions(&(&1 |> Enum.filter(entry_visible?) |> Enum.map(fn e -> drop_host_fields(e) end)))
-    |> Map.update(:projects, [], fn list -> Enum.map(list, &restrict_project_issues(&1, visible?)) end)
-    |> Map.put(:accounts, [])
-    |> Map.update(:factory, nil, &restrict_factory(&1, visible?, teams, projects))
-    |> put_counts()
+    |> Map.update(:projects, [], &restrict_projects(&1, visible?, flow_projects(payload[:factory]) ++ projects))
+    |> then(fn p -> if Map.has_key?(p, :agent_totals), do: Map.put(p, :agent_totals, visible_totals(p.running)), else: p end)
+  end
+
+  # Projects the viewer sees: those with work of theirs, those on their flows
+  # (a project one of their teams works in), and those they were given.
+  defp restrict_projects(list, visible?, slugs) do
+    list
+    |> Enum.map(&restrict_project_issues(&1, visible?))
+    |> Enum.filter(&(&1[:issues] not in [nil, []] or &1[:slug] in slugs))
+  end
+
+  defp flow_projects(%{teams: entries}), do: for(%{kind: "project", slug: slug} <- entries, do: slug)
+  defp flow_projects(_factory), do: []
+
+  # Symphony-wide token totals would show other teams' spend; these count the
+  # viewer's running sessions only.
+  defp visible_totals(running) do
+    tokens = Enum.map(running, &(Map.get(&1, :tokens) || %{}))
+    sum = fn key -> tokens |> Enum.map(&(Map.get(&1, key) || 0)) |> Enum.sum() end
+    totals = Map.new([:input_tokens, :output_tokens, :total_tokens], &{&1, sum.(&1)})
+    Map.put(totals, :seconds_running, 0)
   end
 
   # Live sessions, and ended ones when the payload carries them (the dashboard
@@ -203,12 +223,5 @@ defmodule SymphonyElixirWeb.Visibility do
 
   defp drop_host_fields(entry) when is_map(entry), do: Map.drop(entry, @host_fields)
 
-  defp team(identifier) when is_binary(identifier) do
-    case String.split(identifier, "-", parts: 2) do
-      [key, _number] -> key
-      _ -> nil
-    end
-  end
-
-  defp team(_identifier), do: nil
+  defp team(identifier), do: Policy.team_of(identifier)
 end

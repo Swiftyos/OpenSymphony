@@ -1387,11 +1387,12 @@ server:
 | Who                                         | Can                                                                     |
 | ------------------------------------------- | ----------------------------------------------------------------------- |
 | Linear workspace admin, or the first account | Everything: any flow, stage controls, accounts, choosing team admins   |
+| Global viewer (set in Symphony)             | See every team's work, like an admin; change nothing (their own MCP token and account settings excepted) |
 | Team admin (set in Symphony)                | What a team member can, plus give people access to the team and to projects the team works in |
 | Team member (in Linear, or given the team)  | See and move the team's issues, edit its flow and its projects' flows   |
 | Given a project                             | See and move that project's issues and edit its flow                    |
 | Linear guest                                | View only, unless given a team or project                               |
-| Not in the workspace                        | Nothing                                                                 |
+| Not in the workspace                        | Nothing, unless an admin provisioned the account (see below)            |
 
 ![Users and access](../.github/media/dashboard-users.png)
 
@@ -1401,9 +1402,15 @@ server:
   projects, and don't see account actions (disable, enable).
 - Changing someone's access refreshes their open dashboards. Grants are stored with the account in
   `~/.symphony/users.json` and logged with who made them.
-- People only see issues, sessions, and spend from their teams and the projects they were given
-  (admins see everything). Host details such as workspace paths and worker hosts are hidden from
-  non-admins.
+- People only see issues, sessions, flows, projects, traces, metrics and spend from their teams
+  and the projects they were given (admins and global viewers see everything); someone with no
+  team sees none of it. Host details such as workspace paths and worker hosts are hidden from
+  them. Prometheus metrics (`/metrics`) cover every team, so they're for admins, global viewers
+  and `server.api_token`.
+- One module, `SymphonyElixir.Policy`, decides all of it, for the dashboard, the JSON API and
+  MCP alike. A global viewer's or guest's change is refused on the server, not just hidden: page
+  events other than looking around, MCP tools that change something (they aren't listed to them
+  either), and API requests other than `GET`.
 - Disabling an account signs it out everywhere, including dashboard tabs that are already open.
   **Sign out** in the user menu clears IAP's Google sign-in cookie.
 - Moves are made with Symphony's Linear key, and a comment on the issue records who made
@@ -1412,6 +1419,19 @@ server:
   Linear shuts them out.
 - Accounts are stored in `~/.symphony/users.json` (mode 0600). Accounts from before IAP keep their
   id, username and grants; one still waiting for approval becomes active on its first IAP visit.
+- **Provisioning from a CSV**: `email,linear_team_name,linear_team_id,role` rows, with `member`
+  or `admin` and a Linear team id, or `global_viewer` and no team, create or update accounts
+  before people first sign in (`SymphonyElixir.Users.Import`). The CSV decides the role for each
+  team it lists; other grants stay, a global admin listed as a viewer stays an admin, nobody is
+  removed, and running it again changes nothing. Provisioned accounts may sign in even without a
+  Linear user. Post the CSV to the running controller with an admin's MCP token, through a
+  port-forward (the load balancer keeps the path behind IAP); `?dry_run=true` only reports:
+
+  ```bash
+  kubectl -n symphony port-forward deploy/symphony-controller 14000:4000 &
+  curl -sS -X POST 'http://127.0.0.1:14000/admin/users/import?dry_run=true' \
+    -H "Authorization: Bearer $SYMPHONY_MCP_TOKEN" -H 'Content-Type: text/csv' --data-binary @- < people.csv
+  ```
 - The session cookie only carries the IAP-verified account to the dashboard's live connection,
   for an hour after IAP last checked it; after that the page reloads through IAP. It's encrypted
   and signed with `server.secret_key_base` (or `SYMPHONY_SECRET_KEY_BASE`). If neither is set,

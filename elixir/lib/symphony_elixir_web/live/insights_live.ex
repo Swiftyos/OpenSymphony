@@ -7,7 +7,8 @@ defmodule SymphonyElixirWeb.InsightsLive do
   The page shows factory-wide totals and charts for a time range, the issues
   and tools that used the most, cost by model, and for one picked issue its
   metrics, recent traces, and a waterfall of the trace you open. Issues the
-  viewer can't see are left out.
+  viewer can't see are left out, and someone who doesn't see every team
+  (`SymphonyElixir.Policy`) gets totals for their teams only.
 
   Cost by stage comes from Symphony's usage ledger instead: telemetry doesn't
   carry the stage, and the ledger keeps totals since it started (no time
@@ -18,7 +19,7 @@ defmodule SymphonyElixirWeb.InsightsLive do
   import SymphonyElixirWeb.Charts
   import SymphonyElixirWeb.Topbar
 
-  alias SymphonyElixir.{Config, Observability, UsageLedger}
+  alias SymphonyElixir.{Config, Observability, Policy, UsageLedger}
   alias SymphonyElixirWeb.{FactoryPresenter, ScopePicker, Visibility}
 
   @ranges [{"hour", "1h"}, {"day", "24h"}, {"week", "7d"}]
@@ -271,7 +272,7 @@ defmodule SymphonyElixirWeb.InsightsLive do
       project: project,
       team_choices: choices,
       project_choices: projects,
-      project_issues: project && project_issues(project),
+      project_issues: project && project |> project_issues() |> Enum.filter(&Policy.issue_visible?(user, &1, project)),
       stage_costs: stage_cost_rows(scoped.factory)
     )
   end
@@ -306,7 +307,7 @@ defmodule SymphonyElixirWeb.InsightsLive do
   defp load(socket) do
     %{range: range, issue: issue, trace_id: trace_id, current_user: user} = socket.assigns
     range_atom = String.to_existing_atom(range)
-    scope = [team: if(is_nil(socket.assigns.project), do: socket.assigns.team), issues: socket.assigns.project_issues]
+    scope = [team: if(is_nil(socket.assigns.project), do: socket.assigns.team), issues: socket.assigns.project_issues, teams: overview_teams(user)]
 
     socket
     |> assign_new(:overview, fn -> nil end)
@@ -344,10 +345,22 @@ defmodule SymphonyElixirWeb.InsightsLive do
       issue_metrics: issue_metrics,
       issue_error: issue_error,
       traces: traces,
-      trace: trace_id && ok_or(Observability.trace(trace_id), nil),
+      trace: trace_id && trace_visible?(trace_id, traces, user) && ok_or(Observability.trace(trace_id), nil),
       sources: Observability.status()
     }
   end
+
+  # Without every team, totals count the viewer's teams only.
+  defp overview_teams(user) do
+    case Policy.visible_teams(user) do
+      :all -> nil
+      teams -> teams
+    end
+  end
+
+  # A trace id from the URL must be one of the open issue's traces, unless the
+  # viewer sees everything.
+  defp trace_visible?(trace_id, traces, user), do: Policy.sees_all?(user) or Enum.any?(traces, &(&1[:id] == trace_id))
 
   defp ok_or({:ok, value}, _default), do: value
   defp ok_or(_result, default), do: default

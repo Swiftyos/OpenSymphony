@@ -8,13 +8,14 @@ defmodule SymphonyElixirWeb.AgentMessagesController do
       sends one. The body must be JSON, so a plain cross-site form can't post.
 
   Viewers who can't see the issue get `404`; those who can see it but may not
-  move it (guests, other teams' members) get `403` on `POST`.
+  move it (guests, global viewers) get `403` on `POST`
+  (`SymphonyElixir.Policy`).
   """
 
   use Phoenix.Controller, formats: [:json]
 
   alias Plug.Conn
-  alias SymphonyElixir.{AgentInbox, Auth}
+  alias SymphonyElixir.{AgentInbox, Auth, Policy}
   alias SymphonyElixirWeb.Visibility
 
   @spec index(Conn.t(), map()) :: Conn.t()
@@ -37,7 +38,7 @@ defmodule SymphonyElixirWeb.AgentMessagesController do
       not json_request?(conn) ->
         error_response(conn, 415, "unsupported_media_type", "Send the message as application/json.")
 
-      not Auth.can_message_agent?(user, identifier) ->
+      not Policy.can?(user, {:message_agent, identifier, nil}) ->
         error_response(conn, 403, "forbidden", "You can't message the agent on this issue.")
 
       true ->

@@ -17,7 +17,7 @@ defmodule SymphonyElixir.IssueMoves do
 
   require Logger
 
-  alias SymphonyElixir.{Auth, Config, IssueStage, Orchestrator, StageResult, Tracker, UsageLedger}
+  alias SymphonyElixir.{Auth, Config, IssueStage, Orchestrator, Policy, StageResult, Tracker, UsageLedger}
   alias SymphonyElixir.Factory.{Definition, Store}
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixirWeb.ObservabilityPubSub
@@ -29,7 +29,7 @@ defmodule SymphonyElixir.IssueMoves do
   @spec move(Auth.User.t(), String.t(), String.t(), keyword()) :: :ok | {:error, term()}
   def move(%Auth.User{} = user, id, to, opts) when is_binary(id) and is_binary(to) do
     with {:ok, %Issue{} = issue} <- fetch_movable_issue(id),
-         true <- Auth.can_move_issue?(user, issue.identifier, issue.project_slug) || {:error, :not_team_member},
+         :ok <- Policy.authorize(user, {:move_issue, issue.identifier, issue.project_slug}),
          {:ok, target} <- allowed_move(user, issue, to),
          approval = IssueStage.approval_label(),
          :ok <- Tracker.set_stage(issue.id, target["linear_state"], target["label"], drop_labels: [approval]) do
@@ -54,7 +54,7 @@ defmodule SymphonyElixir.IssueMoves do
     approval = IssueStage.approval_label()
 
     with {:ok, %Issue{} = issue} <- fetch_movable_issue(id),
-         true <- Auth.can_move_issue?(user, issue.identifier, issue.project_slug) || {:error, :not_team_member},
+         :ok <- Policy.authorize(user, {:move_issue, issue.identifier, issue.project_slug}),
          true <- IssueStage.awaiting_approval?(issue) || {:error, :not_awaiting_approval},
          definition = IssueStage.definition(issue),
          %{} = from <- Definition.stage(definition, UsageLedger.previous_node(issue.identifier)) || {:error, :unknown_origin},
@@ -108,7 +108,7 @@ defmodule SymphonyElixir.IssueMoves do
 
   @spec describe_error(term()) :: String.t()
   def describe_error(:controls_disabled), do: "This dashboard is read-only (server.controls: false)."
-  def describe_error(:not_admin), do: "Only Linear admins can do that."
+  def describe_error(:not_admin), do: "Only admins can do that."
   def describe_error(:not_team_editor), do: "Only this team's members and Linear admins can change its flow."
   def describe_error(:unknown_target), do: "That stage isn't in this team's flow."
   def describe_error(:not_a_move), do: "That move isn't a connection in this team's flow."
@@ -124,6 +124,7 @@ defmodule SymphonyElixir.IssueMoves do
   def describe_error(:pending), do: "Your session ended. Sign in again."
   def describe_error(:issue_not_found), do: "That issue isn't in a project this Symphony manages."
   def describe_error(:state_not_found), do: "That Linear state does not exist for this team."
+  def describe_error(reason) when reason in [:read_only, :not_team_admin, :not_allowed], do: Policy.describe(reason)
   def describe_error(reason), do: inspect(reason)
 
   # Members make the person-moved connections of their flow; admins can make
@@ -138,7 +139,7 @@ defmodule SymphonyElixir.IssueMoves do
 
     with %{} = target <- Definition.stage(definition, to) || {:error, {:unknown_target, definition}},
          %{} = transition <- find_transition(definition, from, to) || {:error, {:not_a_move, definition, from, to}} do
-      if transition["by"] == "human" or Auth.can_control?(user), do: {:ok, target}, else: {:error, :agent_move}
+      if transition["by"] == "human" or Policy.can?(user, :control), do: {:ok, target}, else: {:error, :agent_move}
     end
   end
 

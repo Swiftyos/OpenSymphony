@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.UsersCoverageTest do
   use SymphonyElixir.TestSupport
 
-  alias SymphonyElixir.{Auth, PrivateFile, Users}
+  alias SymphonyElixir.{Auth, Policy, PrivateFile, Users}
 
   defmodule FakeLinear do
     def graphql(query, variables, _opts \\ []) do
@@ -146,6 +146,20 @@ defmodule SymphonyElixir.UsersCoverageTest do
 
       assert %{username: "ada", status: "active", bootstrap_admin: true, team_admin: ["PAY"], access: ["project:web"], mcp_welcomed_at: at} = Users.get(account.id)
       assert is_binary(at)
+
+      # Global roles and provisioned accounts survive a restart too.
+      {:ok, _} = Users.set_role(account.id, "global_viewer", "ada")
+      assert {:error, :invalid_role} = Users.set_role(account.id, "owner", "ada")
+      {:ok, [_]} = Users.provision([{"bo@acme.test", %{role: :keep, team_admin: ["web"], access: ["PAY", "bad team!"]}}], "import")
+      GenServer.stop(pid)
+      {:ok, pid} = Users.start_link(path: path)
+      Process.unlink(pid)
+
+      assert %{role: "global_viewer"} = Users.get(account.id)
+      bo = Users.get_by_email("BO@acme.test")
+      assert %{role: nil, team_admin: ["WEB"], access: ["PAY"], status: "active", bootstrap_admin: false} = bo
+      imported = bo.imported_at
+      assert is_binary(imported)
     end
 
     test "loading fills defaults and skips malformed records" do
@@ -296,8 +310,8 @@ defmodule SymphonyElixir.UsersCoverageTest do
 
       {:ok, guest} = Auth.user_for_account(account.("gus@acme.test"))
       assert guest.guest
-      refute Auth.can_move?(guest, "PAY-1")
-      assert Auth.movable_teams(guest) == []
+      refute Policy.can?(guest, {:move_issue, "PAY-1", nil})
+      assert Policy.movable_teams(guest) == []
 
       write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
       assert {:ok, %Auth.User{email: "mia@acme.test", teams: []}} = Auth.user_for_account(account.("mia@acme.test"))
@@ -327,12 +341,12 @@ defmodule SymphonyElixir.UsersCoverageTest do
       admin = %Auth.User{id: "a", name: "A", admin: true}
       member = %Auth.User{id: "m", name: "M", teams: [%{id: "t", key: "PAY", name: "PAY"}]}
 
-      assert Auth.can_move?(admin, "WEB-1")
-      refute Auth.can_move?(member, "PAY")
-      refute Auth.can_move?(member, nil)
-      refute Auth.can_move?(nil, "PAY-1")
-      assert Auth.movable_teams(member) == ["PAY"]
-      assert Auth.movable_teams(nil) == []
+      assert Policy.can?(admin, {:move_issue, "WEB-1", nil})
+      refute Policy.can?(member, {:move_issue, "PAY", nil})
+      refute Policy.can?(member, {:move_issue, nil, nil})
+      refute Policy.can?(nil, {:move_issue, "PAY-1", nil})
+      assert Policy.movable_teams(member) == ["PAY"]
+      assert Policy.movable_teams(nil) == []
     end
   end
 end

@@ -21,7 +21,7 @@ defmodule SymphonyElixirWeb.UserAuth do
   import Plug.Conn
   import Phoenix.Controller
 
-  alias SymphonyElixir.{Auth, Config, Iap, Users}
+  alias SymphonyElixir.{Auth, Config, Iap, Policy, Users}
 
   @iap_header "x-goog-iap-jwt-assertion"
   @session_key "user_id"
@@ -107,6 +107,23 @@ defmodule SymphonyElixirWeb.UserAuth do
     end
   end
 
+  @doc """
+  Refuses requests that change something (anything but `GET` and `HEAD`) from
+  people whose access is read-only (`SymphonyElixir.Policy.read_only?/1`).
+  Each action still checks its own permission; this is the backstop.
+  """
+  @spec refuse_read_only_changes(Plug.Conn.t(), term()) :: Plug.Conn.t()
+  def refuse_read_only_changes(conn, _opts) do
+    if conn.method in ["GET", "HEAD"] or Policy.authorize(conn.assigns[:current_user], :write) == :ok do
+      conn
+    else
+      conn
+      |> put_status(403)
+      |> json(%{error: %{code: "forbidden", message: Policy.describe(:read_only)}})
+      |> halt()
+    end
+  end
+
   defp refusal(:disabled), do: {403, "Account disabled", "Your Symphony account has been disabled. Ask a Symphony admin."}
   defp refusal(:inactive_user), do: {403, "No access", "Your Linear account is deactivated, so Symphony is closed to you."}
 
@@ -170,35 +187,47 @@ defmodule SymphonyElixirWeb.UserAuth do
 
   @doc """
   LiveView mount hook: assigns `:current_user`, or reloads the page so IAP
-  checks the person again.
+  checks the person again. It also puts `SymphonyElixir.Policy` in front of
+  every event the page handles: for people whose access is read-only only
+  events that change what the page shows get through, so a page can't forget
+  to refuse one. (Each event still checks its own permission.)
   """
   @spec on_mount(atom(), map(), map(), Phoenix.LiveView.Socket.t()) ::
           {:cont, Phoenix.LiveView.Socket.t()} | {:halt, Phoenix.LiveView.Socket.t()}
   def on_mount(:require_user, _params, session, socket) do
     case Auth.mode() do
       :local ->
-        {:cont, Phoenix.Component.assign(socket, :current_user, Auth.local_user())}
+        {:cont, socket |> Phoenix.Component.assign(:current_user, Auth.local_user()) |> guard_events()}
 
       :iap ->
         with true <- fresh?(session[@verified_key]),
              {:ok, user} <- Auth.user_for_id(session[@session_key], session[@version_key] || 0) do
-          {:cont, Phoenix.Component.assign(socket, current_user: user, session_version: session[@version_key] || 0)}
+          {:cont, socket |> Phoenix.Component.assign(current_user: user, session_version: session[@version_key] || 0) |> guard_events()}
         else
           _ -> {:halt, Phoenix.LiveView.redirect(socket, to: "/")}
         end
     end
   end
 
+  defp guard_events(socket), do: Phoenix.LiveView.attach_hook(socket, :policy, :handle_event, &guard_event/3)
+
+  defp guard_event(event, _params, socket) do
+    if Policy.event_allowed?(socket.assigns.current_user, event),
+      do: {:cont, socket},
+      else: {:halt, %{ok: false, error: Policy.describe(:read_only)}, socket}
+  end
+
   defp fresh?(verified_at) when is_integer(verified_at), do: System.system_time(:second) - verified_at < @session_max_age_s
   defp fresh?(_verified_at), do: false
 
   @doc """
-  LiveView mount hook for the Users page: admins and team admins.
+  LiveView mount hook for the Users page: admins, global viewers (read-only)
+  and team admins.
   """
   @spec require_access_manager(Phoenix.LiveView.Socket.t()) ::
           {:cont, Phoenix.LiveView.Socket.t()} | {:halt, Phoenix.LiveView.Socket.t()}
   def require_access_manager(socket) do
-    if Auth.can_manage_access?(socket.assigns[:current_user]),
+    if Policy.can?(socket.assigns[:current_user], :view_users),
       do: {:cont, socket},
       else: {:halt, Phoenix.LiveView.redirect(socket, to: "/")}
   end

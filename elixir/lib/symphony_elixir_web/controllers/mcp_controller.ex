@@ -14,6 +14,7 @@ defmodule SymphonyElixirWeb.McpController do
   use Phoenix.Controller, formats: [:json]
 
   alias Plug.Conn
+  alias SymphonyElixir.Policy
   alias SymphonyElixirWeb.Mcp.{Manual, Tools}
 
   @protocol_versions ["2025-11-25", "2025-06-18", "2025-03-26"]
@@ -90,7 +91,7 @@ defmodule SymphonyElixirWeb.McpController do
 
   defp request(%{"id" => id, "method" => "ping"}, _ctx), do: result(id, %{})
 
-  defp request(%{"id" => id, "method" => "tools/list"}, _ctx), do: result(id, %{tools: Tools.list()})
+  defp request(%{"id" => id, "method" => "tools/list"}, ctx), do: result(id, %{tools: Tools.list(ctx.user)})
 
   defp request(%{"id" => id, "method" => "resources/list"}, _ctx), do: result(id, %{resources: Manual.resources()})
 
@@ -134,9 +135,11 @@ defmodule SymphonyElixirWeb.McpController do
 
   defp instructions(ctx) do
     reach =
-      if ctx.user.admin or ctx.user.local,
-        do: "everything",
-        else: Enum.join(Enum.map(ctx.user.teams, & &1.key) ++ Enum.map(ctx.user.projects, &("project:" <> &1)), ", ")
+      case Policy.role(ctx.user) do
+        :admin -> "everything"
+        :global_viewer -> "everything, read-only: the tools that change things are refused"
+        role -> Enum.join(Enum.map(ctx.user.teams, & &1.key) ++ Enum.map(ctx.user.projects, &("project:" <> &1)), ", ") <> if(role == :guest, do: ", read-only", else: "")
+      end
 
     """
     Symphony runs coding agents on Linear issues through factory flows: stages (a Linear state plus a factory/* label) joined by transitions. \

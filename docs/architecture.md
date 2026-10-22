@@ -489,9 +489,17 @@ account token, re-read on every request.
 - **Accounts:** Google IAP signs people in. `UserAuth` verifies the signed
   `x-goog-iap-jwt-assertion` header (`Iap`: ES256 against Google's keys, issuer, expiry, one of
   `server.iap_audiences`) on every request; the email picks the account, created on first visit
-  (the first one is the bootstrap admin). Only active Linear members get in. Roles and teams come
-  from Linear (admin flag, team membership, guests read-only), plus Symphony grants.
-  `Visibility` limits non-admins to their teams' and projects' issues and hides host fields.
+  (the first one is the bootstrap admin). Only active Linear members get in, and accounts an
+  admin provisioned (`Users.Import`). Roles and teams come from Linear (admin flag, team
+  membership, guests read-only), plus Symphony grants (teams, team admin, projects, and the
+  global roles `admin` and `global_viewer`).
+- **Policy** (`Policy`): the one place that decides what a person sees and may do (admin,
+  global viewer: everything read-only, team admin, member, guest), used by the LiveViews, the
+  API controllers and the MCP tools. `UserAuth` puts it in front of every LiveView event (a
+  read-only person's change event is refused before the page sees it) and every non-`GET` API
+  request; MCP refuses `write` tools for them before they run. `Visibility` applies its team
+  scope to payloads: non-admins see their teams' and projects' issues, sessions, flows, projects
+  and spend, without host fields.
 - **Sessions:** an encrypted, signed cookie that carries the IAP-verified account to LiveView
   sockets for an hour, with a session version that disabling bumps; CSRF on browser routes.
 - **API** (`/api/v1/*`, `/metrics`): IAP sign-in or `Authorization: Bearer <server.api_token>`.

@@ -408,6 +408,17 @@ defmodule SymphonyElixir.ObservabilityTest do
       assert_received {:request, "ch.test", _path, body, params, _auth}
       assert body =~ "has({issues:Array(String)}, ResourceAttributes['linear.issue.identifier'])"
       assert params["param_issues"] == "['PAY-1','WEB-2']"
+      flush_requests()
+
+      # A viewer's teams; none at all matches nothing.
+      assert {:ok, _overview} = Observability.factory_overview(:hour, teams: ["PAY", "WEB"])
+      assert_received {:request, "ch.test", _path, body, params, _auth}
+      assert body =~ "arrayExists(p -> startsWith(ResourceAttributes['linear.issue.identifier'], p), {team_prefixes:Array(String)})"
+      assert params["param_team_prefixes"] == "['PAY-','WEB-']"
+      flush_requests()
+
+      assert {:ok, _overview} = Observability.factory_overview(:hour, teams: [])
+      assert_received {:request, "ch.test", _path, _body, %{"param_team_prefixes" => "[]"}, _auth}
     end
 
     test "custom ranges in seconds pick a bucket" do

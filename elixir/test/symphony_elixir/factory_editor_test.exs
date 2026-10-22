@@ -7,7 +7,7 @@ defmodule SymphonyElixir.FactoryEditorTest do
   import Phoenix.ConnTest
   import Phoenix.LiveViewTest
 
-  alias SymphonyElixir.{Auth, Config, FactoryControls, IssueStage, SessionHistory, Tracker, UsageLedger, Users}
+  alias SymphonyElixir.{Auth, Config, FactoryControls, IssueStage, Policy, SessionHistory, Tracker, UsageLedger, Users}
   alias SymphonyElixir.Factory.{Definition, StagePrompt, Store}
   alias SymphonyElixir.Linear.{Adapter, Client}
   alias SymphonyElixirWeb.{FactoryPresenter, Visibility}
@@ -217,9 +217,9 @@ defmodule SymphonyElixir.FactoryEditorTest do
 
     test "guests and signed-out users can't edit any flow" do
       guest = %Auth.User{id: "g", name: "g", guest: true, teams: [%{id: "t", key: "PAY", name: "P"}]}
-      refute Auth.can_edit_factory?(guest, "PAY")
-      refute Auth.can_edit_factory?(nil, "PAY")
-      refute Auth.can_edit_factory?(%Auth.User{id: "m", name: "m", teams: []}, nil)
+      refute Policy.can?(guest, {:edit_flow, "PAY"})
+      refute Policy.can?(nil, {:edit_flow, "PAY"})
+      refute Policy.can?(%Auth.User{id: "m", name: "m", teams: []}, {:edit_flow, nil})
     end
 
     test "a project's own flow wins over its team's, which wins over the default" do
@@ -286,8 +286,8 @@ defmodule SymphonyElixir.FactoryEditorTest do
       UsageLedger.observe_issue(%Issue{id: "2", identifier: "WEB-1", state: "In Progress", project_slug: "shared"})
       UsageLedger.observe_issue(%Issue{id: "3", identifier: "WEB-2", state: "Todo", project_slug: "web-only"})
 
-      assert Auth.can_edit_factory?(mia, "project:shared")
-      refute Auth.can_edit_factory?(mia, "project:web-only")
+      assert Policy.can?(mia, {:edit_flow, "project:shared"})
+      refute Policy.can?(mia, {:edit_flow, "project:web-only"})
 
       factory = FactoryPresenter.payload([], Config.settings!())
       payload = Visibility.filter_payload(%{running: [], retrying: [], projects: [], factory: factory}, mia)
@@ -301,7 +301,8 @@ defmodule SymphonyElixir.FactoryEditorTest do
       projects = [%{slug: "shared", issues: [%{issue_identifier: "WEB-1"}]}, %{slug: "web-only", issues: [%{issue_identifier: "WEB-2"}]}]
       payload = Visibility.filter_payload(%{running: running, retrying: [], projects: projects, factory: factory}, lee)
       assert Enum.map(payload.running, & &1.issue_identifier) == ["WEB-1"]
-      assert [%{issues: [_]}, %{issues: []}] = payload.projects
+      # A project with none of the viewer's work isn't listed at all.
+      assert [%{slug: "shared", issues: [_]}] = payload.projects
       assert Enum.map(payload.factory.teams, & &1.key) == ["project:shared"]
       assert payload.factory.team == nil
       assert payload.factory.flows["project:shared"].nodes["implement"].count == 2

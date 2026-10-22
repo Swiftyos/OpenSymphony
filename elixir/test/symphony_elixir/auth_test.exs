@@ -4,7 +4,7 @@ defmodule SymphonyElixir.AuthTest do
   import Phoenix.ConnTest
   import Phoenix.LiveViewTest
 
-  alias SymphonyElixir.{Auth, FactoryControls, UsageLedger, Users}
+  alias SymphonyElixir.{Auth, FactoryControls, Policy, UsageLedger, Users}
   alias SymphonyElixirWeb.{RateLimit, UserAuth}
 
   @endpoint SymphonyElixirWeb.Endpoint
@@ -196,13 +196,13 @@ defmodule SymphonyElixir.AuthTest do
     assert Enum.map(mia_user.teams, & &1.key) == ["PAY"]
 
     {:ok, ada_user} = Auth.user_for_account(ada)
-    assert Auth.can_control?(ada_user)
-    assert Auth.movable_teams(ada_user) == :all
+    assert Policy.can?(ada_user, :control)
+    assert Policy.movable_teams(ada_user) == :all
 
     member = %{mia_user | admin: false}
-    assert Auth.can_move?(member, "PAY-12")
-    refute Auth.can_move?(member, "WEB-3")
-    refute Auth.can_control?(member)
+    assert Policy.can?(member, {:move_issue, "PAY-12", nil})
+    refute Policy.can?(member, {:move_issue, "WEB-3", nil})
+    refute Policy.can?(member, :control)
   end
 
   describe "web" do
@@ -245,7 +245,9 @@ defmodule SymphonyElixir.AuthTest do
       assert {:ok, _view, _html} = live(iap_conn(mia), "/")
 
       session = %{"user_id" => mia.id, "session_version" => Users.get(mia.id).session_version}
-      socket = %Phoenix.LiveView.Socket{endpoint: @endpoint}
+      # on_mount attaches the policy's event hook, which needs a socket's lifecycle.
+      private = %{lifecycle: %Phoenix.LiveView.Lifecycle{}, live_temp: %{}}
+      socket = %Phoenix.LiveView.Socket{endpoint: @endpoint, private: private}
       now = System.system_time(:second)
 
       assert {:cont, _socket} = UserAuth.on_mount(:require_user, %{}, Map.put(session, "iap_verified_at", now - 60), socket)
@@ -381,10 +383,10 @@ defmodule SymphonyElixir.AuthTest do
 
       # Grants lift guest status and count like membership.
       assert {:ok, %Auth.User{guest: false, projects: ["checkout"], teams: [%{key: "PAY"}]} = lee_user} = Auth.user_for_id(lee.id, Users.get(lee.id).session_version)
-      assert Auth.can_move_issue?(lee_user, "WEB-1", "checkout")
-      refute Auth.can_move_issue?(lee_user, "WEB-1", "web")
-      assert Auth.can_edit_factory?(lee_user, "project:checkout")
-      assert Auth.movable_projects(lee_user) == ["checkout"]
+      assert Policy.can?(lee_user, {:move_issue, "WEB-1", "checkout"})
+      refute Policy.can?(lee_user, {:move_issue, "WEB-1", "web"})
+      assert Policy.can?(lee_user, {:edit_flow, "project:checkout"})
+      assert Policy.movable_projects(lee_user) == ["checkout"]
 
       # What a team admin can't do.
       render_hook(view, "grant", %{"account" => lee.id, "choice" => "access:WEB"})
@@ -407,8 +409,8 @@ defmodule SymphonyElixir.AuthTest do
       assert render(admin_view) =~ "No longer a PAY admin."
 
       # No one signed in, no rights; a session that ended reloads the page through IAP.
-      assert Auth.movable_projects(nil) == []
-      refute Auth.can_grant?(nil, "PAY")
+      assert Policy.movable_projects(nil) == []
+      refute Policy.can?(nil, {:grant, "PAY"})
       {:ok, _} = Users.disable(mia.id, "ada")
       assert {:error, {:redirect, %{to: "/"}}} = render_hook(view, "grant", %{"account" => lee.id, "choice" => "access:PAY"})
     end

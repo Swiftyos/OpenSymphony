@@ -17,7 +17,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   import SymphonyElixirWeb.Topbar
   require Logger
 
-  alias SymphonyElixir.{AgentInbox, Auth, Config, FactoryControls, IssueMoves, IssueStage, McpTokens}
+  alias SymphonyElixir.{AgentInbox, Auth, Config, FactoryControls, IssueMoves, IssueStage, McpTokens, Policy}
   alias SymphonyElixir.Factory.{Assistant, Definition, Store}
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.{SessionHistory, Transcript}
@@ -102,7 +102,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   @impl true
   def handle_event("factory_control", %{"team" => team, "stage" => stage, "field" => field} = params, socket) do
     reply =
-      with :ok <- authorize(socket, &Auth.can_edit_factory?(&1, team), :not_team_editor),
+      with :ok <- authorize(socket, {:edit_flow, team}),
            {:ok, controls} <- FactoryControls.put({team, stage}, field, Map.get(params, "value"), actor(socket)) do
         ObservabilityPubSub.broadcast_update()
         %{ok: true, controls: controls}
@@ -141,7 +141,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   def handle_event("factory_autopilot", %{"team" => scope, "enabled" => enabled, "streak" => streak}, socket)
       when is_binary(scope) and is_boolean(enabled) and is_integer(streak) do
     reply =
-      with :ok <- authorize(socket, &Auth.can_edit_factory?(&1, scope), :not_team_editor),
+      with :ok <- authorize(socket, {:edit_flow, scope}),
            {:ok, saved} <- Store.put_autopilot(scope, enabled, streak, actor(socket)) do
         ObservabilityPubSub.broadcast_update()
         %{ok: true, definition: saved}
@@ -156,7 +156,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   def handle_event("factory_save", %{"team" => team, "version" => version, "definition" => definition}, socket)
       when is_binary(team) and is_integer(version) and is_map(definition) do
     reply =
-      with :ok <- authorize(socket, &Auth.can_edit_factory?(&1, team), :not_team_editor),
+      with :ok <- authorize(socket, {:edit_flow, team}),
            {:ok, saved} <- Store.put(team, definition, version, actor(socket)) do
         IssueMoves.sync_stage_labels(team, saved)
         ObservabilityPubSub.broadcast_update()
@@ -174,7 +174,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   # LiveView process and the result is pushed back when it's ready.
   def handle_event("factory_assist", %{"team" => team, "stage" => stage, "request" => request} = params, socket)
       when is_binary(team) and is_binary(stage) do
-    case authorize(socket, &Auth.can_edit_factory?(&1, team), :not_team_editor) do
+    case authorize(socket, {:edit_flow, team}) do
       :ok ->
         ref = Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
         definition = assist_definition(params["definition"], team)
@@ -193,7 +193,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   # Drafts a whole flow for a scope (team, project, or the default) from a
   # description, starting from the editor's current draft.
   def handle_event("factory_assist_flow", %{"team" => scope, "request" => request} = params, socket) when is_binary(scope) do
-    case authorize(socket, &Auth.can_edit_factory?(&1, scope), :not_team_editor) do
+    case authorize(socket, {:edit_flow, scope}) do
       :ok ->
         ref = Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
         base = assist_definition(params["definition"], scope)
@@ -216,7 +216,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   # Drops a team's or project's own flow so it inherits again.
   def handle_event("factory_reset", %{"team" => scope}, socket) when is_binary(scope) do
     reply =
-      with :ok <- authorize(socket, &Auth.can_edit_factory?(&1, scope), :not_team_editor),
+      with :ok <- authorize(socket, {:edit_flow, scope}),
            :ok <- Store.reset_team(scope) do
         ObservabilityPubSub.broadcast_update()
         %{ok: true}
@@ -346,14 +346,15 @@ defmodule SymphonyElixirWeb.DashboardLive do
     |> Enum.uniq_by(&String.downcase/1)
   end
 
+  # IssueMoves checks the person may move the issue once it knows its team.
   defp review_issue(socket, id, verdict) do
-    with {:ok, user} <- authorize(socket, fn _user -> true end, :signed_out) |> with_user(socket) do
+    with {:ok, user} <- authorize(socket, :write) |> with_user(socket) do
       IssueMoves.review(user, id, verdict, actor: actor(socket))
     end
   end
 
   defp move_issue(socket, id, to) do
-    with {:ok, user} <- authorize(socket, fn _user -> true end, :signed_out) |> with_user(socket) do
+    with {:ok, user} <- authorize(socket, :write) |> with_user(socket) do
       IssueMoves.move(user, id, to, actor: actor(socket))
     end
   end
@@ -363,13 +364,14 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp actor(socket), do: socket.assigns.current_user.username || "local"
 
-  # Server enforces every permission; the client only hides what the user can't use.
-  # Checks against a freshly resolved user, so a disabled account or a lost
-  # Linear role can't keep acting from a page opened earlier.
-  defp authorize(socket, allowed?, denied_reason) when is_function(allowed?, 1) do
+  # Server enforces every permission (SymphonyElixir.Policy); the client only
+  # hides what the user can't use. Checks against a freshly resolved user, so a
+  # disabled account or a lost Linear role can't keep acting from a page opened
+  # earlier.
+  defp authorize(socket, action) do
     with true <- FactoryPresenter.controls_enabled?(Config.settings!()) || {:error, :controls_disabled},
          {:ok, user} <- UserAuth.refresh_user(socket) do
-      if allowed?.(user), do: :ok, else: {:error, denied_reason}
+      Policy.authorize(user, action)
     end
   end
 
@@ -378,13 +380,13 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp factory_json(factory, user, scope) do
     enabled? = FactoryPresenter.controls_enabled?(Config.settings!())
     names = Map.new(user.teams, &{&1.key, &1.name})
-    editable = Map.new(factory.teams, &{&1.key, enabled? and Auth.can_edit_factory?(user, &1.key)})
+    editable = Map.new(factory.teams, &{&1.key, enabled? and Policy.can?(user, {:edit_flow, &1.key})})
 
     factory
     |> Map.update!(:teams, fn teams -> Enum.map(teams, &Map.put(&1, :name, &1.name || names[&1.key])) end)
-    |> Map.put(:controls_enabled, enabled? and Auth.can_control?(user))
-    |> Map.put(:movable_teams, if(enabled?, do: Auth.movable_teams(user), else: []))
-    |> Map.put(:movable_projects, if(enabled?, do: Auth.movable_projects(user), else: []))
+    |> Map.put(:controls_enabled, enabled? and Policy.can?(user, :control))
+    |> Map.put(:movable_teams, if(enabled?, do: Policy.movable_teams(user), else: []))
+    |> Map.put(:movable_projects, if(enabled?, do: Policy.movable_projects(user), else: []))
     |> Map.put(:can_edit, editable)
     |> Map.put(:can_control, editable)
     # The flow the top bar's team or project picks.
@@ -446,7 +448,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
               <p class="approval-move"><%= item.from_name || "?" %> → <strong><%= item.stage %></strong></p>
               <div class="approval-actions">
                 <a :if={item.href} class="fx-link-btn" href={item.href} target="_blank" rel="noopener">Read the ticket ↗</a>
-                <%= if Auth.can_move_issue?(@current_user, item.id, item.project) do %>
+                <%= if Policy.can?(@current_user, {:move_issue, item.id, item.project}) do %>
                   <button type="button" class="fx-action" phx-click="send_back_issue" phx-value-id={item.issue_id} disabled={is_nil(item.from_name)}>
                     ↩ Send back
                   </button>
@@ -528,7 +530,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                     <div class="approval-actions">
                       <a :if={item.href} class="fx-link-btn" href={item.href} target="_blank" rel="noopener">Read the ticket ↗</a>
                       <button type="button" class="fx-link-btn" phx-click="open_chat" phx-value-id={item.id}>💬 Transcript</button>
-                      <%= if Auth.can_move_issue?(@current_user, item.id, item.project) do %>
+                      <%= if Policy.can?(@current_user, {:move_issue, item.id, item.project}) do %>
                         <button type="button" class="fx-action" phx-click="send_back_issue" phx-value-id={item.issue_id} disabled={is_nil(item.from_name)}>
                           ↩ Send back
                         </button>
@@ -928,9 +930,9 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp chat_session(_payload, _identifier), do: nil
 
   # Messaging an agent is a change to its work: the viewer must see the issue
-  # and hold the right to move it (Auth.can_message_agent?/2).
+  # and hold the right to move it.
   defp can_message?(user, _payload, identifier) do
-    Visibility.filter_issue(%{}, user, identifier) != :hidden and Auth.can_message_agent?(user, identifier)
+    Visibility.filter_issue(%{}, user, identifier) != :hidden and Policy.can?(user, {:message_agent, identifier, nil})
   end
 
   defp author_name(user), do: user.name || user.username || user.email || "someone"

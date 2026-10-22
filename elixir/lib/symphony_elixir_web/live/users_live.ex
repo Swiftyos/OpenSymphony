@@ -1,9 +1,12 @@
 defmodule SymphonyElixirWeb.UsersLive do
   @moduledoc """
   Accounts and access. Accounts appear when people first open Symphony through
-  Google sign-in (IAP). Admins disable or re-enable people and make people
-  admins of teams. Team admins (and admins) give people access to their teams
-  and to the projects their teams work in.
+  Google sign-in (IAP), or when an admin provisions them
+  (`SymphonyElixir.Users.Import`). Admins disable or re-enable people, make
+  people admins of teams, and make people global viewers. Team admins (and
+  admins) give people access to their teams and to the projects their teams
+  work in. Global viewers see the page and change nothing.
+  (`SymphonyElixir.Policy` decides all of it.)
 
   Linear roles and team memberships are shown but not edited here: they come
   from Linear for each account's email. Symphony's grants add to them.
@@ -12,7 +15,7 @@ defmodule SymphonyElixirWeb.UsersLive do
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
   import SymphonyElixirWeb.Topbar
 
-  alias SymphonyElixir.{Auth, Config, UsageLedger, Users}
+  alias SymphonyElixir.{Auth, Config, Policy, UsageLedger, Users}
   alias SymphonyElixir.Factory.Store
   alias SymphonyElixirWeb.{ObservabilityPubSub, UserAuth}
 
@@ -40,7 +43,7 @@ defmodule SymphonyElixirWeb.UsersLive do
   def handle_event(action, %{"id" => id}, socket) when action in ["disable", "enable"] do
     case UserAuth.refresh_user(socket) do
       {:ok, user} ->
-        if Auth.can_control?(user),
+        if Policy.can?(user, :control),
           do: {:noreply, socket |> apply_action(action, id) |> load_accounts()},
           else: {:noreply, assign(socket, :flash_message, "Only admins can manage accounts.")}
 
@@ -68,8 +71,17 @@ defmodule SymphonyElixirWeb.UsersLive do
 
   def handle_event(action, _params, socket) when action in ["grant", "revoke"], do: {:noreply, socket}
 
+  defp change_access(socket, user, id, "role:global_viewer", viewer?) do
+    if Policy.can?(user, :control) do
+      message = if viewer?, do: "Now a global viewer: sees every team, changes nothing.", else: "No longer a global viewer."
+      socket |> result(Users.set_role(id, if(viewer?, do: "global_viewer"), actor(socket)), message) |> resync(id)
+    else
+      assign(socket, :flash_message, "Only admins can make people global viewers.")
+    end
+  end
+
   defp change_access(socket, user, id, "admin:" <> team, admin?) do
-    if Auth.can_control?(user) do
+    if Policy.can?(user, :control) do
       message = if admin?, do: "Now a #{team} admin.", else: "No longer a #{team} admin."
       socket |> result(Users.set_team_admin(id, team, admin?, actor(socket)), message) |> resync(id)
     else
@@ -78,7 +90,7 @@ defmodule SymphonyElixirWeb.UsersLive do
   end
 
   defp change_access(socket, user, id, "access:" <> scope, granted?) do
-    if Auth.can_grant?(user, scope) do
+    if Policy.can?(user, {:grant, scope}) do
       outcome = Users.set_access(id, scope, granted?, actor(socket))
       socket |> result(outcome, access_message(scope, granted?)) |> resync(id)
     else
@@ -120,7 +132,8 @@ defmodule SymphonyElixirWeb.UsersLive do
 
   defp load_accounts(socket) do
     viewer = socket.assigns.current_user
-    admin? = Auth.can_control?(viewer)
+    admin? = Policy.can?(viewer, :control)
+    sees_all? = Policy.sees_all?(viewer)
 
     accounts =
       Users.list()
@@ -143,7 +156,7 @@ defmodule SymphonyElixirWeb.UsersLive do
         {"Disabled", "disabled", Enum.filter(accounts, &(&1.status == "disabled"))}
       ]
       # Team admins manage access, not accounts.
-      |> Enum.filter(fn {_title, status, _accounts} -> admin? or status == "active" end)
+      |> Enum.filter(fn {_title, status, _accounts} -> sees_all? or status == "active" end)
 
     assign(socket,
       groups: groups,
@@ -182,8 +195,8 @@ defmodule SymphonyElixirWeb.UsersLive do
 
   defp grantable(viewer, teams, projects) do
     %{
-      teams: Enum.filter(teams, &Auth.can_grant?(viewer, &1)),
-      projects: Enum.filter(projects, &Auth.can_grant?(viewer, "project:" <> &1.slug))
+      teams: Enum.filter(teams, &Policy.can?(viewer, {:grant, &1})),
+      projects: Enum.filter(projects, &Policy.can?(viewer, {:grant, "project:" <> &1.slug}))
     }
   end
 
@@ -239,6 +252,20 @@ defmodule SymphonyElixirWeb.UsersLive do
                 </td>
                 <td>
                   <div class="access-cell">
+                    <span :if={account.role == "global_viewer"} class="access-chip access-chip-admin" title="Sees every team, changes nothing">
+                      Global viewer
+                      <button
+                        :if={@admin?}
+                        type="button"
+                        class="access-remove"
+                        phx-click="revoke"
+                        phx-value-id={account.id}
+                        phx-value-choice="role:global_viewer"
+                        aria-label={"Remove @#{account.username} as global viewer"}
+                      >
+                        ×
+                      </button>
+                    </span>
                     <span :for={team <- linear_teams(account)} class="access-chip" title="Linear team membership">{team}</span>
                     <span :for={team <- Map.get(account, :team_admin, [])} class="access-chip access-chip-admin">
                       ★ {team} admin
@@ -257,7 +284,7 @@ defmodule SymphonyElixirWeb.UsersLive do
                     <span :for={scope <- Map.get(account, :access, [])} class="access-chip access-chip-granted" title="Given in Symphony">
                       {scope_label(scope, @grantable.projects)}
                       <button
-                        :if={Auth.can_grant?(@current_user, scope)}
+                        :if={Policy.can?(@current_user, {:grant, scope})}
                         type="button"
                         class="access-remove"
                         phx-click="revoke"
@@ -269,7 +296,7 @@ defmodule SymphonyElixirWeb.UsersLive do
                       </button>
                     </span>
                     <form
-                      :if={status == "active" and (@grantable.teams != [] or @grantable.projects != [] or @team_options != [])}
+                      :if={status == "active" and (@admin? or @grantable.teams != [] or @grantable.projects != [])}
                       id={"grant-#{account.id}"}
                       phx-change="grant"
                       class="access-add"
@@ -295,6 +322,9 @@ defmodule SymphonyElixirWeb.UsersLive do
                           <option :for={team <- @team_options -- Map.get(account, :team_admin, [])} value={"admin:" <> team}>
                             ★ {team} admin
                           </option>
+                        </optgroup>
+                        <optgroup :if={@admin? and account.role != "global_viewer"} label="Everything, read-only">
+                          <option value="role:global_viewer">Global viewer</option>
                         </optgroup>
                       </select>
                     </form>
@@ -328,10 +358,12 @@ defmodule SymphonyElixirWeb.UsersLive do
   end
 
   defp role(%{bootstrap_admin: true}), do: "Admin (first account)"
+  defp role(%{role: "admin"}), do: "Admin"
 
-  defp role(%{linear: linear}) do
+  defp role(%{linear: linear} = account) do
     cond do
       linear.admin -> "Linear admin"
+      account.role == "global_viewer" -> "Global viewer"
       linear.guest -> "Guest"
       true -> "Member"
     end

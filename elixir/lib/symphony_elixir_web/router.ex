@@ -5,7 +5,9 @@ defmodule SymphonyElixirWeb.Router do
 
   use Phoenix.Router
   import Phoenix.LiveView.Router
-  import SymphonyElixirWeb.UserAuth, only: [fetch_current_user: 2, require_user: 2, require_api_user: 2]
+
+  import SymphonyElixirWeb.UserAuth,
+    only: [fetch_current_user: 2, require_user: 2, require_api_user: 2, refuse_read_only_changes: 2]
 
   pipeline :browser do
     plug(:fetch_session)
@@ -21,14 +23,24 @@ defmodule SymphonyElixirWeb.Router do
   end
 
   # JSON API and metrics: IAP sign-in or `Authorization: Bearer <server.api_token>`.
+  # Read-only people (global viewers, guests) only read.
   pipeline :api do
     plug(:fetch_session)
     plug(:fetch_current_user)
     plug(:require_api_user)
+    plug(:refuse_read_only_changes)
   end
 
   # MCP for agents: bearer tokens only, no cookies (see McpAuth).
   pipeline :mcp do
+    plug(SymphonyElixirWeb.RateLimit, :mcp)
+    plug(SymphonyElixirWeb.McpAuth)
+  end
+
+  # Admin tasks run against the live controller: an MCP token (see McpAuth),
+  # whose account the controller checks is an admin. The load balancer keeps
+  # these paths behind IAP; they're meant for a port-forward.
+  pipeline :admin_token do
     plug(SymphonyElixirWeb.RateLimit, :mcp)
     plug(SymphonyElixirWeb.McpAuth)
   end
@@ -47,6 +59,12 @@ defmodule SymphonyElixirWeb.Router do
     pipe_through(:mcp)
 
     post("/mcp", McpController, :post)
+  end
+
+  scope "/", SymphonyElixirWeb do
+    pipe_through(:admin_token)
+
+    post("/admin/users/import", UsersImportController, :create)
   end
 
   scope "/", SymphonyElixirWeb do

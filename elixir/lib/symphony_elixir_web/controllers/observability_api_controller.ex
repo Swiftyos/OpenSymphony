@@ -6,6 +6,7 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
   use Phoenix.Controller, formats: [:json]
 
   alias Plug.Conn
+  alias SymphonyElixir.Policy
   alias SymphonyElixirWeb.{Endpoint, Presenter, PrometheusMetrics, Visibility}
 
   @spec state(Conn.t(), map()) :: Conn.t()
@@ -30,6 +31,13 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
 
   @spec refresh(Conn.t(), map()) :: Conn.t()
   def refresh(conn, _params) do
+    case Policy.authorize(conn.assigns[:current_user], :refresh) do
+      :ok -> do_refresh(conn)
+      {:error, reason} -> error_response(conn, 403, "forbidden", Policy.describe(reason))
+    end
+  end
+
+  defp do_refresh(conn) do
     case Presenter.refresh_payload(orchestrator()) do
       {:ok, payload} ->
         conn
@@ -57,23 +65,29 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
 
   # A signed-in admin, or no user at all: the request came with server.api_token.
   defp restart_action(conn, action) do
-    case conn.assigns[:current_user] do
-      %{admin: true} = user -> restart_response(conn, action.(user.username || user.email || "admin"))
-      nil -> restart_response(conn, action.("api token"))
-      _user -> error_response(conn, 403, "forbidden", "Only admins can restart Symphony")
+    user = conn.assigns[:current_user]
+
+    cond do
+      not Policy.can?(user, :restart) -> error_response(conn, 403, "forbidden", "Only admins can restart Symphony")
+      is_nil(user) -> restart_response(conn, action.("api token"))
+      true -> restart_response(conn, action.(user.username || user.email || "admin"))
     end
   end
 
   defp restart_response(conn, :unavailable), do: error_response(conn, 503, "orchestrator_unavailable", "Orchestrator is unavailable")
   defp restart_response(conn, payload), do: conn |> put_status(202) |> json(%{delayed_restart: payload})
 
+  # Prometheus metrics cover every team, so they're for people who see all of
+  # them (and the API token).
   @spec metrics(Conn.t(), map()) :: Conn.t()
   def metrics(conn, _params) do
-    body = PrometheusMetrics.render()
-
-    conn
-    |> put_resp_header("content-type", "text/plain; version=0.0.4; charset=utf-8")
-    |> send_resp(200, body)
+    if Policy.can?(conn.assigns[:current_user], :view_metrics) do
+      conn
+      |> put_resp_header("content-type", "text/plain; version=0.0.4; charset=utf-8")
+      |> send_resp(200, PrometheusMetrics.render())
+    else
+      error_response(conn, 403, "forbidden", "Prometheus metrics cover every team; ask an admin.")
+    end
   end
 
   @spec method_not_allowed(Conn.t(), map()) :: Conn.t()

@@ -137,14 +137,15 @@ defmodule SymphonyElixir.Observability do
   @doc """
   Factory-wide usage for `range` (see the moduledoc for the shape). Options:
   `instance:` only counts telemetry from that `symphony.instance`; `team:`
-  only that team's issues; `issues:` only those identifiers (a project's);
-  `top:` caps the tool and issue lists (10).
+  only that team's issues; `teams:` only those teams' issues (what a viewer
+  may see); `issues:` only those identifiers (a project's); `top:` caps the
+  tool and issue lists (10).
   """
   @spec factory_overview(range(), keyword()) :: {:ok, map()} | error()
   def factory_overview(range \\ :day, opts \\ []) do
     with {:ok, window} <- window(range),
          {:ok, clickhouse} <- clickhouse() do
-      filters = %{instance: opts[:instance], team: opts[:team], issues: opts[:issues]}
+      filters = %{instance: opts[:instance], team: opts[:team], teams: opts[:teams], issues: opts[:issues]}
 
       cached({:factory_overview, range, opts}, fn ->
         load_metrics(clickhouse, window, filters, Keyword.get(opts, :top, 10), true)

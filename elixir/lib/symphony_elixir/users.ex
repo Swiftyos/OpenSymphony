@@ -11,6 +11,8 @@ defmodule SymphonyElixir.Users do
     * `team_admin` - teams the person administers in Symphony (set by admins)
     * `access` - extra teams (`PAY`) or projects (`project:<slug>`) the person
       may work in, granted by an admin or one of the team's admins
+    * `role` - a global role: `admin`, or `global_viewer` (sees every team,
+      changes nothing); `nil` for neither. See `SymphonyElixir.Policy`.
 
   Lifecycle:
 
@@ -22,6 +24,9 @@ defmodule SymphonyElixir.Users do
     * accounts from the password era keep their id, username and grants; a
       `pending` one becomes active on its first IAP visit, since IAP now proves
       the email
+    * admins can provision accounts ahead of a first visit
+      (`SymphonyElixir.Users.Import`): `imported_at` is set, and the person
+      gets the provisioned grants when they first arrive through IAP
 
   Stored as JSON (mode 0600) in `~/.symphony/users.json`.
   """
@@ -43,8 +48,12 @@ defmodule SymphonyElixir.Users do
           session_version: pos_integer(),
           team_admin: [String.t()],
           access: [String.t()],
+          role: String.t() | nil,
+          imported_at: String.t() | nil,
           mcp_welcomed_at: String.t() | nil
         }
+
+  @roles ["admin", "global_viewer"]
 
   @team_pattern ~r/^[A-Z0-9][A-Z0-9_-]{0,15}$/
   @project_pattern ~r/^project:[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/
@@ -66,6 +75,33 @@ defmodule SymphonyElixir.Users do
     with :ok <- validate_email(email), do: GenServer.call(__MODULE__, {:ensure, email})
   end
 
+  @doc "The account with this email (any case), if there is one."
+  @spec get_by_email(String.t() | nil) :: user() | nil
+  def get_by_email(email) when is_binary(email) do
+    email = email |> String.trim() |> String.downcase()
+    if ready?(), do: Enum.find(all_records(), &(&1.email == email)), else: nil
+  end
+
+  def get_by_email(_email), do: nil
+
+  @doc """
+  Sets the account's global role: `"admin"`, `"global_viewer"`, or `nil` for
+  neither. Callers check the person setting it is an admin.
+  """
+  @spec set_role(String.t(), String.t() | nil, String.t()) :: {:ok, user()} | {:error, atom()}
+  def set_role(id, role, by) when is_nil(role) or role in @roles, do: GenServer.call(__MODULE__, {:set_role, id, role, by})
+  def set_role(_id, _role, _by), do: {:error, :invalid_role}
+
+  @doc """
+  Creates or updates accounts in one write, for `SymphonyElixir.Users.Import`.
+  Each entry is `{email, %{role: role | :keep, team_admin: [team], access:
+  [scope]}}`, the account's complete lists after the change. New accounts are
+  active and marked `imported_at`; existing ones keep their status, id and
+  everything else.
+  """
+  @spec provision([{String.t(), map()}], String.t()) :: {:ok, [user()]} | {:error, atom()}
+  def provision(entries, by) when is_list(entries), do: GenServer.call(__MODULE__, {:provision, entries, by})
+
   @doc """
   Records that the person has seen the MCP setup, so it doesn't open again.
   """
@@ -82,7 +118,7 @@ defmodule SymphonyElixir.Users do
 
   @doc """
   Grants (`true`) or revokes (`false`) access to a team (`PAY`) or a project
-  (`project:<slug>`). Callers check the granter may do this (`Auth.can_grant?/2`).
+  (`project:<slug>`). Callers check the granter may do this (`Policy.can?(user, {:grant, scope})`).
   """
   @spec set_access(String.t(), String.t(), boolean(), String.t()) :: {:ok, user()} | {:error, atom()}
   def set_access(id, scope, granted?, by) do
@@ -205,6 +241,8 @@ defmodule SymphonyElixir.Users do
           session_version: 1,
           team_admin: [],
           access: [],
+          role: nil,
+          imported_at: nil,
           mcp_welcomed_at: nil
         }
 
@@ -271,9 +309,68 @@ defmodule SymphonyElixir.Users do
     end
   end
 
+  def handle_call({:set_role, id, role, by}, _from, state) do
+    case lookup(id) do
+      nil ->
+        {:reply, {:error, :not_found}, state}
+
+      record ->
+        record = %{record | role: role}
+        :ets.insert(@table, {id, record})
+        persist(state.path)
+        Logger.info("Account role set user=#{record.username} role=#{role || "none"} by=#{by}")
+        {:reply, {:ok, public(record)}, state}
+    end
+  end
+
+  def handle_call({:provision, entries, by}, _from, state) do
+    records = Enum.reduce(entries, all_records(), &provision_entry(&1, &2, by))
+    by_email = Map.new(records, &{&1.email, &1})
+    persist(state.path)
+    {:reply, {:ok, for({email, _attrs} <- entries, do: public(by_email[email]))}, state}
+  end
+
   def handle_call(:reset, _from, state) do
     :ets.delete_all_objects(@table)
     {:reply, :ok, state}
+  end
+
+  defp provision_entry({email, attrs}, records, by) do
+    record =
+      case Enum.find(records, &(&1.email == email)) do
+        nil ->
+          %{
+            id: "usr_" <> Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false),
+            username: unique_username(email, records),
+            email: email,
+            status: "active",
+            bootstrap_admin: false,
+            created_at: now(),
+            approved_by: by,
+            last_sign_in_at: nil,
+            session_version: 1,
+            team_admin: [],
+            access: [],
+            role: nil,
+            imported_at: now(),
+            mcp_welcomed_at: nil
+          }
+
+        existing ->
+          existing
+      end
+
+    role = if Map.get(attrs, :role, :keep) == :keep, do: record.role, else: attrs.role
+
+    record = %{
+      record
+      | team_admin: attrs |> Map.get(:team_admin, record.team_admin) |> load_scopes(:team) |> Enum.sort(),
+        access: attrs |> Map.get(:access, record.access) |> load_scopes(:any) |> Enum.sort(),
+        role: role
+    }
+
+    :ets.insert(@table, {record.id, record})
+    [record | Enum.reject(records, &(&1.id == record.id))]
   end
 
   defp stale_visit?(at) do
@@ -378,6 +475,8 @@ defmodule SymphonyElixir.Users do
       session_version: raw["session_version"] || 1,
       team_admin: load_scopes(raw["team_admin"], :team),
       access: load_scopes(raw["access"], :any),
+      role: if(raw["role"] in @roles, do: raw["role"]),
+      imported_at: raw["imported_at"],
       mcp_welcomed_at: raw["mcp_welcomed_at"]
     }
 

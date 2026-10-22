@@ -6,7 +6,7 @@ defmodule SymphonyElixirWeb.Topbar do
 
   use Phoenix.Component
 
-  alias SymphonyElixir.Auth
+  alias SymphonyElixir.Policy
   alias SymphonyElixirWeb.Brand
 
   attr(:instance_name, :string, default: nil)
@@ -77,8 +77,8 @@ defmodule SymphonyElixirWeb.Topbar do
             </p>
             <a :if={mcp_enabled?()} href="/account/mcp">MCP setup</a>
             <a href="/api/v1/state">State API</a>
-            <a href="/metrics">Prometheus metrics</a>
-            <a :if={Auth.can_manage_access?(@current_user)} href="/admin/users">Users</a>
+            <a :if={Policy.can?(@current_user, :view_metrics)} href="/metrics">Prometheus metrics</a>
+            <a :if={Policy.can?(@current_user, :view_users)} href="/admin/users">Users</a>
             <%!-- Sign-in is Google IAP's; this clears its login cookie. --%>
             <a class="user-menu-signout" href="/?gcp-iap-mode=CLEAR_LOGIN_COOKIE">Sign out of Google sign-in</a>
           </div>
@@ -106,6 +106,7 @@ defmodule SymphonyElixirWeb.Topbar do
     base =
       cond do
         user.admin -> "Admin"
+        user.global_viewer -> "Global viewer (read-only)"
         user.guest -> "Guest (read-only)"
         true -> "Member"
       end

@@ -27,12 +27,15 @@ defmodule SymphonyElixir.Observability.ClickHouse do
         }
   @typedoc """
   `issue` keeps one issue; `team` issues whose identifier starts with that team
-  key (`PAY` keeps `PAY-1`); `issues` only those identifiers (a project's).
+  key (`PAY` keeps `PAY-1`); `teams` issues of any of those teams (none for an
+  empty list: what a viewer without teams sees); `issues` only those
+  identifiers (a project's).
   """
   @type filters :: %{
           optional(:issue) => String.t() | nil,
           optional(:instance) => String.t() | nil,
           optional(:team) => String.t() | nil,
+          optional(:teams) => [String.t()] | nil,
           optional(:issues) => [String.t()] | nil
         }
   @type row :: %{String.t() => term()}
@@ -462,6 +465,11 @@ defmodule SymphonyElixir.Observability.ClickHouse do
     issue = if present?(filters[:issue]), do: "\n  AND ResourceAttributes['linear.issue.identifier'] = {issue:String}", else: ""
     team = if present?(filters[:team]), do: "\n  AND startsWith(ResourceAttributes['linear.issue.identifier'], {team_prefix:String})", else: ""
 
+    teams =
+      if is_list(filters[:teams]),
+        do: "\n  AND arrayExists(p -> startsWith(ResourceAttributes['linear.issue.identifier'], p), {team_prefixes:Array(String)})",
+        else: ""
+
     issues =
       if is_list(filters[:issues]),
         do: "\n  AND has({issues:Array(String)}, ResourceAttributes['linear.issue.identifier'])",
@@ -472,7 +480,7 @@ defmodule SymphonyElixir.Observability.ClickHouse do
         do: "\n  AND ResourceAttributes['symphony.instance'] IN ({instance:String}, {instance_encoded:String})",
         else: ""
 
-    issue <> team <> issues <> instance
+    issue <> team <> teams <> issues <> instance
   end
 
   # Codex does not percent-decode OTEL_RESOURCE_ATTRIBUTES, so match both spellings.
@@ -480,6 +488,7 @@ defmodule SymphonyElixir.Observability.ClickHouse do
     %{}
     |> maybe_param(:issue, if(present?(filters[:issue]), do: filters[:issue]))
     |> maybe_param(:team_prefix, if(present?(filters[:team]), do: filters[:team] <> "-"))
+    |> maybe_param(:team_prefixes, if(is_list(filters[:teams]), do: Enum.map(filters[:teams], &(&1 <> "-"))))
     |> maybe_param(:issues, if(is_list(filters[:issues]), do: filters[:issues]))
     |> then(fn params ->
       if present?(filters[:instance]) do

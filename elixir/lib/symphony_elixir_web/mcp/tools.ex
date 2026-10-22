@@ -4,8 +4,11 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
   way a person can from the dashboard.
 
   Every call runs as the token's account with that account's permissions
-  (`SymphonyElixir.Auth`), trimmed the same way as the dashboard
-  (`SymphonyElixirWeb.Visibility`). Flow and stage changes also need
+  (`SymphonyElixir.Policy`, the same rules as the dashboard), trimmed the same
+  way as the dashboard (`SymphonyElixirWeb.Visibility`). Each tool's `scope`
+  says whether it reads or changes Symphony: a `write` tool is refused for
+  read-only people (global viewers, guests) before it runs, and then checks
+  the person may make that change. Flow and stage changes also need
   `server.controls`.
 
   `call/3` returns `{:ok, result}` for the tool's structured result or
@@ -23,6 +26,7 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
     IssueMoves,
     LabelSync,
     Orchestrator,
+    Policy,
     ProjectRoutes,
     Transcript,
     UsageLedger
@@ -235,12 +239,14 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
   @tool_names MapSet.new(@tools, & &1.name)
 
   @doc """
-  Tool descriptors for `tools/list`. Every token gets all of them; its
-  account's permissions decide what each call may do.
+  Tool descriptors for `tools/list`: all of them, or only the reading ones for
+  a read-only person. The account's permissions decide what each call may do.
   """
-  @spec list() :: [map()]
-  def list do
-    Enum.map(@tools, fn tool ->
+  @spec list(Auth.User.t() | nil) :: [map()]
+  def list(user \\ nil) do
+    @tools
+    |> Enum.filter(&(&1.scope == "read" or not Policy.read_only?(user)))
+    |> Enum.map(fn tool ->
       %{
         name: tool.name,
         description: tool.description,
@@ -257,11 +263,20 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
   @spec known?(String.t()) :: boolean()
   def known?(name), do: MapSet.member?(@tool_names, name)
 
+  @doc ~S(Tool names by scope: `%{"read" => [...], "write" => [...]}`.)
+  @spec scopes() :: %{String.t() => [String.t()]}
+  def scopes, do: @tools |> Enum.group_by(& &1.scope, & &1.name)
+
   @spec call(String.t(), map(), context()) :: {:ok, map()} | {:error, String.t()}
   def call(name, args, ctx) when is_map(args) do
     tool = Enum.find(@tools, &(&1.name == name))
 
-    result = if is_nil(tool), do: {:error, "Unknown tool #{name}."}, else: run(name, args, ctx)
+    result =
+      cond do
+        is_nil(tool) -> {:error, "Unknown tool #{name}."}
+        tool.scope == "write" and not Policy.can?(ctx.user, :write) -> {:error, "#{name} changes Symphony, and your access is read-only: you can see everything you're shown but not change it."}
+        true -> run(name, args, ctx)
+      end
 
     Logger.info(
       "MCP tool call tool=#{name} user=#{ctx.user.username || ctx.user.id} via=#{inspect(ctx.via)} " <>
@@ -308,7 +323,7 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
             uses: definition["source"],
             version: if(definition["inherited"], do: 0, else: definition["version"]),
             stages: Enum.map(definition["stages"] || [], & &1["id"]),
-            editable: controls_enabled?() and Auth.can_edit_factory?(ctx.user, entry.key)
+            editable: controls_enabled?() and Policy.can?(ctx.user, {:edit_flow, entry.key})
           })
         end)
 
@@ -334,7 +349,7 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
          definition: Map.drop(definition, ["team", "source", "inherited"]),
          issues_by_stage: Map.new(flow.nodes, fn {stage, node} -> {stage, Enum.map(node.issues, &issue_summary/1)} end),
          transitions_observed: flow.edges,
-         editable: controls_enabled?() and Auth.can_edit_factory?(ctx.user, definition["team"])
+         editable: controls_enabled?() and Policy.can?(ctx.user, {:edit_flow, definition["team"]})
        }}
     end
   end
@@ -507,7 +522,7 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
     end
   end
 
-  defp run("list_projects", _args, _ctx) do
+  defp run("list_projects", _args, ctx) do
     file_slugs = Config.settings!().tracker.projects |> List.wrap() |> MapSet.new(& &1.slug)
     stored = ProjectRoutes.list()
     stored_slugs = MapSet.new(stored, & &1.slug)
@@ -527,7 +542,7 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
         |> Map.merge(%{project: route.slug, source: "mcp", active: live? and not MapSet.member?(file_slugs, route.slug)})
       end)
 
-    {:ok, %{projects: from_config ++ from_mcp}}
+    {:ok, %{projects: Enum.filter(from_config ++ from_mcp, &Policy.project_visible?(ctx.user, &1.project))}}
   end
 
   defp run("add_project", args, ctx) do
@@ -569,10 +584,12 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
     end
   end
 
-  defp run("refresh", _args, _ctx) do
-    case Presenter.refresh_payload(orchestrator()) do
-      {:ok, payload} -> {:ok, payload}
-      {:error, :unavailable} -> {:error, "The orchestrator is unavailable."}
+  defp run("refresh", _args, ctx) do
+    with :ok <- allowed(ctx.user, :refresh) do
+      case Presenter.refresh_payload(orchestrator()) do
+        {:ok, payload} -> {:ok, payload}
+        {:error, :unavailable} -> {:error, "The orchestrator is unavailable."}
+      end
     end
   end
 
@@ -581,7 +598,7 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
   # Adding a project lets agents work in a new repo, so it's for admins only.
   defp admin_controls(user) do
     with :ok <- controls_on() do
-      if Auth.can_control?(user), do: :ok, else: {:error, "Only admins can change which projects Symphony listens to."}
+      if Policy.can?(user, :control), do: :ok, else: {:error, "Only admins can change which projects Symphony listens to."}
     end
   end
 
@@ -667,18 +684,21 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
   # Anyone may read a flow listed for them, and editors any flow they may edit.
   defp readable_scope?(user, factory, scope) do
     key = normalize_scope(scope)
-    Enum.any?(factory.teams, &(&1.key == key)) or Auth.can_edit_factory?(user, key)
+    Enum.any?(factory.teams, &(&1.key == key)) or Policy.sees_all?(user) or Policy.can?(user, {:edit_flow, key})
+  end
+
+  defp allowed(user, action) do
+    case Policy.authorize(user, action) do
+      :ok -> :ok
+      {:error, reason} -> {:error, IssueMoves.describe_error(reason)}
+    end
   end
 
   defp normalize_scope("project:" <> slug), do: "project:" <> String.trim(slug)
   defp normalize_scope(scope), do: scope |> String.trim() |> String.upcase()
 
   defp can_edit(user, scope) do
-    with :ok <- controls_on() do
-      if Auth.can_edit_factory?(user, normalize_scope(scope)),
-        do: :ok,
-        else: {:error, IssueMoves.describe_error(:not_team_editor)}
-    end
+    with :ok <- controls_on(), do: allowed(user, {:edit_flow, normalize_scope(scope)})
   end
 
   defp controls_on, do: if(controls_enabled?(), do: :ok, else: {:error, IssueMoves.describe_error(:controls_disabled)})
@@ -686,19 +706,19 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
   defp controls_enabled?, do: FactoryPresenter.controls_enabled?(Config.settings!())
 
   # An issue is visible by its team (as on the dashboard) or, for project
-  # grants such as project-limited tokens, by the project Symphony saw it in.
+  # grants, by the project Symphony saw it in.
   defp visible(user, identifier) do
-    if Visibility.filter_issue(%{}, user, identifier) != :hidden or in_granted_project?(user, identifier),
+    if Policy.can?(user, {:view_issue, identifier, ledger_project(identifier)}),
       do: :ok,
       else: {:error, "Issue #{identifier} not found."}
   end
 
-  defp can_message?(user, identifier), do: Auth.can_message_agent?(user, identifier) or in_granted_project?(user, identifier)
+  defp can_message?(user, identifier), do: Policy.can?(user, {:message_agent, identifier, ledger_project(identifier)})
 
-  defp in_granted_project?(user, identifier) do
+  defp ledger_project(identifier) do
     case Enum.find(UsageLedger.snapshot().flow.issues, &(&1.issue == identifier)) do
-      %{project: project} when is_binary(project) -> project in Auth.movable_projects(user)
-      _ -> false
+      %{project: project} when is_binary(project) -> project
+      _ -> nil
     end
   end
 
