@@ -290,7 +290,7 @@ Read:
 | `list_issues` | `scope`, `team`, `state_type`, `stage`, `awaiting_approval` (all optional) | Issues Symphony tracks (with the opt-in label), with team, Linear `state` and `state_type`, stage, flow and whether a move is held for approval. |
 | `get_issue` | `identifier` (e.g. `WEB-12`) | Stage, previous stage, move history, live session or retry, and messages to its agent. A move with `by: "external"` closed the issue outside the factory (in Linear, or a PR merge integration). |
 | `get_transcript` | `identifier`, `limit` (default 50, max 200) | The newest transcript entries: messages, thinking, commands with output, edits, tool calls, turns. |
-| `list_projects` | none | The projects Symphony listens to: primary `repo`, `repos`, branch, harness, environment, `source` (`config` or `mcp`) and whether it's active. |
+| `list_projects` | `team` (optional) | The projects Symphony listens to (only that team's with `team`): primary `repo`, `repos`, branch, harness, environment, `source` (`config` or `mcp`), whether it's active, its `teams`, and `closing` while it is closing in Linear. |
 
 Change (what your account may change):
 
@@ -338,6 +338,14 @@ Blocked transitions allow. Issues blocked by other issues come back by themselve
 `get_transcript` on the blocker show its progress. `move_issue` either one to take over.
 
 **Tell an agent something.** `send_agent_message` with the identifier and your text.
+
+## Projects closed in Linear
+
+When a project is completed, canceled, archived or deleted in Linear (deleted: missing from two
+lookups in a row), Symphony closes it: nothing new starts (no pick-up from Todo, no unblocking),
+work under way finishes, and the dashboard shows it as closing. Once none of its issues is in
+progress (each is in Todo, Blocked, Done or Canceled) it is removed as `remove_project` does,
+recorded `by: "linear"`. Re-opening it in Linear first cancels that.
 
 ## Flows are edited over MCP
 

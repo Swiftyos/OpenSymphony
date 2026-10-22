@@ -1287,7 +1287,8 @@ defmodule SymphonyElixir.Orchestrator do
       active_issue_state?(state_name, active_states) and
       !terminal_issue_state?(state_name, terminal_states) and
       !IssueStage.paused?(issue) and
-      !IssueStage.dispatch_paused?(issue)
+      !IssueStage.dispatch_paused?(issue) and
+      !SymphonyElixir.ProjectRetirement.holds?(issue)
   end
 
   defp candidate_issue?(_issue, _active_states, _terminal_states), do: false

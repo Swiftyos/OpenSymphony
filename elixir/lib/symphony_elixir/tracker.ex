@@ -17,6 +17,7 @@ defmodule SymphonyElixir.Tracker do
   @callback ensure_group_labels(String.t(), String.t(), [String.t()]) :: {:ok, [String.t()]} | {:error, term()}
   @callback project_info([String.t()]) :: {:ok, %{String.t() => map()}} | {:error, term()}
   @callback fetch_issue_reports([String.t()]) :: {:ok, [map()]} | {:error, term()}
+  @callback project_statuses([String.t()]) :: {:ok, %{String.t() => map()}} | {:error, term()}
 
   @spec fetch_candidate_issues() :: {:ok, [term()]} | {:error, term()}
   def fetch_candidate_issues do
@@ -94,6 +95,15 @@ defmodule SymphonyElixir.Tracker do
   """
   @spec project_info([String.t()]) :: {:ok, %{String.t() => map()}} | {:error, term()}
   def project_info(slugs), do: adapter().project_info(slugs)
+
+  @doc """
+  Each project's (by slug) Linear status, archived ones included:
+  `%{status: "started" | "completed" | "canceled" | ..., archived: boolean}`.
+  A project the tracker doesn't return is missing from the map (deleted, or
+  not visible).
+  """
+  @spec project_statuses([String.t()]) :: {:ok, %{String.t() => map()}} | {:error, term()}
+  def project_statuses(slugs), do: adapter().project_statuses(slugs)
 
   @doc """
   What happened on some issues (by id): `%{id, identifier, title, url, state,

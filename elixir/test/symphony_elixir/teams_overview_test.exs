@@ -452,6 +452,23 @@ defmodule SymphonyElixir.TeamsOverviewTest do
       %{issue: issue}
     end
 
+    test "the project picker lists the picked team's projects; MCP list_projects filters by team", %{people: people} do
+      site = %Issue{id: "id-WEB-8", identifier: "WEB-8", title: "Site", state: "Todo", state_type: "unstarted", project_slug: "site"}
+      UsageLedger.observe_issue(%{site | labels: ["auto-build"]}, external: true)
+      visible = %{factory: FactoryPresenter.payload([], Config.settings!())}
+      assert Enum.map(SymphonyElixirWeb.ScopePicker.projects(visible, "PAY"), & &1.slug) == ["checkout"]
+      assert Enum.map(SymphonyElixirWeb.ScopePicker.projects(visible, nil), & &1.slug) |> Enum.sort() == ["checkout", "site"]
+
+      {:ok, view, html} = live(iap_conn(people.vic), "/?team=PAY&project=checkout")
+      assert html =~ ~s(<option value="checkout" selected)
+      refute html =~ ~s(<option value="site")
+      # Another team: back to all of its projects.
+      render_change(element(view, "#team-picker"), %{"team" => "WEB", "project" => "checkout"})
+      assert_patch(view, "/?team=WEB")
+
+      assert %{"projects" => [%{"project" => "checkout", "teams" => ["PAY"]}]} = ok!(token!(people.ada), "list_projects", %{"team" => "pay"})
+    end
+
     test "a picked team or project links to its Linear page and its repos", %{people: people} do
       {:ok, _view, html} = live(iap_conn(people.vic), "/?team=PAY")
       assert html =~ "https://linear.app/acme/team/PAY/active"

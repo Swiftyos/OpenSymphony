@@ -520,6 +520,41 @@ defmodule SymphonyElixir.Linear.Adapter do
     end
   end
 
+  @project_statuses_query """
+  query SymphonyProjectStatuses($slugs: [String!]!) {
+    projects(filter: {slugId: {in: $slugs}}, first: 100, includeArchived: true) {
+      nodes {
+        slugId
+        archivedAt
+        status {
+          type
+        }
+      }
+    }
+  }
+  """
+
+  @doc """
+  Each project's (by slug) status type and whether it is archived; a project
+  Linear doesn't return (deleted) is left out.
+  """
+  @type project_status :: %{status: String.t() | nil, archived: boolean()}
+  @spec project_statuses([String.t()]) :: {:ok, %{String.t() => project_status()}} | {:error, term()}
+  def project_statuses([]), do: {:ok, %{}}
+
+  def project_statuses(slugs) when is_list(slugs) do
+    case client_module().graphql(@project_statuses_query, %{slugs: slugs}) do
+      {:ok, %{"data" => %{"projects" => %{"nodes" => nodes}}}} when is_list(nodes) ->
+        {:ok, Map.new(nodes, &{&1["slugId"], %{status: get_in(&1, ["status", "type"]), archived: is_binary(&1["archivedAt"])}})}
+
+      {:ok, response} ->
+        {:error, {:unexpected_response, response}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   defp create_stage_label(label, {:ok, created}, group_id, team_id, prefix) do
     case create_label(%{name: label, parentId: group_id, teamId: team_id}) do
       {:ok, _id} -> {:cont, {:ok, created ++ ["#{prefix}/#{label}"]}}

@@ -60,7 +60,8 @@ defmodule SymphonyElixir.Unblocker do
   """
   @spec ready?(Issue.t()) :: boolean()
   def ready?(%Issue{blocked_by: [_ | _] = blockers} = issue) do
-    case IssueStage.stage_definition(issue) do
+    # A project closing in Linear starts nothing new, unblocking included.
+    case not SymphonyElixir.ProjectRetirement.closing?(issue.project_slug) and IssueStage.stage_definition(issue) do
       %{"kind" => "parked"} -> Enum.all?(blockers, &completed?/1) and resume_target(issue) != nil
       _ -> false
     end

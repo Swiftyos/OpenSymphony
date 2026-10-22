@@ -29,9 +29,11 @@ defmodule SymphonyElixirWeb.ScopePicker do
   @doc "The projects the viewer can pick: the chosen team's, or all of them."
   @spec projects(map(), String.t() | nil) :: [project()]
   def projects(%{factory: %{teams: entries}}, team) do
+    closing = SymphonyElixir.ProjectRetirement.closing()
+
     entries
     |> Enum.filter(&(&1[:kind] == "project" and (is_nil(team) or team in (&1[:teams] || []))))
-    |> Enum.map(&%{slug: &1.slug, name: &1.name || &1.slug})
+    |> Enum.map(&%{slug: &1.slug, name: &1.name || &1.slug, closing: closing[&1.slug]})
   end
 
   def projects(_payload, _team), do: []

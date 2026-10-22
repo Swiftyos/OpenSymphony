@@ -4577,3 +4577,13 @@ a.fx-stat:hover {
   border-color: var(--critical);
   background: rgba(208, 59, 59, 0.06);
 }
+
+.fx-closing {
+  margin: -2px 0 10px;
+  padding: 7px 12px;
+  border: 1px solid rgba(201, 138, 0, 0.45);
+  border-radius: 10px;
+  background: rgba(201, 138, 0, 0.07);
+  color: var(--ink-2);
+  font-size: 0.8rem;
+}

@@ -66,7 +66,9 @@ defmodule SymphonyElixirWeb.Topbar do
           data-dropdown-search
         >
           <option value="all" selected={is_nil(@project)}>All projects</option>
-          <option :for={p <- @projects} value={p.slug} selected={p.slug == @project}>{p.name}</option>
+          <option :for={p <- @projects} value={p.slug} selected={p.slug == @project}>
+            {p.name}{if p[:closing], do: " · closing in Linear (#{p.closing.in_progress} in progress)"}
+          </option>
         </select>
         <span :if={@projects != []} id="project-picker-dd" class="dd" phx-update="ignore"></span>
       </form>

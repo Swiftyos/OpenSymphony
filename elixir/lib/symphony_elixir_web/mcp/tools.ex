@@ -198,8 +198,8 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
       name: "list_projects",
       scope: "read",
       description:
-        "The Linear projects Symphony listens to for issues, and the GitHub repo each one's issues are worked in. `source` is `config` (symphony.yml, change it there) or `mcp` (added with add_project).",
-      properties: %{},
+        "The Linear projects Symphony listens to for issues, and the GitHub repo each one's issues are worked in. `source` is `config` (symphony.yml, change it there) or `mcp` (added with add_project). `teams` are the Linear teams it works for; `closing` is set while it is closing in Linear (no new work starts; it is retired once its work in progress is done).",
+      properties: %{team: %{type: "string", description: "Only this team's projects (a team key such as PAY)."}},
       required: []
     },
     %{
@@ -534,7 +534,7 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
     end
   end
 
-  defp run("list_projects", _args, ctx) do
+  defp run("list_projects", args, ctx) do
     file_slugs = Config.settings!().tracker.projects |> List.wrap() |> MapSet.new(& &1.slug)
     stored = ProjectRoutes.list()
     stored_slugs = MapSet.new(stored, & &1.slug)
@@ -554,7 +554,20 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
         |> Map.merge(%{project: route.slug, source: "mcp", active: live? and not MapSet.member?(file_slugs, route.slug)})
       end)
 
-    {:ok, %{projects: Enum.filter(from_config ++ from_mcp, &Policy.project_visible?(ctx.user, &1.project))}}
+    team = if is_binary(args["team"]), do: String.upcase(String.trim(args["team"]))
+    seen = UsageLedger.projects()
+    linear_teams = LabelSync.project_teams()
+    closing = SymphonyElixir.ProjectRetirement.closing()
+
+    projects =
+      for project <- from_config ++ from_mcp,
+          Policy.project_visible?(ctx.user, project.project),
+          teams = Enum.uniq((get_in(seen, [project.project, :teams]) || []) ++ Map.get(linear_teams, project.project, [])),
+          is_nil(team) or team in teams do
+        Map.merge(project, %{teams: teams, closing: closing[project.project]})
+      end
+
+    {:ok, %{projects: projects}}
   end
 
   defp run("add_project", args, ctx) do

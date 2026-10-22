@@ -34,6 +34,8 @@ config :symphony_elixir,
   mcp_tokens_path: nil,
   project_routes_path: nil,
   teams_path: nil,
+  # Tests run project status checks explicitly (ProjectRetirement.check/0).
+  project_retirement_interval_ms: 0,
   factories_dir: nil,
   # Tests reload the factory store explicitly (Store.reload/0).
   factories_reload_ms: 0,

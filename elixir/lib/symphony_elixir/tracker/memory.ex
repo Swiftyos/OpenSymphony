@@ -121,6 +121,19 @@ defmodule SymphonyElixir.Tracker.Memory do
     {:ok, []}
   end
 
+  # Statuses come from `:memory_tracker_project_statuses` (`%{slug => map}`);
+  # any other slug is a started project. `nil` for a slug leaves it out, as
+  # Linear leaves out a deleted project.
+  @spec project_statuses([String.t()]) :: {:ok, %{String.t() => map()}}
+  def project_statuses(slugs) do
+    configured = Application.get_env(:symphony_elixir, :memory_tracker_project_statuses, %{})
+
+    {:ok,
+     for slug <- slugs, not match?({:ok, nil}, Map.fetch(configured, slug)), into: %{} do
+       {slug, Map.merge(%{status: "started", archived: false}, Map.get(configured, slug) || %{})}
+     end}
+  end
+
   # Teams come from the configured issues' identifiers (`PAY-1` -> `PAY`).
   @spec project_info([String.t()]) :: {:ok, %{String.t() => map()}}
   def project_info(slugs) do

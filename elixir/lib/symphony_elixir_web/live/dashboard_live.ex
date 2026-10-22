@@ -328,6 +328,11 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp quick_links(true, _visible, _team, _project), do: %{linear: nil, repos: []}
   defp quick_links(false, visible, team, project), do: QuickLinks.for_scope(visible, team, project)
 
+  # The picked project, else every listed one, that is closing in Linear.
+  defp closing_projects(choices, picked) do
+    Enum.filter(choices, &(&1[:closing] && (is_nil(picked) or &1.slug == picked)))
+  end
+
   defp can_remove_project?(user, slug) do
     FactoryPresenter.controls_enabled?(Config.settings!()) and Policy.can?(user, {:remove_project, slug})
   end
@@ -450,6 +455,11 @@ defmodule SymphonyElixirWeb.DashboardLive do
                   <a href="/">← All teams</a>
                 </p>
               </div>
+              <p :for={p <- closing_projects(@project_choices, @project_filter)} class="fx-closing" role="status">
+                <strong>{p.name}</strong>
+                closing in Linear ({p.closing.reason}) — {p.closing.in_progress} {if p.closing.in_progress == 1, do: "issue", else: "issues"} still in progress.
+                Nothing new starts; it leaves Symphony once they're done.
+              </p>
               <nav :if={@quick_links.linear || @quick_links.repos != []} class="fx-quick-links" aria-label="Links">
                 <a :if={@quick_links.linear} class="fx-link-chip is-linear" href={@quick_links.linear.url} target="_blank" rel="noopener">
                   {@quick_links.linear.label} ↗

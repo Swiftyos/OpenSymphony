@@ -67,6 +67,8 @@ defmodule SymphonyElixir.Application do
       SymphonyElixir.McpTokens,
       SymphonyElixir.ProjectRoutes,
       SymphonyElixir.Teams,
+      # Retires projects closed in Linear once their work in progress is done.
+      SymphonyElixir.ProjectRetirement,
       SymphonyElixir.GitHubApp.Cache,
       # Creates any missing Linear labels the flows need, once, in the background.
       SymphonyElixir.LabelSync,
