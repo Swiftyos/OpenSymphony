@@ -765,9 +765,9 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
       <div :if={@mcp_setup} class="mcp-welcome" role="dialog" aria-modal="true" aria-labelledby="mcp-welcome-title">
         <div class="mcp-welcome-card">
-          <h2 id="mcp-welcome-title" class="login-title">Connect your agents to {@instance_name || "Symphony"}</h2>
+          <h2 id="mcp-welcome-title" class="login-title">Connect your agents to Agent Factory</h2>
           <p class="login-help">
-            Your coding agent can watch and steer Symphony over MCP with your personal token. It can do what you can do here.
+            Your coding agent can watch and steer Agent Factory over MCP with your personal token. It can do what you can do here.
             Pick your harness and run its step. You can find this again, or rotate the token, under <a href="/account/mcp">MCP setup</a>.
           </p>
           <SymphonyElixirWeb.McpSetup.instructions url={@mcp_setup.url} token={@mcp_setup.token} />

@@ -133,7 +133,7 @@ defmodule SymphonyElixir.McpTest do
     test "initialize, notifications, and protocol errors", %{mia: mia} do
       {secret, _token} = token!(mia)
 
-      assert %{"result" => %{"protocolVersion" => "2025-06-18", "serverInfo" => %{"name" => "symphony"}, "capabilities" => %{"tools" => _}}} =
+      assert %{"result" => %{"protocolVersion" => "2025-06-18", "serverInfo" => %{"name" => "agent-factory"}, "capabilities" => %{"tools" => _}}} =
                json_response(rpc(secret, "initialize", %{"protocolVersion" => "2025-06-18", "capabilities" => %{}}), 200)
 
       assert %{"result" => %{"protocolVersion" => "2025-11-25"}} = json_response(rpc(secret, "initialize", %{"protocolVersion" => "1999-01-01"}), 200)
@@ -269,11 +269,12 @@ defmodule SymphonyElixir.McpTest do
       {:ok, secret, _token} = McpTokens.current(mia.id)
 
       assert page =~ "Connect your agents"
-      assert page =~ ~s(claude mcp add --transport http --scope user symphony http://www.example.com:80/mcp --header &quot;Authorization: Bearer #{secret}&quot;)
+      assert page =~ ~s(claude mcp add --transport http --scope user agent-factory http://www.example.com:80/mcp --header &quot;Authorization: Bearer #{secret}&quot;)
       assert page =~ "mcp-remote"
-      assert page =~ "[mcp_servers.symphony]"
+      assert page =~ "[mcp_servers.agent-factory]"
+      assert page =~ "codex mcp remove symphony"
       assert page =~ "Codex desktop app"
-      assert page =~ "grok mcp add --transport http symphony"
+      assert page =~ "grok mcp add --transport http agent-factory"
       assert page =~ "Rotate token"
 
       rotated_page = iap_conn(mia) |> post("/account/mcp-token/rotate") |> html_response(200)

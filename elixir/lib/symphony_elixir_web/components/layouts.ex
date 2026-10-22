@@ -6,7 +6,7 @@ defmodule SymphonyElixirWeb.Layouts do
   use Phoenix.Component
 
   alias SymphonyElixir.Config
-  alias SymphonyElixirWeb.StaticAssets
+  alias SymphonyElixirWeb.{Brand, StaticAssets}
 
   @spec root(map()) :: Phoenix.LiveView.Rendered.t()
   def root(assigns) do
@@ -23,6 +23,15 @@ defmodule SymphonyElixirWeb.Layouts do
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <meta name="csrf-token" content={@csrf_token} />
         <title><%= @page_title %></title>
+        <%!-- The logo plays once per tab: later page loads show the finished mark.
+             This runs before the body renders, so the logo never flashes its start pose. --%>
+        <script>
+          try {
+            if (sessionStorage.getItem("afl-played")) document.documentElement.classList.add("afl-played");
+            else sessionStorage.setItem("afl-played", "1");
+          } catch (_error) {}
+        </script>
+        <Brand.favicons />
         <script defer src={StaticAssets.url("/vendor/phoenix_html/phoenix_html.js")}></script>
         <script defer src={StaticAssets.url("/vendor/phoenix/phoenix.js")}></script>
         <script defer src={StaticAssets.url("/vendor/phoenix_live_view/phoenix_live_view.js")}></script>
@@ -51,6 +60,7 @@ defmodule SymphonyElixirWeb.Layouts do
         <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
         <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" />
         <link rel="stylesheet" href={StaticAssets.url("/dashboard.css")} />
+        <link rel="stylesheet" href={StaticAssets.url("/agent_factory_logo.css")} />
       </head>
       <body>
         {@inner_content}
