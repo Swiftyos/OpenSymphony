@@ -13,7 +13,6 @@ defmodule SymphonyElixir.FactoryEditorTest do
   alias SymphonyElixirWeb.{FactoryPresenter, Visibility}
 
   @endpoint SymphonyElixirWeb.Endpoint
-  @password "correct horse battery"
 
   defmodule LabelLinear do
     def graphql(query, variables, _opts \\ []) do
@@ -369,11 +368,8 @@ defmodule SymphonyElixir.FactoryEditorTest do
       Application.put_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, config)
       start_supervised!({SymphonyElixirWeb.Endpoint, []})
 
-      ada_params = %{"username" => "ada", "email" => "ada@acme.test", "password" => @password, "setup_code" => Users.setup_code()}
-      {:ok, ada} = Users.register(ada_params, &Auth.check_linear_member/1)
-      mia_params = %{"username" => "mia", "email" => "mia@acme.test", "password" => @password}
-      {:ok, mia} = Users.register(mia_params, &Auth.check_linear_member/1)
-      {:ok, mia} = Users.approve(mia.id, "ada")
+      ada = iap_account!("ada@acme.test")
+      mia = iap_account!("mia@acme.test")
       inventory([])
       SessionHistory.reset()
       on_exit(fn -> SessionHistory.reset() end)
@@ -410,8 +406,7 @@ defmodule SymphonyElixir.FactoryEditorTest do
       json |> String.replace("&quot;", "\"") |> String.replace("&amp;", "&") |> String.replace("&#39;", "'") |> Jason.decode!()
     end
 
-    defp session_for(account),
-      do: build_conn() |> Plug.Test.init_test_session(%{"user_id" => account.id, "session_version" => Users.get(account.id).session_version})
+    defp session_for(account), do: iap_conn(account)
 
     test "members save their own team's flow; conflicts and invalid flows are reported", %{mia: mia} do
       {:ok, view, html} = live(session_for(mia), "/")

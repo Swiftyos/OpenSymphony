@@ -190,7 +190,7 @@ defmodule SymphonyElixir.StateTransferTest do
       on_exit(fn -> Supervisor.restart_child(SymphonyElixir.Supervisor, McpTokens) end)
 
       vm_tokens = start_supervised!({McpTokens, path: Path.join(vm, "mcp_tokens.json")})
-      {:ok, secret, _token} = McpTokens.create("acct-1", "agent", ["read"], 7, ["PAY"])
+      {:ok, secret, _token} = McpTokens.current("acct-1")
       assert {:ok, _record} = McpTokens.verify(secret)
       :ok = stop_supervised(McpTokens)
       refute Process.alive?(vm_tokens)
@@ -201,7 +201,7 @@ defmodule SymphonyElixir.StateTransferTest do
       assert :ok = StateTransfer.run(["import", out, "--state-dir", target], io(self()))
 
       start_supervised!({McpTokens, path: Path.join(target, "mcp_tokens.json")})
-      assert {:ok, %{account_id: "acct-1", name: "agent"}} = McpTokens.verify(secret)
+      assert {:ok, %{account_id: "acct-1"}} = McpTokens.verify(secret)
     end
 
     test "streams through stdout and stdin" do
@@ -408,7 +408,7 @@ defmodule SymphonyElixir.StateTransferTest do
       :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, McpTokens)
       on_exit(fn -> Supervisor.restart_child(SymphonyElixir.Supervisor, McpTokens) end)
       start_supervised!({McpTokens, path: Path.join(vm, "mcp_tokens.json")})
-      {:ok, secret, _token} = McpTokens.create("acct-1", "agent", ["read", "write"], 7, ["PAY"])
+      {:ok, secret, _token} = McpTokens.current("acct-1")
       :ok = stop_supervised(McpTokens)
 
       archive = archive!(vm)

@@ -5,7 +5,8 @@ defmodule SymphonyElixirWeb.Endpoint do
 
   use Phoenix.Endpoint, otp_app: :symphony_elixir
 
-  # Encrypted and signed; holds only the signed-in account id and session version.
+  # Encrypted and signed; holds only the IAP-verified account id, its session
+  # version and when IAP last verified it (`SymphonyElixirWeb.UserAuth`).
   @session_options [
     store: :cookie,
     key: "_symphony_elixir_key",
@@ -43,11 +44,9 @@ defmodule SymphonyElixirWeb.Endpoint do
   plug(SymphonyElixirWeb.Router)
 
   @doc """
-  The request log level: `false` for password reset links, whose token is in
-  the path, so the request line never carries it.
+  The request log level.
   """
   @spec log_level(Plug.Conn.t()) :: Logger.level() | false
-  def log_level(%Plug.Conn{path_info: ["reset" | _]}), do: false
   def log_level(_conn), do: :info
 
   defp proxy_headers(conn, opts), do: SymphonyElixirWeb.RequestGuards.proxy_headers(conn, opts)

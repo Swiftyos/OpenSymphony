@@ -938,10 +938,10 @@ symphony state import <archive.tar.gz|-> [--dry-run] [--overwrite] [--skip-secre
   - `accounts/`: managed account logins that the agent CLIs read from disk. They are plain files, not state documents. Set them up again on the new controller (`symphony accounts login|import`).
   - Logs, workspaces, repo caches and transcripts: not state documents.
 - **The session secret.** `secret_key_base` signs session cookies, so importing it keeps people signed in. It is skipped when the importing environment sets `SYMPHONY_SECRET_KEY_BASE`. Pass `--skip-secret-key-base` when the secret is set as `server.secret_key_base` in the config file instead. Runner tokens also use it, but no runs move.
-- **MCP tokens keep working.** Only each token's SHA-256 is stored, without the secret key base, so the same tokens verify on the new controller.
+- **MCP tokens keep working.** Tokens verify by their SHA-256, so the same tokens work on the new controller. The setup page can show a token again only where `secret_key_base` matches the one it was encrypted with; elsewhere it shows a new token and the old one keeps working.
 - **Safe to repeat.** Every document is checked before anything is written: the manifest, the checksums, that each key is on the list, and that JSON documents parse. A key that already holds the same content is `unchanged`. A key holding different content is a conflict: nothing is written unless `--overwrite` is given. `--dry-run` prints the plan only.
 - **No values in the output.** Summaries print keys and sizes, never contents.
-- **The archive is a secret.** It holds password hashes, token hashes and the session secret, and is written at mode 0600. Delete copies when the move is done.
+- **The archive is a secret.** It holds token hashes, encrypted tokens and the session secret, and is written at mode 0600. Delete copies when the move is done.
 - **Startup.** The import starts only the repo and its migrations, not the orchestrator, so it can run inside the controller's pod.
 
 Moving a VM controller to Kubernetes:
@@ -1355,22 +1355,34 @@ seconds. Nothing changes until you review the preview and click **Apply**, then 
 
 ### Sign-in and permissions
 
-People sign in with a **username and password**. Each account is tied to the Linear user with
-the same email, and that user's teams and admin flag set the permissions. On top of Linear,
-admins can make people **team admins**, and team admins can give people access to their team or
-to a project, without changing anything in Linear.
+Symphony has no sign-in of its own. Put **Google Identity-Aware Proxy (IAP)** in front of the
+dashboard: IAP signs people in with Google and decides who may open the address, and Symphony
+checks the signed header IAP adds to every request (`x-goog-iap-jwt-assertion`). The email in it
+picks the account, which is created on the person's first visit. Each account is tied to the
+Linear user with the same email, and that user's teams and admin flag set the permissions. On top
+of Linear, admins can make people **team admins**, and team admins can give people access to their
+team or to a project, without changing anything in Linear.
 
-![Sign in](../.github/media/dashboard-sign-in.png)
+```yaml
+server:
+  auth: iap
+  # IAP's audience for the dashboard's backend service:
+  # /projects/<project number>/global/backendServices/<backend service id>
+  # List several while moving the load balancer to a new backend service.
+  iap_audiences:
+    - /projects/123456789/global/backendServices/987654321
+```
 
-- **First run**: the first account created becomes the Symphony admin. Creating it needs a
-  one-time **setup code** that Symphony prints to its server log at startup (and again when
-  someone opens `/signup`), so reaching the page alone isn't enough to claim admin.
-- **Everyone else** signs up with the email they use for Linear. Sign-up only works for
-  active members of your Linear workspace, checked with Symphony's `tracker.api_key`. New
-  accounts wait in **Pending accounts** in the Needs-you rail until an admin approves them.
-  Approval is what proves the person really owns that email. Symphony can't verify email
-  ownership itself, so the approval screen shows when and from which address each request
-  came. Only approve people you expect.
+- Symphony verifies the header's ES256 signature against Google's IAP keys, its issuer, expiry and
+  audience. The plain `x-goog-authenticated-user-email` header is never trusted, so a request that
+  reaches Symphony some other way (an internal load balancer, a port-forward) gets nothing.
+- Without `server.iap_audiences` nothing is accepted. To run the dashboard on a laptop with
+  `server.auth: iap`, set `SYMPHONY_DEV_USER=you@example.com`; it is ignored once an audience is
+  set, so never set it in a cluster.
+- **First run**: the first account created becomes the Symphony admin, so open the dashboard
+  yourself first. Linear workspace admins are admins too.
+- **Everyone else** just opens the dashboard. Only active members of your Linear workspace get
+  in, checked with Symphony's `tracker.api_key`; IAP's access list decides who reaches it at all.
 
 | Who                                         | Can                                                                     |
 | ------------------------------------------- | ----------------------------------------------------------------------- |
@@ -1379,33 +1391,32 @@ to a project, without changing anything in Linear.
 | Team member (in Linear, or given the team)  | See and move the team's issues, edit its flow and its projects' flows   |
 | Given a project                             | See and move that project's issues and edit its flow                    |
 | Linear guest                                | View only, unless given a team or project                               |
-| Not in the workspace                        | Can't sign up                                                           |
+| Not in the workspace                        | Nothing                                                                 |
 
 ![Users and access](../.github/media/dashboard-users.png)
 
 - **Users** shows each person's access as chips: their Linear teams, ★ team-admin roles, and teams
   and projects given in Symphony (◆ marks a project). Use **+ Add access** to give more, and ×
   to take it away. Admins see every option; team admins see only their teams and those teams'
-  projects, and don't see account actions (approve, reset, disable).
+  projects, and don't see account actions (disable, enable).
 - Changing someone's access refreshes their open dashboards. Grants are stored with the account in
   `~/.symphony/users.json` and logged with who made them.
 - People only see issues, sessions, and spend from their teams and the projects they were given
   (admins see everything). Host details such as workspace paths and worker hosts are hidden from
   non-admins.
-- Disabling an account, or changing or resetting its password, signs it out everywhere,
-  including dashboard tabs that are already open.
-- Admins can reset passwords from **Users**. That gives a one-time link (valid 24 hours) to
-  send to the person, with no email setup needed.
+- Disabling an account signs it out everywhere, including dashboard tabs that are already open.
+  **Sign out** in the user menu clears IAP's Google sign-in cookie.
 - Moves are made with Symphony's Linear key, and a comment on the issue records who made
   them (for example "Mia Member (@mia) moved this to In Progress · factory/merge").
 - Teams and admin rights are re-read from Linear every 10 minutes. Deactivating someone in
-  Linear blocks their sign-in.
-- Passwords are hashed with PBKDF2-SHA256 and a per-user salt. After 5 failed attempts the
-  account is locked for 15 minutes. Accounts are stored in `~/.symphony/users.json` (mode 0600).
-- The session cookie is encrypted and holds only the account id. It's signed with
-  `server.secret_key_base` (or `SYMPHONY_SECRET_KEY_BASE`). If neither is set, Symphony
-  generates one at `~/.symphony/secret_key_base`, so sessions survive restarts.
-- The JSON API and `/metrics` accept a session or `Authorization: Bearer <server.api_token>`
+  Linear shuts them out.
+- Accounts are stored in `~/.symphony/users.json` (mode 0600). Accounts from before IAP keep their
+  id, username and grants; one still waiting for approval becomes active on its first IAP visit.
+- The session cookie only carries the IAP-verified account to the dashboard's live connection,
+  for an hour after IAP last checked it; after that the page reloads through IAP. It's encrypted
+  and signed with `server.secret_key_base` (or `SYMPHONY_SECRET_KEY_BASE`). If neither is set,
+  Symphony generates one at `~/.symphony/secret_key_base`.
+- The JSON API and `/metrics` accept IAP sign-in or `Authorization: Bearer <server.api_token>`
   (for Prometheus and other scrapers).
 
 #### Running in production
@@ -1413,9 +1424,7 @@ to a project, without changing anything in Linear.
 - **Use TLS.** Symphony serves plain HTTP, so put it behind a TLS-terminating reverse proxy
   (Caddy, nginx, a load balancer) and set `server.trust_proxy: true`. Symphony then takes the
   client address and `https` from `X-Forwarded-For` / `X-Forwarded-Proto`, which makes the
-  session cookie `Secure` and gives each client its own rate-limit bucket. Without
-  `trust_proxy`, everyone behind the proxy shares one sign-in limit (20 attempts per 15
-  minutes), so set it.
+  session cookie `Secure` and gives each client its own MCP rate-limit bucket.
 - Only enable `trust_proxy` when the proxy is the sole way to reach Symphony. Otherwise
   clients could spoof those headers.
 - Set `server.public_url` to the address people open (e.g. `https://symphony.example.com`).
@@ -1430,8 +1439,8 @@ to a project, without changing anything in Linear.
   `127.0.0.1`, or `[::1]`, which blocks DNS-rebinding attacks from web pages.
 
 Sign-in follows where the server listens. On a loopback address (the default `127.0.0.1`)
-there is no sign-in and you are the local operator. On any other address, accounts are
-required. Override this with `server.auth: local | accounts`.
+there is no sign-in and you are the local operator. On any other address, IAP sign-in is
+required. Override this with `server.auth: local | iap` (`accounts` is the old name for `iap`).
 
 ### MCP endpoint for agents
 
@@ -1445,42 +1454,43 @@ server:
     enabled: true
     # host: mcp.symphony.example.com   # a hostname that serves only /mcp (see below)
     # allowed_origins: []               # browser origins allowed to call it (agents send none)
-    # token_max_days: 90                # longest token lifetime; every token expires
 ```
 
-**Tokens.** Each person creates their own on the **MCP tokens** page (`/account/mcp`, also in the
-top-right menu). A token has a name,
-read-only or read-and-write access, what it can reach, and a lifetime. It can reach either specific
-teams and projects, or **everything**, which is for admins only. Members can pick only the teams they
-belong to and the projects they work in. A token limited to teams or projects never has admin
-rights, even if its owner is an admin, so it can't edit the default flow or force agent-only moves.
-An "everything" token stops working if its owner stops being an admin. The token is shown once. Symphony stores only its SHA-256, in
-`~/.symphony/mcp_tokens.json` (0600). A token acts as its owner and can never do more than they
-can. Every request re-checks the account, so disabling someone, or them losing a Linear team or
-admin rights, applies to their tokens at once. Revoke a token from the same page. Without sign-in
-(`local` mode), the local operator gets the same page at `/account/mcp`. Their tokens act as the local
-operator and stop working if Symphony switches to accounts.
+**Tokens.** Each person has one MCP token, and it can do exactly what they can do in the
+dashboard. The **MCP setup** page (`/account/mcp`, also in the top-right menu) shows it, with the
+install command for Claude Code, Claude Desktop, the Codex CLI and desktop app, and Grok filled in
+with it. The first time someone opens the dashboard, the same instructions open in a popup.
+**Rotate token** issues a new token and stops the old one at once; run the install step again
+with the new one.
+
+Symphony stores each token's SHA-256 for lookups and a copy encrypted with `secret_key_base`, so
+the page can always show it, in `~/.symphony/mcp_tokens.json` (0600). Every request re-checks the
+account, so disabling someone, or them losing a Linear team or admin rights, applies to their
+token at once. Tokens from before this design (several per person, with scopes and expiry) keep
+working with their owner's full access until they expire or the owner rotates. Without sign-in
+(`local` mode), the local operator gets the same page; their token stops working if Symphony
+switches to IAP.
 
 Connect Claude Code:
 
 ```bash
-claude mcp add --transport http symphony https://symphony.example.com/mcp \
+claude mcp add --transport http --scope user symphony https://symphony.example.com/mcp \
   --header "Authorization: Bearer symp_..."
 ```
 
 **Tools.** Read: `symphony_status`, `list_flows`, `get_flow`, `list_issues`, `get_issue`,
-`get_transcript`, `list_projects`. Write (needs a read-and-write token): `save_flow` (version-checked like the
+`get_transcript`, `list_projects`. Write: `save_flow` (version-checked like the
 editor: a stale `base_version` returns the current one), `set_stage_control` (paused,
 max_agents, backend, effort, approval), `set_autopilot`, `reset_flow`, `move_issue`,
 `review_issue`, `send_agent_message`, `refresh`. Admins can also change which Linear projects Symphony listens to:
 `add_project` (a Linear project URL or slug id, and a GitHub `owner/name` repo) and
 `remove_project`. Results are trimmed by the same rules as the
 dashboard. Flow and stage changes and moves follow `server.controls`, and the Linear comments and
-flow history name the person and the token ("mia via MCP (ops bot)"). Every tool call is logged
-with the user and token.
+flow history name the person ("mia via MCP"). Every tool call is logged with the user.
 
-**Security.** `/mcp` never accepts the dashboard cookie or `server.api_token`, only MCP tokens.
-That's true in every auth mode, so it's safe to expose. Requests that carry an `Origin` header
+**Security.** `/mcp` never accepts IAP sign-in, the dashboard cookie or `server.api_token`, only
+MCP tokens. That's true in every auth mode, so it's safe to expose without IAP in front (agents
+can't do Google sign-in). Requests that carry an `Origin` header
 (browsers) must come from `server.public_url` or `server.mcp.allowed_origins`, which stops web
 pages and DNS rebinding from driving it. Each client IP gets 600 requests a minute. Tokens are
 256-bit random values, so the limit is about load, not guessing.

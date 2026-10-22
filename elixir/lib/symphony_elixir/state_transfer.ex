@@ -13,14 +13,15 @@ defmodule SymphonyElixir.StateTransfer do
   Only documents that mean the same on another host are moved, from an
   allowlist (never a directory walk):
 
-    * `users.json`, `mcp_tokens.json` (only SHA-256 hashes of the tokens, so
-      tokens keep working on any controller), `project_routes.json`,
+    * `users.json`, `mcp_tokens.json` (SHA-256 hashes, so tokens keep working
+      on any controller, plus copies encrypted with `secret_key_base`, which
+      the setup page shows only where that key matches), `project_routes.json`,
       `factories/<scope>.json`, `usage.json`, `session_history.json` and
       `inbox.json` (queued messages, keyed by issue);
     * `secret_key_base`, unless the target is configured with
       `SYMPHONY_SECRET_KEY_BASE` (or `--skip-secret-key-base` says it is set in
-      the config file). It signs session cookies, so importing it keeps people
-      signed in.
+      the config file). It signs session cookies and encrypts the copies of
+      MCP tokens the setup page shows.
 
   Left out on purpose: `sessions.json` (agent sessions to resume, pointing at
   this host's workspaces and agent session files), `retries.json` (this host's

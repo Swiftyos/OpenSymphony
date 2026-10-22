@@ -20,7 +20,7 @@ defmodule SymphonyElixirWeb.Router do
     plug(:require_user)
   end
 
-  # JSON API and metrics: a browser session or `Authorization: Bearer <Linear API key>`.
+  # JSON API and metrics: IAP sign-in or `Authorization: Bearer <server.api_token>`.
   pipeline :api do
     plug(:fetch_session)
     plug(:fetch_current_user)
@@ -66,31 +66,11 @@ defmodule SymphonyElixirWeb.Router do
   end
 
   scope "/", SymphonyElixirWeb do
-    pipe_through(:browser)
-
-    get("/login", AuthController, :new)
-    post("/login", AuthController, :create)
-    get("/signup", AuthController, :signup)
-    post("/signup", AuthController, :register)
-    post("/logout", AuthController, :delete)
-  end
-
-  scope "/", SymphonyElixirWeb do
-    pipe_through(:browser)
-
-    # The reset token is in the path, which Phoenix's request log would print.
-    get("/reset/:token", AuthController, :reset, log: false)
-    post("/reset/:token", AuthController, :do_reset, log: false)
-  end
-
-  scope "/", SymphonyElixirWeb do
     pipe_through([:browser, :signed_in])
 
-    get("/account", AuthController, :account)
-    get("/account/mcp", AuthController, :mcp_tokens)
-    post("/account/password", AuthController, :update_password)
-    post("/account/mcp-tokens", AuthController, :create_mcp_token)
-    post("/account/mcp-tokens/:id/revoke", AuthController, :revoke_mcp_token)
+    get("/account", AccountController, :account)
+    get("/account/mcp", AccountController, :mcp)
+    post("/account/mcp-token/rotate", AccountController, :rotate_mcp_token)
 
     live_session :signed_in, on_mount: {SymphonyElixirWeb.UserAuth, :require_user} do
       live("/", DashboardLive, :index)

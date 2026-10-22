@@ -8,16 +8,16 @@ defmodule SymphonyElixir.PublicUrlTest do
 
   test "public_url sets the endpoint URL and allows exactly that origin" do
     assert {url, ["https://symphony.example.com"]} =
-             HttpServer.endpoint_origin(%{public_url: "https://symphony.example.com"}, "0.0.0.0", :accounts)
+             HttpServer.endpoint_origin(%{public_url: "https://symphony.example.com"}, "0.0.0.0", :iap)
 
     assert url == [scheme: "https", host: "symphony.example.com", port: 443]
 
     assert {_url, ["http://10.0.0.5:8080"]} =
-             HttpServer.endpoint_origin(%{public_url: "http://10.0.0.5:8080/"}, "0.0.0.0", :accounts)
+             HttpServer.endpoint_origin(%{public_url: "http://10.0.0.5:8080/"}, "0.0.0.0", :iap)
   end
 
   test "without public_url, sign-in keeps the page's own host and local mode keeps localhost" do
-    assert {[host: "0.0.0.0"], :conn} = HttpServer.endpoint_origin(%{public_url: nil}, "0.0.0.0", :accounts)
+    assert {[host: "0.0.0.0"], :conn} = HttpServer.endpoint_origin(%{public_url: nil}, "0.0.0.0", :iap)
     assert {[host: "127.0.0.1"], origins} = HttpServer.endpoint_origin(%{public_url: nil}, nil, :local)
     assert is_list(origins) and origins != []
   end

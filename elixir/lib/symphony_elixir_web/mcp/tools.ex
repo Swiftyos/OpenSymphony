@@ -5,8 +5,8 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
 
   Every call runs as the token's account with that account's permissions
   (`SymphonyElixir.Auth`), trimmed the same way as the dashboard
-  (`SymphonyElixirWeb.Visibility`). Tools that change something also need the
-  token's `write` scope, and flow and stage changes need `server.controls`.
+  (`SymphonyElixirWeb.Visibility`). Flow and stage changes also need
+  `server.controls`.
 
   `call/3` returns `{:ok, result}` for the tool's structured result or
   `{:error, message}` for a tool-level failure (bad input, not allowed), which
@@ -32,7 +32,7 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
   alias SymphonyElixirWeb.{Endpoint, FactoryPresenter, ObservabilityPubSub, Presenter, Visibility}
   alias SymphonyElixirWeb.Mcp.Manual
 
-  @type context :: %{user: Auth.User.t(), scopes: [String.t()], actor: String.t(), via: String.t()}
+  @type context :: %{user: Auth.User.t(), actor: String.t(), via: String.t()}
 
   @max_transcript 200
   @control_fields ["paused", "max_agents", "backend", "effort", "approval"]
@@ -42,7 +42,7 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
       name: "get_manual",
       scope: "read",
       description:
-        "Symphony's manual: what Symphony is, its concepts, how to set up a new project, how Symphony picks the repo an issue is worked in, working across repos (blocking issues, unblocking), an issue's life, what agents are told and where that is configured, where people step in, token scopes, every tool here, recipes and troubleshooting. Call it first when asked what this is or how it works.",
+        "Symphony's manual: what Symphony is, its concepts, how to set up a new project, how Symphony picks the repo an issue is worked in, working across repos (blocking issues, unblocking), an issue's life, what agents are told and where that is configured, where people step in, tokens, every tool here, recipes and troubleshooting. Call it first when asked what this is or how it works.",
       properties: %{
         section: %{
           type: "string",
@@ -235,13 +235,12 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
   @tool_names MapSet.new(@tools, & &1.name)
 
   @doc """
-  Tool descriptors for `tools/list`, limited to what the token's scopes allow.
+  Tool descriptors for `tools/list`. Every token gets all of them; its
+  account's permissions decide what each call may do.
   """
-  @spec list([String.t()]) :: [map()]
-  def list(scopes) do
-    @tools
-    |> Enum.filter(&(&1.scope in scopes))
-    |> Enum.map(fn tool ->
+  @spec list() :: [map()]
+  def list do
+    Enum.map(@tools, fn tool ->
       %{
         name: tool.name,
         description: tool.description,
@@ -262,12 +261,7 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
   def call(name, args, ctx) when is_map(args) do
     tool = Enum.find(@tools, &(&1.name == name))
 
-    result =
-      cond do
-        is_nil(tool) -> {:error, "Unknown tool #{name}."}
-        tool.scope not in ctx.scopes -> {:error, "This token is read-only. Create one with write access to use #{name}."}
-        true -> run(name, args, ctx)
-      end
+    result = if is_nil(tool), do: {:error, "Unknown tool #{name}."}, else: run(name, args, ctx)
 
     Logger.info(
       "MCP tool call tool=#{name} user=#{ctx.user.username || ctx.user.id} via=#{inspect(ctx.via)} " <>

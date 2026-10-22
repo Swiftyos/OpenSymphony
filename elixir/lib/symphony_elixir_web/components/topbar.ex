@@ -80,20 +80,12 @@ defmodule SymphonyElixirWeb.Topbar do
               <strong>@{@current_user.username}</strong>
               <span>{role(@current_user)}</span>
             </p>
-            <a href="/account">Account &amp; password</a>
-            <a :if={mcp_enabled?()} href="/account/mcp">MCP tokens</a>
+            <a :if={mcp_enabled?()} href="/account/mcp">MCP setup</a>
             <a href="/api/v1/state">State API</a>
             <a href="/metrics">Prometheus metrics</a>
             <a :if={Auth.can_manage_access?(@current_user)} href="/admin/users">Users</a>
-            <%!-- POST-only so other sites can't sign people out; the token comes from the page's meta tag. --%>
-            <form
-              method="post"
-              action="/logout"
-              onsubmit="this._csrf_token.value = document.querySelector('meta[name=csrf-token]').content"
-            >
-              <input type="hidden" name="_csrf_token" value="" />
-              <button type="submit" class="user-menu-signout">Sign out</button>
-            </form>
+            <%!-- Sign-in is Google IAP's; this clears its login cookie. --%>
+            <a class="user-menu-signout" href="/?gcp-iap-mode=CLEAR_LOGIN_COOKIE">Sign out of Google sign-in</a>
           </div>
         </details>
       </div>

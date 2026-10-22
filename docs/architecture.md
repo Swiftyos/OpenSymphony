@@ -333,9 +333,9 @@ under Ecto's migration lock.
 | `retries.json` | `RetryStore` | Retry queue: attempt, due time, metadata. Re-armed on start. |
 | `run_registry/<base64url issue id>.json` | `RunRegistry` | One document per issue (see below). Legacy `runs.json` is migrated once. |
 | `inbox.json` | `AgentInbox` | Messages to agents. |
-| `users.json` | `Users` | Accounts, password hashes, grants. |
+| `users.json` | `Users` | Accounts (one per IAP email), grants, MCP-setup seen. |
 | `usage.json` | `UsageLedger` | Token usage and cost. |
-| `mcp_tokens.json` | `McpTokens` | MCP token hashes, scopes, expiry. |
+| `mcp_tokens.json` | `McpTokens` | MCP token hashes and encrypted copies, one per account. |
 | `project_routes.json` | `ProjectRoutes` | Projects added at runtime. |
 | `factories/*.json` | `Factory.Store` | Flows per team, project and default. |
 | `secret_key_base` | `HttpServer` | Session and run-token secret, created once. |
@@ -485,27 +485,27 @@ account token, re-read on every request.
 ### Dashboard, API and MCP
 
 - **Auth mode** (`Auth`): `server.auth` is `local` (no sign-in, admin, localhost requests only)
-  or `accounts`; the default is `local` when the server binds to loopback.
-- **Accounts:** username or email with a password (PBKDF2-SHA256, 600k iterations, lockout after
-  five failures). The first account uses a setup code printed in the log. Later sign-ups must
-  match an active Linear member's email and wait for admin approval. Roles and teams come from
-  Linear (admin flag, team membership, guests read-only), plus Symphony grants. `Visibility`
-  limits non-admins to their teams' and projects' issues and hides host fields.
-- **Sessions:** an encrypted, signed cookie with a session version that a password change bumps;
-  CSRF on browser routes; per-IP rate limits on login, signup and reset.
-- **API** (`/api/v1/*`, `/metrics`): a session or `Authorization: Bearer <server.api_token>`.
-- **MCP** (`POST /mcp`, `McpAuth`): off unless `server.mcp.enabled`. Every request needs a bearer
-  token (`symp_...`, only its SHA-256 stored) with scope `read` or `write`, resources (`*`, team
-  keys or `project:<slug>`) and an expiry of at most `server.mcp.token_max_days` (default 90).
-  The token can only narrow its owner's access. Origins are checked, cookies are ignored, and
+  or `iap` (`accounts` is the old name); the default is `local` when the server binds to loopback.
+- **Accounts:** Google IAP signs people in. `UserAuth` verifies the signed
+  `x-goog-iap-jwt-assertion` header (`Iap`: ES256 against Google's keys, issuer, expiry, one of
+  `server.iap_audiences`) on every request; the email picks the account, created on first visit
+  (the first one is the bootstrap admin). Only active Linear members get in. Roles and teams come
+  from Linear (admin flag, team membership, guests read-only), plus Symphony grants.
+  `Visibility` limits non-admins to their teams' and projects' issues and hides host fields.
+- **Sessions:** an encrypted, signed cookie that carries the IAP-verified account to LiveView
+  sockets for an hour, with a session version that disabling bumps; CSRF on browser routes.
+- **API** (`/api/v1/*`, `/metrics`): IAP sign-in or `Authorization: Bearer <server.api_token>`.
+- **MCP** (`POST /mcp`, `McpAuth`): off unless `server.mcp.enabled`, and outside IAP. Every
+  request needs the account's bearer token (`symp_...`, one per account, SHA-256 for lookups plus
+  a copy encrypted with `secret_key_base` so the setup page can show it). The token has its
+  owner's access; rotating replaces it. Origins are checked, cookies are ignored, and
   `server.mcp.host` can be restricted to `/mcp` only.
 
 ### Redaction
 
 `Redaction` is a primary logger filter on every handler. It replaces GitHub tokens
 (`gh?_...`, `github_pat_...`), JWTs, PEM private keys and `Basic`/`Bearer` header values with
-`[REDACTED]`, including in metadata. Transcript entries are redacted the same way. Request
-logging is off for password reset links.
+`[REDACTED]`, including in metadata. Transcript entries are redacted the same way.
 
 ## Observability
 

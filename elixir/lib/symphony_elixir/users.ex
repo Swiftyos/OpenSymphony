@@ -1,10 +1,12 @@
 defmodule SymphonyElixir.Users do
   @moduledoc """
-  Dashboard user accounts: username + password, tied to a Linear user by email.
+  Dashboard user accounts, one per email Google IAP verified, tied to the
+  Linear user with that email.
 
-  Accounts hold only what Linear can't: a username and a password hash, plus
-  access Symphony grants on top of Linear. Linear team membership and admin
-  rights are read from Linear (see `SymphonyElixir.Auth`); on top of that:
+  Accounts hold only what Linear can't: access Symphony grants on top of
+  Linear, and whether the person has seen the MCP setup. Linear team membership
+  and admin rights are read from Linear (see `SymphonyElixir.Auth`); on top of
+  that:
 
     * `team_admin` - teams the person administers in Symphony (set by admins)
     * `access` - extra teams (`PAY`) or projects (`project:<slug>`) the person
@@ -12,13 +14,14 @@ defmodule SymphonyElixir.Users do
 
   Lifecycle:
 
-    * the first account on a fresh install is active and is the bootstrap admin
-    * later sign-ups must use the email of an active member of the Linear
-      workspace, and wait as `pending` until an admin approves them
-    * admins can reject (delete) pending accounts or disable active ones
-
-  Passwords are hashed with PBKDF2-HMAC-SHA256 (OTP `:crypto`), per-user salt.
-  Five failed sign-ins lock an account for 15 minutes.
+    * an account is created, active, the first time its email arrives through
+      IAP (`ensure/1`); the first account on a fresh install is the bootstrap
+      admin
+    * admins can disable accounts, which signs them out everywhere, and enable
+      them again
+    * accounts from the password era keep their id, username and grants; a
+      `pending` one becomes active on its first IAP visit, since IAP now proves
+      the email
 
   Stored as JSON (mode 0600) in `~/.symphony/users.json`.
   """
@@ -27,12 +30,6 @@ defmodule SymphonyElixir.Users do
   require Logger
 
   @table :symphony_users
-  @hash_scheme "pbkdf2-sha256"
-  @default_iterations 600_000
-  @min_password_length 12
-  @max_failures 5
-  @lockout_ms 15 * 60_000
-  @reset_ttl_ms 24 * 3_600_000
 
   @type user :: %{
           id: String.t(),
@@ -45,7 +42,8 @@ defmodule SymphonyElixir.Users do
           last_sign_in_at: String.t() | nil,
           session_version: pos_integer(),
           team_admin: [String.t()],
-          access: [String.t()]
+          access: [String.t()],
+          mcp_welcomed_at: String.t() | nil
         }
 
   @team_pattern ~r/^[A-Z0-9][A-Z0-9_-]{0,15}$/
@@ -57,25 +55,22 @@ defmodule SymphonyElixir.Users do
   end
 
   @doc """
-  Creates an account. `linear_check` decides whether the email belongs to an
-  active Linear workspace member (`:ok`, `{:error, reason}`, or `:skip` when no
-  Linear tracker is configured).
+  The account for an email IAP verified, created (active) on first visit. A
+  `pending` account from the password era is activated: IAP proved the email.
+  Disabled accounts are returned as they are; `SymphonyElixir.Auth` refuses them.
   """
-  @spec register(map(), (String.t() -> :ok | :skip | {:error, atom()})) :: {:ok, user()} | {:error, atom()}
-  def register(params, linear_check) when is_map(params) and is_function(linear_check, 1) do
-    username = params |> Map.get("username", "") |> to_string() |> String.trim() |> String.downcase()
-    email = params |> Map.get("email", "") |> to_string() |> String.trim() |> String.downcase()
-    password = params |> Map.get("password", "") |> to_string()
-    confirmation = params |> Map.get("password_confirmation", password) |> to_string()
+  @spec ensure(String.t()) :: {:ok, user()} | {:error, atom()}
+  def ensure(email) when is_binary(email) do
+    email = email |> String.trim() |> String.downcase()
 
-    with :ok <- validate_username(username),
-         :ok <- validate_email(email),
-         :ok <- validate_password(password, confirmation),
-         :ok <- linear_check.(email) |> skip_ok() do
-      request = %{from: Map.get(params, "requested_from"), user_agent: Map.get(params, "requested_user_agent")}
-      GenServer.call(__MODULE__, {:register, username, email, hash_password(password), Map.get(params, "setup_code"), request})
-    end
+    with :ok <- validate_email(email), do: GenServer.call(__MODULE__, {:ensure, email})
   end
+
+  @doc """
+  Records that the person has seen the MCP setup, so it doesn't open again.
+  """
+  @spec mark_mcp_welcomed(String.t()) :: {:ok, user()} | {:error, atom()}
+  def mark_mcp_welcomed(id) when is_binary(id), do: GenServer.call(__MODULE__, {:mark_mcp_welcomed, id})
 
   @doc """
   Makes the account an admin of a team (`true`) or removes that (`false`).
@@ -107,28 +102,6 @@ defmodule SymphonyElixir.Users do
 
   defp scope_key(_scope, _kind), do: {:error, :invalid_scope}
 
-  @spec authenticate(String.t(), String.t()) :: {:ok, user()} | {:error, atom()}
-  def authenticate(login, password) when is_binary(login) and is_binary(password) do
-    login = login |> String.trim() |> String.downcase()
-
-    case find_record(login) do
-      nil ->
-        # Burn the same time as a real check so usernames can't be probed by timing.
-        _ = verify_password(password, dummy_hash())
-        {:error, :invalid_credentials}
-
-      record ->
-        # Hash outside the GenServer so concurrent sign-ins don't queue on PBKDF2.
-        # The attempt is counted before hashing, so parallel guesses can't all
-        # slip past the lock check.
-        with :ok <- GenServer.call(__MODULE__, {:begin_attempt, record.id}) do
-          GenServer.call(__MODULE__, {:record_attempt, record.id, verify_password(password, record.password_hash)})
-        end
-    end
-  end
-
-  def authenticate(_login, _password), do: {:error, :invalid_credentials}
-
   @spec get(String.t() | nil) :: user() | nil
   def get(id) when is_binary(id) do
     case lookup(id) do
@@ -152,80 +125,11 @@ defmodule SymphonyElixir.Users do
     end
   end
 
-  @spec approve(String.t(), String.t()) :: {:ok, user()} | {:error, atom()}
-  def approve(id, approved_by), do: GenServer.call(__MODULE__, {:set_status, id, "active", approved_by})
-
   @spec disable(String.t(), String.t()) :: {:ok, user()} | {:error, atom()}
   def disable(id, by), do: GenServer.call(__MODULE__, {:set_status, id, "disabled", by})
 
-  @spec reject(String.t()) :: :ok | {:error, atom()}
-  def reject(id), do: GenServer.call(__MODULE__, {:reject, id})
-
   @spec enable(String.t(), String.t()) :: {:ok, user()} | {:error, atom()}
   def enable(id, by), do: GenServer.call(__MODULE__, {:set_status, id, "active", by})
-
-  @doc """
-  Changes a password after checking the current one. Signs the account out of
-  every other session.
-  """
-  @spec change_password(String.t(), String.t(), String.t(), String.t()) :: {:ok, user()} | {:error, atom()}
-  def change_password(id, current, new_password, confirmation) do
-    with %{} = record <- lookup(id) || {:error, :not_found},
-         true <- verify_password(current, record.password_hash) || {:error, :invalid_credentials},
-         :ok <- validate_password(new_password, confirmation) do
-      GenServer.call(__MODULE__, {:set_password, id, hash_password(new_password)})
-    end
-  end
-
-  @doc """
-  Creates a one-time password reset link token (valid #{div(24 * 3_600_000, 3_600_000)} hours) for an
-  admin to hand to the person. Only a hash of the token is stored.
-  """
-  @spec create_reset_token(String.t()) :: {:ok, String.t()} | {:error, atom()}
-  def create_reset_token(id) do
-    token = Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
-
-    case GenServer.call(__MODULE__, {:set_reset, id, token_hash(token)}) do
-      :ok -> {:ok, token}
-      error -> error
-    end
-  end
-
-  @spec reset_account_for_token(String.t()) :: user() | nil
-  def reset_account_for_token(token) when is_binary(token) do
-    hash = token_hash(token)
-    now_ms = System.system_time(:millisecond)
-
-    if ready?() do
-      Enum.find_value(all_records(), &reset_record_match(&1, hash, now_ms))
-    end
-  end
-
-  def reset_account_for_token(_token), do: nil
-
-  defp reset_record_match(record, hash, now_ms) do
-    reset = record[:reset]
-
-    if is_map(reset) and :crypto.hash_equals(Base.decode64!(reset.hash), hash) and reset.expires_ms > now_ms,
-      do: public(record)
-  end
-
-  @spec reset_password(String.t(), String.t(), String.t()) :: {:ok, user()} | {:error, atom()}
-  def reset_password(token, new_password, confirmation) do
-    with %{id: id} <- reset_account_for_token(token) || {:error, :invalid_reset_token},
-         :ok <- validate_password(new_password, confirmation) do
-      GenServer.call(__MODULE__, {:set_password, id, hash_password(new_password)})
-    end
-  end
-
-  @doc """
-  The one-time code required to create the first (admin) account. Generated and
-  written to the server log on first use; `nil` once any account exists. Proves
-  the person setting Symphony up can read the server's logs, not just reach the
-  page.
-  """
-  @spec setup_code() :: String.t() | nil
-  def setup_code, do: GenServer.call(__MODULE__, :setup_code)
 
   @spec any?() :: boolean()
   def any?, do: ready?() and :ets.info(@table, :size) > 0
@@ -244,108 +148,64 @@ defmodule SymphonyElixir.Users do
     path = Keyword.get(opts, :path, default_path())
     :ets.new(@table, [:named_table, :protected, :set, read_concurrency: true])
     load(path)
-    {:ok, %{path: path, failures: %{}, setup_code: nil}}
+    {:ok, %{path: path}}
   end
 
   @impl true
-  def handle_call({:register, username, email, password_hash, setup_code, request}, _from, state) do
+  def handle_call({:ensure, email}, _from, state) do
     records = all_records()
 
-    cond do
-      records == [] and not setup_code_valid?(state, setup_code) ->
-        {:reply, {:error, :invalid_setup_code}, state}
+    case Enum.find(records, &(&1.email == email)) do
+      %{status: "pending"} = record ->
+        record = %{record | status: "active", approved_by: "iap", last_sign_in_at: now()}
+        :ets.insert(@table, {record.id, record})
+        persist(state.path)
+        Logger.info("Account activated through IAP user=#{record.username}")
+        {:reply, {:ok, public(record)}, state}
 
-      Enum.any?(records, &(&1.username == username)) ->
-        {:reply, {:error, :username_taken}, state}
+      %{status: "active"} = record ->
+        # Every request passes through here; the visit time is saved at most hourly.
+        record = if stale_visit?(record.last_sign_in_at), do: save_visit(record, state.path), else: record
+        {:reply, {:ok, public(record)}, state}
 
-      Enum.any?(records, &(&1.email == email)) ->
-        {:reply, {:error, :email_taken}, state}
+      %{} = record ->
+        {:reply, {:ok, public(record)}, state}
 
-      true ->
+      nil ->
         first? = records == []
 
         record = %{
           id: "usr_" <> Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false),
-          username: username,
+          username: unique_username(email, records),
           email: email,
-          password_hash: password_hash,
-          status: if(first?, do: "active", else: "pending"),
+          status: "active",
           bootstrap_admin: first?,
           created_at: now(),
-          approved_by: if(first?, do: "bootstrap", else: nil),
-          last_sign_in_at: nil,
+          approved_by: if(first?, do: "bootstrap", else: "iap"),
+          last_sign_in_at: now(),
           session_version: 1,
-          reset: nil,
           team_admin: [],
           access: [],
-          # Shown to the approving admin: Symphony can't verify email ownership itself.
-          requested_from: request.from,
-          requested_user_agent: request.user_agent
+          mcp_welcomed_at: nil
         }
 
         :ets.insert(@table, {record.id, record})
         persist(state.path)
-        {:reply, {:ok, public(record)}, %{state | setup_code: nil}}
+        Logger.info("Account created through IAP user=#{record.username} bootstrap_admin=#{first?}")
+        {:reply, {:ok, public(record)}, state}
     end
   end
 
-  def handle_call(:setup_code, _from, state) do
-    cond do
-      all_records() != [] ->
-        {:reply, nil, state}
+  def handle_call({:mark_mcp_welcomed, id}, _from, state) do
+    case lookup(id) do
+      nil ->
+        {:reply, {:error, :not_found}, state}
 
-      is_binary(state.setup_code) ->
-        {:reply, state.setup_code, state}
-
-      true ->
-        code = 4 |> :crypto.strong_rand_bytes() |> Base.encode16() |> String.replace(~r/(.{4})(.{4})/, "\\1-\\2")
-
-        Logger.warning("""
-        Symphony has no accounts yet. To create the first (admin) account, open /signup and enter this setup code:
-
-            #{code}
-
-        The code is only shown here, in the server log, and is replaced on restart.
-        """)
-
-        {:reply, code, %{state | setup_code: code}}
-    end
-  end
-
-  def handle_call({:begin_attempt, id}, _from, state) do
-    now_ms = System.monotonic_time(:millisecond)
-
-    case Map.get(state.failures, id) do
-      {count, since} when count >= @max_failures and now_ms - since < @lockout_ms ->
-        {:reply, {:error, :locked}, state}
-
-      {count, since} when now_ms - since < @lockout_ms ->
-        {:reply, :ok, %{state | failures: Map.put(state.failures, id, {count + 1, since})}}
-
-      _expired_or_none ->
-        {:reply, :ok, %{state | failures: Map.put(state.failures, id, {1, now_ms})}}
-    end
-  end
-
-  def handle_call({:record_attempt, id, password_ok?}, _from, state) do
-    record = lookup(id)
-
-    cond do
-      # The failure was already counted in :begin_attempt.
-      is_nil(record) or not password_ok? ->
-        {:reply, {:error, :invalid_credentials}, state}
-
-      record.status == "pending" ->
-        {:reply, {:error, :pending}, state}
-
-      record.status != "active" ->
-        {:reply, {:error, :disabled}, state}
-
-      true ->
-        record = %{record | last_sign_in_at: now()}
+      record ->
+        record = %{record | mcp_welcomed_at: record.mcp_welcomed_at || now()}
         :ets.insert(@table, {id, record})
         persist(state.path)
-        {:reply, {:ok, public(record)}, %{state | failures: Map.delete(state.failures, id)}}
+        {:reply, {:ok, public(record)}, state}
     end
   end
 
@@ -392,105 +252,49 @@ defmodule SymphonyElixir.Users do
     end
   end
 
-  def handle_call({:reject, id}, _from, state) do
-    case lookup(id) do
-      %{status: "pending"} ->
-        :ets.delete(@table, id)
-        persist(state.path)
-        {:reply, :ok, state}
-
-      nil ->
-        {:reply, {:error, :not_found}, state}
-
-      _active ->
-        {:reply, {:error, :not_pending}, state}
-    end
-  end
-
-  def handle_call({:set_password, id, password_hash}, _from, state) do
-    case lookup(id) do
-      nil ->
-        {:reply, {:error, :not_found}, state}
-
-      record ->
-        record = %{record | password_hash: password_hash, session_version: record.session_version + 1, reset: nil}
-        :ets.insert(@table, {id, record})
-        persist(state.path)
-        {:reply, {:ok, public(record)}, %{state | failures: Map.delete(state.failures, id)}}
-    end
-  end
-
-  def handle_call({:set_reset, id, hash}, _from, state) do
-    case lookup(id) do
-      nil ->
-        {:reply, {:error, :not_found}, state}
-
-      record ->
-        reset = %{hash: Base.encode64(hash), expires_ms: System.system_time(:millisecond) + @reset_ttl_ms}
-        :ets.insert(@table, {id, %{record | reset: reset}})
-        persist(state.path)
-        {:reply, :ok, state}
-    end
-  end
-
   def handle_call(:reset, _from, state) do
     :ets.delete_all_objects(@table)
-    {:reply, :ok, %{state | failures: %{}}}
+    {:reply, :ok, state}
+  end
+
+  defp stale_visit?(at) do
+    case DateTime.from_iso8601(at || "") do
+      {:ok, at, _offset} -> DateTime.diff(DateTime.utc_now(), at) >= 3_600
+      _ -> true
+    end
+  end
+
+  defp save_visit(record, path) do
+    record = %{record | last_sign_in_at: now()}
+    :ets.insert(@table, {record.id, record})
+    persist(path)
+    record
   end
 
   # ------------------------------------------------------------------ validation
-
-  defp validate_username(username) do
-    if Regex.match?(~r/^[a-z0-9][a-z0-9._-]{2,31}$/, username), do: :ok, else: {:error, :invalid_username}
-  end
 
   defp validate_email(email) do
     if Regex.match?(~r/^[^@\s]+@[^@\s]+\.[^@\s]+$/, email), do: :ok, else: {:error, :invalid_email}
   end
 
-  defp validate_password(password, confirmation) do
-    cond do
-      String.length(password) < @min_password_length -> {:error, :password_too_short}
-      password != confirmation -> {:error, :password_mismatch}
-      true -> :ok
-    end
+  # The email's local part, made to fit the username rules (3-32 of a-z 0-9 . _ -),
+  # with a number added when someone already has it.
+  defp unique_username(email, records) do
+    base =
+      email
+      |> String.split("@")
+      |> hd()
+      |> String.replace(~r/[^a-z0-9._-]/, "")
+      |> String.trim_leading(".")
+      |> String.slice(0, 28)
+      |> then(&if(String.length(&1) < 3, do: "user" <> &1, else: &1))
+
+    taken = MapSet.new(records, & &1.username)
+
+    Stream.iterate(1, &(&1 + 1))
+    |> Stream.map(&if(&1 == 1, do: base, else: base <> Integer.to_string(&1)))
+    |> Enum.find(&(not MapSet.member?(taken, &1)))
   end
-
-  defp setup_code_valid?(%{setup_code: expected}, given) when is_binary(expected) and is_binary(given) do
-    normalized = given |> String.trim() |> String.upcase()
-    byte_size(normalized) == byte_size(expected) and :crypto.hash_equals(normalized, expected)
-  end
-
-  defp setup_code_valid?(_state, _given), do: false
-
-  defp skip_ok(:skip), do: :ok
-  defp skip_ok(other), do: other
-
-  # ------------------------------------------------------------------ passwords
-
-  defp hash_password(password) do
-    iterations = iterations()
-    salt = :crypto.strong_rand_bytes(16)
-    hash = :crypto.pbkdf2_hmac(:sha256, password, salt, iterations, 32)
-    Enum.join([@hash_scheme, iterations, Base.encode64(salt), Base.encode64(hash)], "$")
-  end
-
-  defp verify_password(password, encoded) do
-    with [@hash_scheme, iterations, salt, hash] <- String.split(encoded, "$"),
-         {iterations, ""} <- Integer.parse(iterations),
-         {:ok, salt} <- Base.decode64(salt),
-         {:ok, expected} <- Base.decode64(hash) do
-      :crypto.hash_equals(:crypto.pbkdf2_hmac(:sha256, password, salt, iterations, byte_size(expected)), expected)
-    else
-      _ -> false
-    end
-  end
-
-  defp dummy_hash do
-    Enum.join([@hash_scheme, iterations(), Base.encode64(<<0::128>>), Base.encode64(<<0::256>>)], "$")
-  end
-
-  defp iterations, do: Application.get_env(:symphony_elixir, :password_iterations, @default_iterations)
 
   # ------------------------------------------------------------------ storage
 
@@ -507,13 +311,7 @@ defmodule SymphonyElixir.Users do
 
   defp all_records, do: @table |> :ets.tab2list() |> Enum.map(&elem(&1, 1))
 
-  defp find_record(login) do
-    if ready?(), do: Enum.find(all_records(), &(&1.username == login or &1.email == login))
-  end
-
-  defp public(record), do: Map.drop(record, [:password_hash, :reset])
-
-  defp token_hash(token), do: :crypto.hash(:sha256, token)
+  defp public(record), do: record
 
   defp now, do: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
 
@@ -551,30 +349,23 @@ defmodule SymphonyElixir.Users do
     record = %{
       id: id,
       username: raw["username"],
-      email: raw["email"],
-      password_hash: raw["password_hash"],
+      email: raw["email"] && String.downcase(raw["email"]),
+      # Password-era fields (password_hash, reset, requested_from) are dropped on the next save.
       status: raw["status"] || "pending",
       bootstrap_admin: raw["bootstrap_admin"] == true,
       created_at: raw["created_at"],
       approved_by: raw["approved_by"],
       last_sign_in_at: raw["last_sign_in_at"],
       session_version: raw["session_version"] || 1,
-      reset: load_reset(raw["reset"]),
       team_admin: load_scopes(raw["team_admin"], :team),
       access: load_scopes(raw["access"], :any),
-      requested_from: raw["requested_from"],
-      requested_user_agent: raw["requested_user_agent"]
+      mcp_welcomed_at: raw["mcp_welcomed_at"]
     }
 
     :ets.insert(@table, {id, record})
   end
 
   defp load_record(_raw), do: :ok
-
-  defp load_reset(%{"hash" => hash, "expires_ms" => expires_ms}) when is_binary(hash) and is_integer(expires_ms),
-    do: %{hash: hash, expires_ms: expires_ms}
-
-  defp load_reset(_reset), do: nil
 
   defp load_scopes(scopes, kind) when is_list(scopes) do
     for scope <- scopes, {:ok, key} <- [scope_key(scope, kind)], uniq: true, do: key

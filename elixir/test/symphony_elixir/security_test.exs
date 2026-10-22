@@ -8,7 +8,6 @@ defmodule SymphonyElixir.SecurityTest do
   alias SymphonyElixirWeb.{RateLimit, RequestGuards, Visibility}
 
   @endpoint SymphonyElixirWeb.Endpoint
-  @password "correct horse battery"
 
   defmodule FakeLinear do
     def fetch_issue_states_by_ids(ids) do
@@ -151,16 +150,14 @@ defmodule SymphonyElixir.SecurityTest do
     start_supervised!({SymphonyElixirWeb.Endpoint, []})
   end
 
+  # Usernames come from the email, so `username` documents the expected one.
   defp register!(username, email) do
-    params = %{"username" => username, "email" => email, "password" => @password, "setup_code" => Users.setup_code()}
-    {:ok, account} = Users.register(params, &Auth.check_linear_member/1)
-    {:ok, account} = if account.status == "pending", do: Users.approve(account.id, "test"), else: {:ok, account}
+    account = iap_account!(email)
+    ^username = account.username
     account
   end
 
-  defp session_for(account) do
-    build_conn() |> Plug.Test.init_test_session(%{"user_id" => account.id, "session_version" => Users.get(account.id).session_version})
-  end
+  defp session_for(account), do: iap_conn(account)
 
   describe "with accounts" do
     setup do
@@ -207,8 +204,8 @@ defmodule SymphonyElixir.SecurityTest do
       render_hook(mia_view, "factory_move", %{"id" => "id-PAY-1", "to" => "merge"})
       assert_reply(mia_view, %{ok: false, error: "Your session ended" <> _})
 
-      # And the old session can't mount a new page.
-      assert {:error, {:redirect, %{to: "/login"}}} = live(stale_session, "/")
+      # And even through IAP, a new page is refused.
+      assert html_response(get(stale_session, "/"), 403) =~ "disabled"
     end
 
     test "attribution comments escape names so they can't add links", %{mia: mia} do

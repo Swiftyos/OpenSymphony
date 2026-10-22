@@ -1812,11 +1812,6 @@ pre {
   width: min(640px, 100%);
 }
 
-.login-mark {
-  width: 40px;
-  height: 40px;
-}
-
 .login-title {
   margin: 6px 0 0;
   font-size: 1.35rem;
@@ -1848,38 +1843,6 @@ pre {
   font-weight: 600;
 }
 
-.login-input {
-  min-width: 0;
-  width: 100%;
-  box-sizing: border-box;
-  padding: 10px 12px;
-  border: 1px solid var(--line-strong);
-  border-radius: 10px;
-  background: var(--well);
-  color: var(--ink);
-  font: inherit;
-  font-family: var(--mono);
-}
-
-.login-input:focus {
-  outline: none;
-  border-color: var(--ink-2);
-}
-
-.login-error {
-  margin: 0;
-  padding: 8px 10px;
-  border: 1px solid rgba(208, 59, 59, 0.55);
-  border-radius: 9px;
-  color: var(--critical-ink);
-  font-size: 0.82rem;
-}
-
-.login-error::before {
-  content: "! ";
-  font-weight: 700;
-}
-
 .login-button {
   padding: 10px 14px;
   border: 0;
@@ -1901,17 +1864,6 @@ pre {
 
 .login-form .login-help {
   margin-top: -2px;
-}
-
-.account-request {
-  grid-template-columns: auto minmax(0, 1fr);
-  row-gap: 6px;
-}
-
-.account-request-actions {
-  display: flex;
-  grid-column: 1 / -1;
-  gap: 6px;
 }
 
 a.brand {
@@ -2081,53 +2033,6 @@ a.brand:hover {
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 6px;
-}
-
-.reset-link {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
-  padding: 12px 14px;
-  border: 1px solid var(--ink-2);
-  border-radius: 12px;
-  background: var(--raised);
-}
-
-.reset-link p {
-  margin: 2px 0 6px;
-  font-size: 0.8rem;
-}
-
-.reset-link code {
-  display: block;
-  padding: 6px 8px;
-  border-radius: 7px;
-  background: var(--well);
-  font-size: 0.78rem;
-  word-break: break-all;
-}
-
-.reset-link-actions {
-  display: flex;
-  gap: 6px;
-}
-
-.approval-warning {
-  margin: 0 0 8px;
-  padding: 8px 10px;
-  border: 1px solid rgba(250, 178, 25, 0.45);
-  border-radius: 9px;
-  color: var(--ink-2);
-  font-size: 0.8rem;
-}
-
-.approval-warning::before {
-  content: "! ";
-  color: var(--warning);
-  font-weight: 700;
 }
 
 .user-menu-signout {
@@ -3253,7 +3158,6 @@ a.brand:hover {
 .fx-search,
 .fx-input,
 .fx-textarea,
-.login-input,
 .team-picker-select,
 .fx-team-select {
   border: 0;
@@ -4488,54 +4392,85 @@ a.brand:hover {
   overflow-y: auto;
 }
 
-/* MCP tokens on the token page */
-.mcp-tokens code,
+/* MCP setup: the token page and the first-visit popup */
+.mcp-token,
 .mcp-snippet {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--mono);
   font-size: 0.76rem;
 }
 
+.mcp-token {
+  padding: 8px 10px;
+  border-radius: 9px;
+  background: var(--well);
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.mcp-token-row {
+  display: grid;
+  gap: 4px;
+}
+
+.mcp-setup {
+  display: grid;
+  gap: 6px;
+}
+
+.mcp-harness {
+  padding: 8px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+}
+
+.mcp-harness[open] {
+  display: grid;
+  gap: 6px;
+}
+
+.mcp-harness-name {
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.mcp-snippet-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
+}
+
 .mcp-snippet {
-  margin: 4px 0 0;
+  margin: 0;
   padding: 8px 10px;
   overflow-x: auto;
   white-space: pre-wrap;
   word-break: break-all;
   border-radius: 9px;
-  background: var(--paper-2, rgba(0, 0, 0, 0.05));
+  background: var(--well);
 }
 
-.mcp-token-list li,
-.mcp-tokens code {
-  overflow-wrap: anywhere;
-}
-
-.mcp-token-list {
-  margin: 0;
-  padding: 0;
-  list-style: none;
+.mcp-welcome {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
   display: grid;
-  gap: 6px;
-  font-size: 0.8rem;
-  color: var(--ink-2);
+  place-items: center;
+  padding: 24px 16px;
+  background: rgba(0, 0, 0, 0.35);
 }
 
-.login-link-button {
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--critical-ink);
-  font: inherit;
-  text-decoration: underline;
-  cursor: pointer;
-}
-
-.mcp-resources {
+.mcp-welcome-card {
   display: grid;
-  gap: 4px;
-  margin: 0;
-  padding: 0;
-  border: 0;
+  gap: 10px;
+  width: min(680px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  padding: 24px;
+  border: 1px solid var(--line-strong);
+  border-radius: 18px;
+  background: var(--surface);
+  box-shadow: var(--shadow-pop);
 }
 
 /* ------------------------------------------------------------------ health

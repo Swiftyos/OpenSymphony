@@ -8,7 +8,6 @@ defmodule SymphonyElixir.AgentMessagesApiTest do
   alias SymphonyElixirWeb.RateLimit
 
   @endpoint SymphonyElixirWeb.Endpoint
-  @password "correct horse battery"
 
   defmodule FakeLinear do
     def graphql(query, variables, _opts \\ []) do
@@ -111,14 +110,12 @@ defmodule SymphonyElixir.AgentMessagesApiTest do
     |> post(path, Jason.encode!(body))
   end
 
+  # Usernames come from the email, so `username` documents the expected one.
   defp register!(username, email) do
-    params = %{"username" => username, "email" => email, "password" => @password, "setup_code" => Users.setup_code()}
-    {:ok, account} = Users.register(params, &Auth.check_linear_member/1)
-    {:ok, account} = if account.status == "pending", do: Users.approve(account.id, "test"), else: {:ok, account}
+    account = iap_account!(email)
+    ^username = account.username
     account
   end
 
-  defp session_for(account) do
-    build_conn() |> Plug.Test.init_test_session(%{"user_id" => account.id, "session_version" => Users.get(account.id).session_version})
-  end
+  defp session_for(account), do: iap_conn(account)
 end

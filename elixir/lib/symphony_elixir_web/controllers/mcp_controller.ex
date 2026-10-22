@@ -62,14 +62,13 @@ defmodule SymphonyElixirWeb.McpController do
 
   defp context(conn) do
     user = conn.assigns.current_user
-    token = conn.assigns.mcp_token
     who = user.username || user.name
 
+    # A token can do whatever its account can; Auth checks each change.
     %{
       user: user,
-      scopes: token.scopes,
-      actor: "#{who} via MCP (#{token.name})",
-      via: "via MCP (token \"#{token.name}\")"
+      actor: "#{who} via MCP",
+      via: "via MCP"
     }
   end
 
@@ -91,7 +90,7 @@ defmodule SymphonyElixirWeb.McpController do
 
   defp request(%{"id" => id, "method" => "ping"}, _ctx), do: result(id, %{})
 
-  defp request(%{"id" => id, "method" => "tools/list"}, ctx), do: result(id, %{tools: Tools.list(ctx.scopes)})
+  defp request(%{"id" => id, "method" => "tools/list"}, _ctx), do: result(id, %{tools: Tools.list()})
 
   defp request(%{"id" => id, "method" => "resources/list"}, _ctx), do: result(id, %{resources: Manual.resources()})
 
@@ -134,8 +133,6 @@ defmodule SymphonyElixirWeb.McpController do
   defp rpc_error(id, code, message), do: %{jsonrpc: "2.0", id: id, error: %{code: code, message: message}}
 
   defp instructions(ctx) do
-    access = if "write" in ctx.scopes, do: "read and change", else: "read (this token can't change anything)"
-
     reach =
       if ctx.user.admin or ctx.user.local,
         do: "everything",
@@ -143,7 +140,7 @@ defmodule SymphonyElixirWeb.McpController do
 
     """
     Symphony runs coding agents on Linear issues through factory flows: stages (a Linear state plus a factory/* label) joined by transitions. \
-    You act as #{ctx.user.name}, with their permissions limited to #{reach}, and may #{access}. \
+    You act as #{ctx.user.name}, with their permissions (#{reach}): you may do what they may do in the dashboard. \
     When someone asks what this is, how Symphony works or how to use it, call get_manual (also the resource symphony://manual) and explain from it. \
     For the live state start with symphony_status and list_flows. To change a flow, get_flow, edit the definition, and save_flow with the version you read.\
     """

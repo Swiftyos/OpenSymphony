@@ -2,6 +2,7 @@ defmodule SymphonyElixir.McpTest do
   use SymphonyElixir.TestSupport
 
   import Phoenix.ConnTest
+  import Phoenix.LiveViewTest
   import Plug.Conn, only: [put_req_header: 3]
 
   alias SymphonyElixir.{AgentInbox, Auth, McpTokens, Users}
@@ -9,7 +10,6 @@ defmodule SymphonyElixir.McpTest do
   alias SymphonyElixirWeb.RateLimit
 
   @endpoint SymphonyElixirWeb.Endpoint
-  @password "correct horse battery"
 
   defmodule FakeLinear do
     def graphql(query, variables, _opts \\ []) do
@@ -20,6 +20,7 @@ defmodule SymphonyElixir.McpTest do
 
     defp member("mia@acme.test"), do: users("Mia", false, false, ["PAY"])
     defp member("ada@acme.test"), do: users("Ada", true, false, [])
+    defp member("lee@acme.test"), do: users("Lee", false, false, ["PAY"])
     defp member(_email), do: {:ok, %{"data" => %{"users" => %{"nodes" => []}}}}
 
     defp users(name, admin, guest, teams) do
@@ -76,13 +77,13 @@ defmodule SymphonyElixir.McpTest do
     Application.put_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, config)
     start_supervised!({SymphonyElixirWeb.Endpoint, []})
 
-    %{admin: register!("ada", "ada@acme.test"), mia: register!("mia", "mia@acme.test")}
+    %{admin: iap_account!("ada@acme.test"), mia: iap_account!("mia@acme.test")}
   end
 
   describe "transport and auth" do
     test "is off unless server.mcp.enabled", %{mia: mia} do
       write_config!(mcp: nil)
-      {secret, _token} = token!(mia, ["read"])
+      {secret, _token} = token!(mia)
       assert json_response(rpc(secret, "ping"), 404)
     end
 
@@ -94,19 +95,20 @@ defmodule SymphonyElixir.McpTest do
       assert json_response(rpc("symp_not-a-real-token", "ping"), 401)
       # The dashboard's server.api_token is not an MCP token.
       assert json_response(rpc("api-secret-token-0123456789abcdef", "ping"), 401)
-      # A browser session alone is not enough either.
-      session = session_for(mia) |> put_req_header("content-type", "application/json") |> post("/mcp", Jason.encode!(%{jsonrpc: "2.0", id: 1, method: "ping"}))
-      assert json_response(session, 401)
+      # Neither IAP sign-in nor a browser session is enough: /mcp sits outside IAP.
+      signed_in = iap_conn(mia) |> put_req_header("content-type", "application/json") |> post("/mcp", Jason.encode!(%{jsonrpc: "2.0", id: 1, method: "ping"}))
+      assert json_response(signed_in, 401)
 
-      {secret, token} = token!(mia, ["read"])
+      {secret, _token} = token!(mia)
       assert %{"result" => %{}} = json_response(rpc(secret, "ping"), 200)
 
-      :ok = McpTokens.revoke(mia.id, token.id)
-      assert json_response(rpc(secret, "ping"), 401)
+      {:ok, _new_secret, _token} = McpTokens.rotate(mia.id)
+      assert %{"error" => %{"message" => message}} = json_response(rpc(secret, "ping"), 401)
+      assert message =~ "/account/mcp"
     end
 
     test "disabled accounts' tokens stop working at once", %{mia: mia} do
-      {secret, _token} = token!(mia, ["read"])
+      {secret, _token} = token!(mia)
       assert json_response(rpc(secret, "ping"), 200)
       {:ok, _} = Users.disable(mia.id, "test")
       assert %{"error" => %{"message" => message}} = json_response(rpc(secret, "ping"), 401)
@@ -114,14 +116,14 @@ defmodule SymphonyElixir.McpTest do
     end
 
     test "browser origins must be allowed", %{mia: mia} do
-      {secret, _token} = token!(mia, ["read"])
+      {secret, _token} = token!(mia)
       evil = rpc(secret, "ping", %{}, [{"origin", "https://evil.example"}])
       assert %{"error" => %{"code" => "forbidden_origin"}} = json_response(evil, 403)
       assert json_response(rpc(secret, "ping", %{}, [{"origin", "https://agents.acme.test"}]), 200)
     end
 
     test "local-operator tokens only work in local mode" do
-      {:ok, secret, _token} = McpTokens.create("local", "ops", ["read"], 7, ["*"])
+      {:ok, secret, _token} = McpTokens.current("local")
       assert json_response(rpc(secret, "ping"), 401)
 
       write_config!(mcp: "    enabled: true", server_host: "127.0.0.1")
@@ -129,7 +131,7 @@ defmodule SymphonyElixir.McpTest do
     end
 
     test "initialize, notifications, and protocol errors", %{mia: mia} do
-      {secret, _token} = token!(mia, ["read"])
+      {secret, _token} = token!(mia)
 
       assert %{"result" => %{"protocolVersion" => "2025-06-18", "serverInfo" => %{"name" => "symphony"}, "capabilities" => %{"tools" => _}}} =
                json_response(rpc(secret, "initialize", %{"protocolVersion" => "2025-06-18", "capabilities" => %{}}), 200)
@@ -149,35 +151,34 @@ defmodule SymphonyElixir.McpTest do
 
     test "with server.mcp.host set, that host only reaches /mcp", %{mia: mia} do
       write_config!(mcp: "    enabled: true\n    host: mcp.acme.test")
-      {secret, _token} = token!(mia, ["read"])
+      {secret, _token} = token!(mia)
 
       assert build_conn() |> Map.put(:host, "mcp.acme.test") |> get("/") |> response(404)
       assert build_conn() |> Map.put(:host, "mcp.acme.test") |> get("/api/v1/state") |> response(404)
-      assert build_conn() |> Map.put(:host, "mcp.acme.test") |> get("/login") |> response(404)
+      assert iap_conn(mia) |> Map.put(:host, "mcp.acme.test") |> get("/account/mcp") |> response(404)
       assert json_response(rpc(secret, "ping", %{}, [], "mcp.acme.test"), 200)
       # The dashboard's own host is unaffected.
-      assert build_conn() |> get("/login") |> html_response(200)
+      assert iap_conn(mia) |> get("/") |> html_response(200)
     end
   end
 
   describe "tools" do
-    test "read tokens only list and run read tools", %{mia: mia} do
-      {secret, _token} = token!(mia, ["read"])
+    test "a token lists every tool; its account's permissions decide what runs", %{mia: mia} do
+      {secret, _token} = token!(mia)
       %{"result" => %{"tools" => tools}} = json_response(rpc(secret, "tools/list"), 200)
       names = Enum.map(tools, & &1["name"])
 
       assert "symphony_status" in names
-      refute "save_flow" in names
-      assert Enum.all?(tools, &(&1["annotations"]["readOnlyHint"] == true))
+      assert "save_flow" in names
 
       assert %{"result" => %{"isError" => true, "content" => [%{"text" => text}]}} =
-               json_response(call(secret, "set_stage_control", %{"scope" => "PAY", "stage" => "todo", "field" => "paused", "value" => true}), 200)
+               json_response(call(secret, "set_stage_control", %{"scope" => "WEB", "stage" => "todo", "field" => "paused", "value" => true}), 200)
 
-      assert text =~ "read-only"
+      assert text =~ "Only this team's members"
     end
 
     test "status and flows are trimmed to what the account may see", %{mia: mia} do
-      {secret, _token} = token!(mia, ["read"])
+      {secret, _token} = token!(mia)
 
       assert %{"result" => %{"isError" => false, "structuredContent" => %{"counts" => %{"running" => 0}}}} =
                json_response(call(secret, "symphony_status"), 200)
@@ -194,8 +195,8 @@ defmodule SymphonyElixir.McpTest do
       assert %{"result" => %{"isError" => false}} = json_response(call(secret, "get_issue", %{"identifier" => "PAY-1"}), 200)
     end
 
-    test "write tokens edit their own teams' flows, with conflict checks", %{mia: mia} do
-      {secret, _token} = token!(mia, ["read", "write"])
+    test "tokens edit their own teams' flows, with conflict checks", %{mia: mia} do
+      {secret, _token} = token!(mia)
 
       %{"result" => %{"structuredContent" => %{"version" => version, "definition" => definition}}} =
         json_response(call(secret, "get_flow", %{"scope" => "PAY"}), 200)
@@ -204,7 +205,7 @@ defmodule SymphonyElixir.McpTest do
         json_response(call(secret, "save_flow", %{"scope" => "PAY", "base_version" => version, "definition" => definition}), 200)
 
       assert saved_version == version + 1
-      assert Store.get("PAY")["updated_by"] == "mia via MCP (agent)"
+      assert Store.get("PAY")["updated_by"] == "mia via MCP"
 
       assert %{"result" => %{"isError" => true, "content" => [%{"text" => conflict}]}} =
                json_response(call(secret, "save_flow", %{"scope" => "PAY", "base_version" => version, "definition" => definition}), 200)
@@ -223,10 +224,10 @@ defmodule SymphonyElixir.McpTest do
     end
 
     test "messages to agents follow the dashboard's rules", %{mia: mia} do
-      {secret, _token} = token!(mia, ["read", "write"])
+      {secret, _token} = token!(mia)
 
       assert %{"result" => %{"isError" => false}} = json_response(call(secret, "send_agent_message", %{"identifier" => "PAY-1", "text" => "Use v2"}), 200)
-      assert [%{author: "mia via MCP (agent)", text: "Use v2"}] = AgentInbox.messages("PAY-1")
+      assert [%{author: "mia via MCP", text: "Use v2"}] = AgentInbox.messages("PAY-1")
 
       assert %{"result" => %{"isError" => true}} = json_response(call(secret, "send_agent_message", %{"identifier" => "WEB-1", "text" => "hi"}), 200)
       assert AgentInbox.messages("WEB-1") == []
@@ -234,7 +235,7 @@ defmodule SymphonyElixir.McpTest do
 
     test "server.controls: false makes changes fail even for admins", %{admin: admin} do
       write_config!(mcp: "    enabled: true\n  controls: false")
-      {secret, _token} = token!(admin, ["read", "write"])
+      {secret, _token} = token!(admin)
 
       assert %{"result" => %{"isError" => true, "content" => [%{"text" => text}]}} = json_response(call(secret, "reset_flow", %{"scope" => "PAY"}), 200)
       assert text =~ "read-only"
@@ -242,36 +243,120 @@ defmodule SymphonyElixir.McpTest do
   end
 
   describe "tokens" do
-    test "are stored hashed, expire, and are capped per account", %{mia: mia} do
-      {secret, token} = token!(mia, ["write"])
-      assert token.scopes == ["read", "write"]
+    test "one per account, kept so it can be shown again, and rotation stops the old one", %{mia: mia, admin: admin} do
+      {:ok, secret, token} = McpTokens.current(mia.id)
       assert String.starts_with?(secret, "symp_")
-      refute String.contains?(inspect(McpTokens.list(mia.id)), secret)
+      assert {:ok, ^secret, %{id: id}} = McpTokens.current(mia.id)
+      assert id == token.id
+      assert {:ok, other, _token} = McpTokens.current(admin.id)
+      assert other != secret
 
-      assert {:error, :lifetime_too_long} = McpTokens.create(mia.id, "x", ["read"], 91, ["PAY"])
-      assert {:error, :invalid_scopes} = McpTokens.create(mia.id, "x", ["admin"], 7, ["PAY"])
-      assert {:error, :name_required} = McpTokens.create(mia.id, " ", ["read"], 7, ["PAY"])
+      # Stored as a hash plus an encrypted copy, never in the clear.
+      refute String.contains?(inspect(:ets.tab2list(:symphony_mcp_tokens)), secret)
 
-      for n <- 2..20, do: {:ok, _, _} = McpTokens.create(mia.id, "t#{n}", ["read"], 7, ["PAY"])
-      assert {:error, :too_many_tokens} = McpTokens.create(mia.id, "t21", ["read"], 7, ["PAY"])
+      {:ok, rotated, _token} = McpTokens.rotate(mia.id)
+      assert rotated != secret
+      assert McpTokens.verify(secret) == {:error, :invalid_token}
+      assert {:ok, %{account_id: account_id}} = McpTokens.verify(rotated)
+      assert account_id == mia.id
+      assert {:ok, ^rotated, _token} = McpTokens.current(mia.id)
+      assert {:ok, ^other, _token} = McpTokens.current(admin.id)
+      assert McpTokens.current("") == {:error, :invalid_account}
     end
 
-    test "are created and revoked from the token page", %{mia: mia} do
-      page = session_for(mia) |> get("/account/mcp") |> html_response(200)
-      assert page =~ "MCP tokens"
+    test "the setup page shows the current token in every harness's command, and rotates it", %{mia: mia} do
+      page = iap_conn(mia) |> get("/account/mcp") |> html_response(200)
+      {:ok, secret, _token} = McpTokens.current(mia.id)
 
-      created =
-        session_for(mia)
-        |> post("/account/mcp-tokens", %{"name" => "ops bot", "access" => "write", "days" => "30", "resources" => ["PAY"]})
-        |> html_response(200)
+      assert page =~ "Connect your agents"
+      assert page =~ ~s(claude mcp add --transport http --scope user symphony http://www.example.com:80/mcp --header &quot;Authorization: Bearer #{secret}&quot;)
+      assert page =~ "mcp-remote"
+      assert page =~ "[mcp_servers.symphony]"
+      assert page =~ "Codex desktop app"
+      assert page =~ "grok mcp add --transport http symphony"
+      assert page =~ "Rotate token"
 
-      assert [secret] = Regex.run(~r/symp_[A-Za-z0-9_-]{43}/, created)
-      assert [%{name: "ops bot", scopes: ["read", "write"], resources: ["PAY"], id: id}] = McpTokens.list(mia.id)
-      assert json_response(rpc(secret, "ping"), 200)
-
-      session_for(mia) |> post("/account/mcp-tokens/#{id}/revoke") |> html_response(200)
-      assert McpTokens.list(mia.id) == []
+      rotated_page = iap_conn(mia) |> post("/account/mcp-token/rotate") |> html_response(200)
+      {:ok, rotated, _token} = McpTokens.current(mia.id)
+      assert rotated != secret
+      assert rotated_page =~ "The old one stopped working"
+      assert rotated_page =~ rotated
+      refute rotated_page =~ secret
       assert json_response(rpc(secret, "ping"), 401)
+      assert json_response(rpc(rotated, "ping"), 200)
+
+      # Rotating needs IAP sign-in.
+      assert build_conn() |> post("/account/mcp-token/rotate") |> html_response(401)
+      assert {:ok, ^rotated, _token} = McpTokens.current(mia.id)
+
+      # The page is off with MCP.
+      write_config!(mcp: nil)
+      assert redirected_to(get(iap_conn(mia), "/account/mcp")) == "/"
+    end
+
+    test "the setup opens once, on someone's first visit, and dismissing it is remembered", %{mia: mia, admin: admin} do
+      {:ok, view, html} = live(iap_conn(mia), "/")
+      {:ok, secret, _token} = McpTokens.current(mia.id)
+      assert html =~ "Connect your agents to"
+      assert html =~ secret
+      assert html =~ "Claude Desktop"
+      assert html =~ "Grok"
+
+      refute view |> element(~s(button[phx-click="dismiss_mcp_setup"])) |> render_click() =~ "Connect your agents to"
+      assert is_binary(Users.get(mia.id).mcp_welcomed_at)
+      {:ok, _view, html} = live(iap_conn(mia), "/")
+      refute html =~ "Connect your agents to"
+
+      # Opening the setup page counts as having seen it.
+      iap_conn(admin) |> get("/account/mcp") |> html_response(200)
+      {:ok, _view, html} = live(iap_conn(admin), "/")
+      refute html =~ "Connect your agents to"
+
+      # Not while MCP is off.
+      lee = iap_account!("lee@acme.test")
+      write_config!(mcp: nil)
+      {:ok, _view, html} = live(iap_conn(lee), "/")
+      refute html =~ "Connect your agents to"
+      assert Users.get(lee.id).mcp_welcomed_at == nil
+    end
+
+    test "tokens from before rotation keep working, with their account's access, until rotation or expiry", %{mia: mia} do
+      dir = Path.join(System.tmp_dir!(), "mcp-legacy-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf(dir) end)
+      path = Path.join(dir, "mcp_tokens.json")
+      future = DateTime.utc_now() |> DateTime.add(86_400) |> DateTime.to_iso8601()
+      past = DateTime.utc_now() |> DateTime.add(-60) |> DateTime.to_iso8601()
+      hash = &(:crypto.hash(:sha256, &1) |> Base.encode16(case: :lower))
+
+      tokens = [
+        # A read-only token limited to WEB, from the old design: now it has Mia's access.
+        %{hash: hash.("symp_legacy-read"), id: "tok_old", name: "old", account_id: mia.id, scopes: ["read"], resources: ["WEB"], expires_at: future},
+        %{hash: hash.("symp_legacy-expired"), id: "tok_gone", name: "gone", account_id: mia.id, scopes: ["read"], resources: ["PAY"], expires_at: past},
+        %{hash: hash.("symp_legacy-forever"), id: "tok_nodate", account_id: mia.id, scopes: ["read"], resources: ["PAY"]}
+      ]
+
+      File.write!(path, Jason.encode!(%{version: 1, tokens: tokens}))
+      :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, McpTokens)
+      on_exit(fn -> Supervisor.restart_child(SymphonyElixir.Supervisor, McpTokens) end)
+      start_supervised!({McpTokens, path: path})
+
+      assert McpTokens.legacy_count(mia.id) == 1
+      assert json_response(rpc("symp_legacy-read", "ping"), 200)
+      assert %{"result" => %{"isError" => false}} = json_response(call("symp_legacy-read", "send_agent_message", %{"identifier" => "PAY-1", "text" => "hi"}), 200)
+      assert %{"error" => %{"message" => expired}} = json_response(rpc("symp_legacy-expired", "ping"), 401)
+      assert expired =~ "expired"
+      assert json_response(rpc("symp_legacy-forever", "ping"), 401)
+
+      # The page shows a new, current token and counts the old one.
+      page = iap_conn(mia) |> get("/account/mcp") |> html_response(200)
+      assert page =~ "1 older token from before rotation still work"
+      assert json_response(rpc("symp_legacy-read", "ping"), 200)
+
+      {:ok, _secret, _token} = McpTokens.rotate(mia.id)
+      assert McpTokens.legacy_count(mia.id) == 0
+      assert json_response(rpc("symp_legacy-read", "ping"), 401)
+      refute File.read!(path) =~ "tok_old"
     end
   end
 
@@ -293,14 +378,10 @@ defmodule SymphonyElixir.McpTest do
     WorkflowStore.force_reload()
   end
 
-  defp token!(account, scopes) do
-    {:ok, secret, token} = McpTokens.create(account.id, "agent", scopes, 30, resources_for(account))
+  defp token!(account) do
+    {:ok, secret, token} = McpTokens.current(account.id)
     {secret, token}
   end
-
-  # Admins get everything; members their team.
-  defp resources_for(%{username: "ada"}), do: ["*"]
-  defp resources_for(_account), do: ["PAY"]
 
   defp call(secret, tool, args \\ %{}), do: rpc(secret, "tools/call", %{"name" => tool, "arguments" => args})
 
@@ -315,16 +396,5 @@ defmodule SymphonyElixir.McpTest do
     conn = if secret, do: put_req_header(conn, "authorization", "Bearer " <> secret), else: conn
     conn = Enum.reduce(headers, conn, fn {key, value}, acc -> put_req_header(acc, key, value) end)
     post(conn, "/mcp", Jason.encode!(body))
-  end
-
-  defp register!(username, email) do
-    params = %{"username" => username, "email" => email, "password" => @password, "setup_code" => Users.setup_code()}
-    {:ok, account} = Users.register(params, &Auth.check_linear_member/1)
-    {:ok, account} = if account.status == "pending", do: Users.approve(account.id, "test"), else: {:ok, account}
-    account
-  end
-
-  defp session_for(account) do
-    build_conn() |> Plug.Test.init_test_session(%{"user_id" => account.id, "session_version" => Users.get(account.id).session_version})
   end
 end

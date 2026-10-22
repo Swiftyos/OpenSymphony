@@ -1084,17 +1084,14 @@ defmodule SymphonyElixir.Config.Schema do
       # Browser origins allowed to call /mcp. Agents don't send Origin; any
       # request that does must match one of these, or server.public_url.
       field(:allowed_origins, {:array, :string}, default: [])
-      # Longest lifetime of an MCP token, in days. Every token expires.
-      field(:token_max_days, :integer, default: 90)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:enabled, :host, :allowed_origins, :token_max_days], empty_values: [])
+      |> cast(attrs, [:enabled, :host, :allowed_origins], empty_values: [])
       |> update_change(:host, &normalize_host/1)
       |> validate_format(:host, ~r/^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$/, message: "must be a bare hostname such as mcp.symphony.example.com")
-      |> validate_number(:token_max_days, greater_than: 0, less_than_or_equal_to: 366)
     end
 
     # Only strings reach this (cast already checked the type).
@@ -1114,9 +1111,13 @@ defmodule SymphonyElixir.Config.Schema do
       field(:host, :string, default: "127.0.0.1")
       # false makes the dashboard read-only for everyone (kill switch).
       field(:controls, :boolean)
-      # Dashboard sign-in: "local" (no sign-in) or "accounts" (username/password,
-      # permissions from Linear). nil = local on loopback hosts, accounts elsewhere.
+      # Dashboard sign-in: "local" (no sign-in) or "iap" (Google Identity-Aware
+      # Proxy in front signs people in; permissions from Linear). "accounts" is
+      # the old name for "iap". nil = local on loopback hosts, iap elsewhere.
       field(:auth, :string)
+      # IAP's signed-header audiences, /projects/<number>/global/backendServices/<id>.
+      # Several while the load balancer moves between backend services.
+      field(:iap_audiences, {:array, :string}, default: [])
       # Optional bearer token for the JSON API and /metrics (e.g. Prometheus).
       field(:api_token, :string)
       # Behind a TLS-terminating proxy: trust X-Forwarded-For / X-Forwarded-Proto.
@@ -1133,13 +1134,23 @@ defmodule SymphonyElixir.Config.Schema do
       embeds_one(:mcp, ServerMcp, on_replace: :update, defaults_to_struct: true)
     end
 
-    @server_fields [:port, :host, :controls, :auth, :secret_key_base, :api_token, :trust_proxy, :public_url]
+    @server_fields [
+      :port,
+      :host,
+      :controls,
+      :auth,
+      :iap_audiences,
+      :secret_key_base,
+      :api_token,
+      :trust_proxy,
+      :public_url
+    ]
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
       |> cast(attrs, @server_fields, empty_values: [])
-      |> validate_inclusion(:auth, ["local", "accounts"])
+      |> validate_inclusion(:auth, ["local", "iap", "accounts"])
       |> validate_change(:public_url, &validate_public_url/2)
       |> validate_length(:api_token, min: 24)
       |> validate_length(:secret_key_base, min: 64)
