@@ -747,6 +747,29 @@ defmodule SymphonyElixir.ExtensionsTest do
       response(get(build_conn(), "/vendor/phoenix_live_view/phoenix_live_view.js"), 200)
 
     assert live_view_js =~ "var LiveView = (() => {"
+
+    # Branding: the crane logo in the top bar, its stylesheet, and the favicons.
+    assert html =~ ~s(id="brand-crane")
+    assert html =~ ~s(phx-update="ignore")
+    assert html =~ "/agent_factory_logo.css?v="
+    assert html =~ ~s(rel="apple-touch-icon")
+
+    logo_css = response(get(build_conn(), "/agent_factory_logo.css"), 200)
+    assert logo_css =~ "@keyframes afl-snap"
+    assert logo_css =~ "prefers-reduced-motion"
+
+    for {path, type} <- [
+          {"/favicon.ico", "image/x-icon"},
+          {"/favicon.svg", "image/svg+xml"},
+          {"/favicon-16.png", "image/png"},
+          {"/favicon-32.png", "image/png"},
+          {"/apple-touch-icon.png", "image/png"}
+        ] do
+      conn = get(build_conn(), path)
+      assert conn.status == 200
+      assert [^type] = Plug.Conn.get_resp_header(conn, "content-type")
+      assert byte_size(conn.resp_body) > 0
+    end
   end
 
   test "dashboard liveview renders and refreshes over pubsub" do

@@ -161,37 +161,18 @@ pre {
   margin-bottom: 8px;
 }
 
-.brand-mark {
-  width: 32px;
-  height: 32px;
+/* The crane logo (Brand.logo/1; animation in agent_factory_logo.css). Its
+   viewBox includes the jib above the mark, so it sits a little taller. */
+.brand-crane {
+  display: block;
+  height: 34px;
   flex: none;
-  padding: 4px;
-  border: 1px solid var(--line-strong);
-  border-radius: 9px;
-  background: var(--raised);
 }
 
-.brand-mark path {
-  fill: none;
-  stroke: var(--ink-2);
-  stroke-width: 2;
-  stroke-linejoin: round;
-}
-
-.brand-mark circle:nth-of-type(1) {
-  fill: var(--h-codex);
-}
-
-.brand-mark circle:nth-of-type(2) {
-  fill: var(--ink);
-}
-
-.brand-mark circle:nth-of-type(3) {
-  fill: var(--h-claude);
-}
-
-.brand-mark circle:nth-of-type(4) {
-  fill: var(--h-opencode);
+.login-crane {
+  display: block;
+  height: 44px;
+  margin-bottom: 10px;
 }
 
 .ops-title {

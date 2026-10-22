@@ -1,6 +1,6 @@
 defmodule SymphonyElixirWeb.McpSetup do
   @moduledoc """
-  How to connect agent harnesses to Symphony's MCP endpoint, with the person's
+  How to connect agent harnesses to Agent Factory's MCP endpoint, with the person's
   URL and current token filled in. Shown on the MCP setup page and in the popup
   on someone's first visit.
   """
@@ -9,7 +9,11 @@ defmodule SymphonyElixirWeb.McpSetup do
 
   alias SymphonyElixir.Config
 
-  @server_name "symphony"
+  # The name harnesses register the server under (tools show up as
+  # mcp__agent-factory__<tool>, so no spaces). Each snippet also removes the
+  # entry under the old name, so nobody ends up with both.
+  @server_name "agent-factory"
+  @old_server_name "symphony"
 
   @doc """
   The MCP endpoint people's agents call: `server.mcp.host` when set, else
@@ -66,13 +70,14 @@ defmodule SymphonyElixirWeb.McpSetup do
   @spec harnesses(String.t(), String.t()) :: [%{name: String.t(), intro: String.t(), snippet: String.t()}]
   def harnesses(url, token) do
     name = @server_name
+    old = @old_server_name
 
     [
       %{
         name: "Claude Code",
-        intro: "Run in a terminal. It replaces any earlier Symphony entry, so run it again after rotating.",
+        intro: "Run in a terminal. It replaces any earlier entry (including the old #{old} one), so run it again after rotating.",
         snippet:
-          "claude mcp remove --scope user #{name} 2>/dev/null; " <>
+          "claude mcp remove --scope user #{old} 2>/dev/null; claude mcp remove --scope user #{name} 2>/dev/null; " <>
             ~s(claude mcp add --transport http --scope user #{name} #{url} --header "Authorization: Bearer #{token}")
       },
       %{
@@ -85,18 +90,23 @@ defmodule SymphonyElixirWeb.McpSetup do
           "mcpServers": {
             "#{name}": {
               "command": "npx",
-              "args": ["-y", "mcp-remote", "#{url}", "--header", "Authorization:${SYMPHONY_AUTH}"],
-              "env": { "SYMPHONY_AUTH": "Bearer #{token}" }
+              "args": ["-y", "mcp-remote", "#{url}", "--header", "Authorization:${AGENT_FACTORY_AUTH}"],
+              "env": { "AGENT_FACTORY_AUTH": "Bearer #{token}" }
             }
           }
         }\
         """,
-        after: "Merge it into any mcpServers you already have, then quit Claude Desktop completely and reopen it."
+        after:
+          "Merge it into any mcpServers you already have and delete an old \"#{old}\" entry if there is one, " <>
+            "then quit Claude Desktop completely and reopen it."
       },
       %{
         name: "Codex CLI",
-        intro: "Run in a terminal. It appends Symphony to ~/.codex/config.toml.",
+        intro:
+          "Run in a terminal. It removes any earlier entry (including the old #{old} one) and adds Agent Factory to ~/.codex/config.toml, " <>
+            "so run it again after rotating.",
         snippet: """
+        codex mcp remove #{old} 2>/dev/null; codex mcp remove #{name} 2>/dev/null
         cat >> ~/.codex/config.toml <<'EOF'
 
         [mcp_servers.#{name}]
@@ -104,20 +114,23 @@ defmodule SymphonyElixirWeb.McpSetup do
         http_headers = { "Authorization" = "Bearer #{token}" }
         EOF\
         """,
-        after: "After rotating, replace the token on the http_headers line instead of appending again. Check with codex mcp list."
+        after: "Check with codex mcp list."
       },
       %{
         name: "Codex desktop app",
         intro:
           "The Codex app reads the same ~/.codex/config.toml as the CLI: run the Codex CLI step, then restart the app. " <>
-            "Or in the app: Settings → MCP servers → Add server → Streamable HTTP, name #{name}, URL #{url}, and this header:",
+            "Or in the app: Settings → MCP servers, delete an old #{old} server if there is one, then Add server → Streamable HTTP, " <>
+            "name #{name}, URL #{url}, and this header:",
         snippet: "Authorization: Bearer #{token}"
       },
       %{
         name: "Grok",
-        intro: "Grok Build (the grok CLI). Run in a terminal:",
-        snippet: ~s(grok mcp add --transport http #{name} #{url} --header "Authorization: Bearer #{token}"),
-        after: "Check it with grok mcp doctor #{name}. After rotating, remove the server and add it again."
+        intro: "Grok Build (the grok CLI). Run in a terminal. It replaces any earlier entry (including the old #{old} one), so run it again after rotating:",
+        snippet:
+          "grok mcp remove #{old} 2>/dev/null; grok mcp remove #{name} 2>/dev/null; " <>
+            ~s(grok mcp add --transport http #{name} #{url} --header "Authorization: Bearer #{token}"),
+        after: "Check it with grok mcp doctor #{name}."
       }
     ]
   end

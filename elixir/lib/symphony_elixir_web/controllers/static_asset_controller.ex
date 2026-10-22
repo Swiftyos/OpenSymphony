@@ -11,6 +11,13 @@ defmodule SymphonyElixirWeb.StaticAssetController do
   @spec dashboard_css(Conn.t(), map()) :: Conn.t()
   def dashboard_css(conn, _params), do: serve(conn, "/dashboard.css")
 
+  @spec logo_css(Conn.t(), map()) :: Conn.t()
+  def logo_css(conn, _params), do: serve(conn, "/agent_factory_logo.css")
+
+  @doc "Favicons: the asset is the request path (see `StaticAssets.brand_paths/0`)."
+  @spec asset(Conn.t(), map()) :: Conn.t()
+  def asset(conn, _params), do: serve(conn, conn.request_path)
+
   @spec factory_js(Conn.t(), map()) :: Conn.t()
   def factory_js(conn, _params), do: serve(conn, "/factory.js")
 
@@ -58,7 +65,7 @@ defmodule SymphonyElixirWeb.StaticAssetController do
     case StaticAssets.fetch(path) do
       {:ok, content_type, body} ->
         conn
-        |> put_resp_content_type(content_type)
+        |> put_resp_content_type(content_type, charset(content_type))
         |> put_resp_header("cache-control", "public, max-age=31536000")
         |> send_resp(200, body)
 
@@ -66,4 +73,8 @@ defmodule SymphonyElixirWeb.StaticAssetController do
         send_resp(conn, 404, "Not Found")
     end
   end
+
+  # Images are binary; only text types get a charset.
+  defp charset("image/" <> _), do: nil
+  defp charset(_type), do: "utf-8"
 end

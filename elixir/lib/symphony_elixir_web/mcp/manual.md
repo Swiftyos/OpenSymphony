@@ -255,7 +255,9 @@ point the agent stage's transition at it, and add `human` transitions out of it.
 dashboard's **MCP setup** page (top-right menu, `/account/mcp`). It can do exactly what your
 account can do in the dashboard, and changes with it: it stops working when your account is
 disabled, and loses what your account loses. **Rotate token** on that page issues a new one and
-stops the old one at once.
+stops the old one at once. The install steps register the server as `agent-factory` (tools show up
+as `mcp__agent-factory__<tool>`) and remove an entry under the old name `symphony`, so re-running
+a step after rotating replaces the old entry.
 
 **Who can do what.**
 

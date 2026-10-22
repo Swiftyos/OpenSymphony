@@ -7,6 +7,7 @@ defmodule SymphonyElixirWeb.Topbar do
   use Phoenix.Component
 
   alias SymphonyElixir.Auth
+  alias SymphonyElixirWeb.Brand
 
   attr(:instance_name, :string, default: nil)
   attr(:current_user, :any, required: true)
@@ -23,13 +24,7 @@ defmodule SymphonyElixirWeb.Topbar do
     <header class="topbar">
       <a class="brand" href="/">
         <img :if={logo?()} class="brand-logo" src="/branding/logo" alt="" />
-        <svg :if={!logo?()} class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
-          <path d="M6 22 L13 10 L19 18 L26 8" />
-          <circle cx="6" cy="22" r="2.6" />
-          <circle cx="13" cy="10" r="2.6" />
-          <circle cx="19" cy="18" r="2.6" />
-          <circle cx="26" cy="8" r="2.6" />
-        </svg>
+        <Brand.logo :if={!logo?()} id="brand-crane" class="brand-crane" />
         <h1 class="ops-title">
           <span class="sr-only">Agent Factory</span>
           <span class="brand-name" aria-hidden="true">Agent Factory</span>

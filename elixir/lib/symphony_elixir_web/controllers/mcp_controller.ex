@@ -83,7 +83,7 @@ defmodule SymphonyElixirWeb.McpController do
     result(id, %{
       protocolVersion: if(requested in @protocol_versions, do: requested, else: @latest_version),
       capabilities: %{tools: %{listChanged: false}, resources: %{listChanged: false, subscribe: false}},
-      serverInfo: %{name: "symphony", title: "Symphony", version: version()},
+      serverInfo: %{name: "agent-factory", title: "Agent Factory", version: version()},
       instructions: instructions(ctx)
     })
   end

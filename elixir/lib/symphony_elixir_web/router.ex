@@ -57,6 +57,12 @@ defmodule SymphonyElixirWeb.Router do
   scope "/", SymphonyElixirWeb do
     get("/readyz", HealthController, :ready)
     get("/dashboard.css", StaticAssetController, :dashboard_css)
+    get("/agent_factory_logo.css", StaticAssetController, :logo_css)
+
+    for path <- SymphonyElixirWeb.StaticAssets.brand_paths() do
+      get(path, StaticAssetController, :asset)
+    end
+
     get("/factory.js", StaticAssetController, :factory_js)
     get("/factory_flow.js", StaticAssetController, :factory_flow_js)
     get("/factory_assist.js", StaticAssetController, :factory_assist_js)

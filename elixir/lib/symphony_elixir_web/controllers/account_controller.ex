@@ -75,15 +75,23 @@ defmodule SymphonyElixirWeb.AccountController do
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>MCP setup · {@instance}</title>
+        <SymphonyElixirWeb.Brand.favicons />
         <link rel="stylesheet" href={SymphonyElixirWeb.StaticAssets.url("/dashboard.css")} />
+        <link rel="stylesheet" href={SymphonyElixirWeb.StaticAssets.url("/agent_factory_logo.css")} />
       </head>
       <body>
         <main class="login-shell">
           <div class="login-card is-wide">
             <img :if={is_binary(SymphonyElixir.Config.instance_logo())} class="brand-logo login-logo" src="/branding/logo" alt="" />
+            <SymphonyElixirWeb.Brand.logo
+              :if={!is_binary(SymphonyElixir.Config.instance_logo())}
+              id="login-crane"
+              class="login-crane"
+              static
+            />
             <h1 class="login-title">Connect your agents</h1>
             <p class="login-help">
-              Agents watch and steer {@instance} at <code>{@mcp_url}</code>
+              Agents watch and steer Agent Factory at <code>{@mcp_url}</code>
               with your token. It can do what you can do in the dashboard, and stops working if your account is disabled.
             </p>
             <p :if={@notice} class="login-notice" role="status">{@notice}</p>
