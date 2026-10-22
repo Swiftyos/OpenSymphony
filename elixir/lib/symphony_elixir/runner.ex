@@ -19,6 +19,7 @@ defmodule SymphonyElixir.Runner do
   alias SymphonyElixir.AgentRunner
   alias SymphonyElixir.Capacity.UsageReporter
   alias SymphonyElixir.Config
+  alias SymphonyElixir.Factory.Store
   alias SymphonyElixir.GitHubApp.RunnerToken
   alias SymphonyElixir.IssueConfig
   alias SymphonyElixir.RunHost.Remote
@@ -125,6 +126,16 @@ defmodule SymphonyElixir.Runner do
     end)
   end
 
+  # A runner pod can't read the controller's flows, so the run brings its own.
+  defp seed_flow(%RunSpec{flow: %{"scope" => scope, "definition" => %{} = definition}, run_id: run_id}) do
+    case Store.seed(scope, definition) do
+      :ok -> :ok
+      {:error, reason} -> Logger.warning("Run flow not seeded run_id=#{run_id} scope=#{scope} reason=#{inspect(reason, limit: 5)}")
+    end
+  end
+
+  defp seed_flow(_spec), do: :ok
+
   defp run_spec(%RunSpec{} = spec) do
     :ok =
       RunOutbox.configure(
@@ -151,6 +162,7 @@ defmodule SymphonyElixir.Runner do
   end
 
   defp run_with_host(%RunSpec{} = spec, %Remote{} = host) do
+    seed_flow(spec)
     issue = RunSpec.to_issue(spec)
     account = resolve_account(spec.account)
     trace = RunTrace.from_spec(spec)

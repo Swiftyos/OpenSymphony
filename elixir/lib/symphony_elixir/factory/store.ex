@@ -132,6 +132,15 @@ defmodule SymphonyElixir.Factory.Store do
   def projects, do: for(@project_prefix <> slug <- scopes(), do: slug)
 
   @doc """
+  Holds a scope's flow in memory only, as the controller resolved it: a runner
+  pod has no access to the controller's state store, so it gets the issue's
+  flow in its run spec (`SymphonyElixir.RunSpec`) and seeds it here. Nothing is
+  persisted, and a rescan doesn't drop it.
+  """
+  @spec seed(String.t(), map()) :: :ok | {:error, [String.t()] | atom()}
+  def seed(scope, definition), do: GenServer.call(__MODULE__, {:seed, scope, definition})
+
+  @doc """
   Saves a whole definition for a scope. `base_version` must equal the stored
   version, or the save is refused with `{:error, {:conflict, current}}`.
   """
@@ -219,6 +228,16 @@ defmodule SymphonyElixir.Factory.Store do
   def handle_info(_message, state), do: {:noreply, state}
 
   @impl true
+  def handle_call({:seed, scope, definition}, _from, state) do
+    with {:ok, key} <- team_key(scope),
+         {:ok, valid} <- Definition.validate(definition) do
+      :ets.insert(@table, {key, Map.put(valid, "team", key)})
+      {:reply, :ok, state}
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
   def handle_call({:put, team, definition, base_version, updated_by}, _from, state) do
     with {:ok, key} <- team_key(team),
          current = own_or_new(key),

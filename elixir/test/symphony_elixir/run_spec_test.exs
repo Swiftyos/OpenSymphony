@@ -232,6 +232,15 @@ defmodule SymphonyElixir.RunSpecTest do
     assert {:ok, %RunSpec{telemetry: nil}} = RunSpec.read(path)
   end
 
+  test "the flow round-trips as JSON, undecoded" do
+    flow = %{"scope" => "project:abc", "definition" => %{"stages" => [%{"id" => "todo", "linear_state" => "Ready for pickup"}], "updated_at" => "2026-10-22T12:00:00Z"}}
+
+    {:ok, path} = RunSpec.write(%RunSpec{run_id: "run-flow", epoch: 1, issue: %{}, flow: flow})
+
+    assert {:ok, %RunSpec{flow: ^flow}} = RunSpec.read(path)
+    assert {:ok, %RunSpec{flow: nil}} = RunSpec.write(%RunSpec{run_id: "run-no-flow", epoch: 1, issue: %{}}) |> elem(1) |> RunSpec.read()
+  end
+
   test "read returns errors for a missing or malformed spec" do
     assert {:error, :enoent} = RunSpec.read(Path.join(System.tmp_dir!(), "missing-spec-#{System.unique_integer([:positive])}.json"))
 

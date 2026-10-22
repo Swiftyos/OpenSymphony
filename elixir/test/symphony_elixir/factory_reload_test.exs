@@ -73,6 +73,25 @@ defmodule SymphonyElixir.FactoryReloadTest do
     assert Store.get("PAY")["version"] == saved["version"]
   end
 
+  test "a seeded flow is held in memory only and outlives a rescan", %{path: path} do
+    dir = Path.dirname(path)
+    definition = set_first_agent_instructions(Definition.default_template(), "From the run spec.")
+
+    assert :ok = Store.seed("project:seeded", definition)
+    on_exit(fn -> Store.reset_team("project:seeded") end)
+
+    capture_log(fn -> :ok = Store.reload() end)
+
+    assert Store.custom?("project:seeded")
+    assert Enum.find(Store.get("project:seeded")["stages"], &(&1["kind"] == "agent"))["instructions"] == "From the run spec."
+    refute File.exists?(Path.join(dir, "project--seeded.json"))
+  end
+
+  test "an invalid seed is refused" do
+    assert {:error, [_ | _]} = Store.seed("PAY", %{"stages" => [%{"id" => "x"}]})
+    assert {:error, :invalid_team} = Store.seed("not a team!", Definition.default_template())
+  end
+
   defmodule UnavailableStateStore do
     @moduledoc false
     def list(_dir), do: {:error, :database_down}

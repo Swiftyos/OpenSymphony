@@ -36,6 +36,7 @@ defmodule SymphonyElixir.Orchestrator do
   }
 
   alias SymphonyElixir.Factory.Definition
+  alias SymphonyElixir.Factory.Store
   alias SymphonyElixir.Linear.Issue
 
   @poll_timeout_multiplier 5
@@ -1801,9 +1802,17 @@ defmodule SymphonyElixir.Orchestrator do
       account: account_spec(account),
       environment: Map.get(issue_config, :environment),
       controller_url: RunSpec.controller_url(),
-      token: RunToken.sign(run_id, epoch)
+      token: RunToken.sign(run_id, epoch),
+      flow: flow_spec(issue)
     }
   end
+
+  # The issue's flow travels with the run: a runner pod can't read the flows.
+  defp flow_spec(%Issue{} = issue) do
+    %{"scope" => IssueStage.flow_scope(issue) || Store.default_team(), "definition" => IssueStage.definition(issue)}
+  end
+
+  defp flow_spec(_issue), do: nil
 
   defp account_spec(nil), do: nil
 

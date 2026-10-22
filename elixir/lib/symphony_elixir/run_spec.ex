@@ -26,6 +26,13 @@ defmodule SymphonyElixir.RunSpec do
   per-run installation token fresh (`SymphonyElixir.GitHubApp.RunnerToken`). The
   token itself is never in the spec: a pod gets it from its run Secret and a
   process runner from `github-token.json` next to the spec.
+
+  `flow` is the factory flow the issue follows, as the controller resolved it:
+  `%{"scope" => scope, "definition" => definition}` (see
+  `SymphonyElixir.IssueStage.flow_scope/1`). The runner seeds it into its
+  `SymphonyElixir.Factory.Store`, because a runner pod can't read the flows from
+  the controller's state store, and without its flow a run can't pick its issue
+  up, name its stage or make a move. It is kept as JSON, undecoded.
   """
 
   alias SymphonyElixir.{Config, GitMirror, HttpServer}
@@ -51,7 +58,8 @@ defmodule SymphonyElixir.RunSpec do
     :target_branch,
     :token,
     :telemetry,
-    :github_host
+    :github_host,
+    :flow
   ]
 
   @issue_fields [
@@ -113,7 +121,8 @@ defmodule SymphonyElixir.RunSpec do
           target_branch: String.t() | nil,
           token: String.t() | nil,
           telemetry: %{optional(String.t()) => String.t() | nil} | nil,
-          github_host: String.t() | nil
+          github_host: String.t() | nil,
+          flow: %{String.t() => term()} | nil
         }
 
   @doc "The run's directory under the state root."

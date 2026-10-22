@@ -3,6 +3,7 @@ defmodule SymphonyElixir.RunnerTest do
 
   alias SymphonyElixir.RunnerTestSupport, as: Support
   alias SymphonyElixir.{RunSpec, RunToken, SessionStore, Transcript}
+  alias SymphonyElixir.Factory.{Definition, Store}
 
   setup do
     root = Support.temp_root!("runner")
@@ -76,6 +77,54 @@ defmodule SymphonyElixir.RunnerTest do
 
     # AgentRunner deletes the session when the run ends; the watcher saw it first.
     assert SessionStore.get(issue_id) == nil
+    SymphonyElixir.RunnerCommands.reset()
+  end
+
+  test "a runner without the controller's flows picks its issue up with the flow from its spec", %{root: root, endpoint: endpoint} do
+    issue_id = "issue-runner-flow"
+    run_id = "run-runner-flow"
+    identifier = "MT-RUNNER-FLOW"
+    scope = "project:runner-flow"
+    issue = %{Support.issue_fixture(issue_id, identifier, state: "Ready for pickup", labels: []) | project_slug: "runner-flow"}
+
+    # The project's queue waits in "Ready for pickup", which the built-in template doesn't know.
+    stages = Enum.map(Definition.default_template()["stages"], &if(&1["id"] == "todo", do: Map.put(&1, "linear_state", "Ready for pickup"), else: &1))
+    definition = %{Definition.default_template() | "stages" => stages}
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_active_states: ["Ready for pickup", "In Progress"],
+      agent_backend: "claude",
+      workspace_root: Path.join(root, "workspaces"),
+      hook_after_create: "printf '# test\\n' > README.md",
+      claude_command: Support.write_fake_claude_launcher!(root),
+      max_turns: 1
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    record = Support.record_run!(issue_id, run_id, identifier: identifier, backend: "claude", epoch: 1)
+    ExUnit.Callbacks.stop_supervised(SymphonyElixir.RunnerCommandPoller.registry())
+    on_exit(fn -> Store.reset_team(scope) end)
+
+    refute Store.custom?(scope)
+
+    spec = %RunSpec{
+      run_id: run_id,
+      epoch: record.epoch,
+      attempt: 0,
+      issue: issue,
+      backend: "claude",
+      controller_url: endpoint.url,
+      token: RunToken.sign(run_id, record.epoch),
+      flow: %{"scope" => scope, "definition" => definition}
+    }
+
+    assert {:ok, spec_path} = RunSpec.write(spec)
+    assert :ok = SymphonyElixir.Runner.run(spec_path)
+
+    assert_receive {:memory_tracker_stage_update, ^issue_id, "In Progress", "implement"}, 5_000
+    assert Store.custom?(scope)
     SymphonyElixir.RunnerCommands.reset()
   end
 
