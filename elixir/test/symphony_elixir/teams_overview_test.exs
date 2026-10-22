@@ -19,8 +19,11 @@ defmodule SymphonyElixir.TeamsOverviewTest do
   @endpoint SymphonyElixirWeb.Endpoint
   @orchestrator Module.concat(__MODULE__, :Orchestrator)
 
+  # FakeLinear, except the workspace lookup crashes.
   defmodule CrashingLinear do
-    def graphql(_query, _variables, _opts), do: raise("Linear is down")
+    def graphql(query, variables, opts) do
+      if query =~ "organization", do: raise("Linear is down"), else: SymphonyElixir.TeamsOverviewTest.FakeLinear.graphql(query, variables, opts)
+    end
   end
 
   # ada: Linear admin. tia: PAY and WEB member, Symphony admin of PAY. wes: WEB
