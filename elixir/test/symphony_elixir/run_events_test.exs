@@ -23,4 +23,12 @@ defmodule SymphonyElixir.RunEventsTest do
     assert {:error, :invalid} = RunEvents.decode(nil)
     assert {:error, :invalid} = RunEvents.decode(123)
   end
+
+  test "a payload carrying an atom no loaded application defines is still refused" do
+    name = "symphony_run_events_test_atom_never_defined"
+    payload = Base.encode64(<<131, 119, byte_size(name), name::binary>>)
+
+    assert {:error, :invalid} = RunEvents.decode(payload)
+    assert {:error, :invalid} = RunEvents.decode(payload)
+  end
 end
