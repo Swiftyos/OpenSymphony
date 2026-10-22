@@ -15,7 +15,6 @@
   var SVG_NS = "http://www.w3.org/2000/svg";
   var NODE_W = 148;
   var NODE_H = 72;
-  var GRID = 20;
   var RADIUS = 10;
   var LANE_GAP = 18;
   var KINDS = ["queue", "agent", "human", "parked", "done"];
@@ -54,20 +53,6 @@
     return b;
   }
 
-  function clone(value) {
-    return JSON.parse(JSON.stringify(value));
-  }
-
-  function slugify(name) {
-    var slug = String(name || "")
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .slice(0, 24);
-    if (!/^[a-z]/.test(slug)) slug = "stage-" + slug;
-    return slug.replace(/-+$/, "") || "stage";
-  }
-
   function since(ms) {
     if (!ms) return "";
     var s = Math.max(0, (Date.now() - ms) / 1000);
@@ -79,10 +64,6 @@
 
   function safeUrl(url) {
     return typeof url === "string" && /^https:\/\//i.test(url) ? url : null;
-  }
-
-  function snap(v) {
-    return Math.round(v / GRID) * GRID;
   }
 
   // ------------------------------------------------------------------ geometry
@@ -330,11 +311,7 @@
     this.opts = opts;
     this.data = null;
     this.team = null;
-    this.mode = "view";
-    this.draft = null;
-    this.baseVersion = null;
     this.selected = null; // {type: "stage"|"edge", id}
-    this.errors = [];
     this.pending = {};
     this.lastKey = null;
     this.build();
@@ -348,9 +325,6 @@
 
     this.toolbar = el("div", "fx-flow-toolbar");
     slot.appendChild(this.toolbar);
-    this.errorBox = el("div", "fx-flow-errors");
-    this.errorBox.hidden = true;
-    slot.appendChild(this.errorBox);
 
     // The canvas clips the diagram so it can be zoomed and panned in place.
     this.canvas = el("div", "fx-canvas");
@@ -406,12 +380,6 @@
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (e.target && e.target.isContentEditable)) return;
       if ((e.key === "t" || e.key === "T") && !e.metaKey && !e.ctrlKey && !e.altKey) {
         self.toggleCinema();
-        return;
-      }
-      if (self.mode !== "edit" || !self.selected) return;
-      if (e.key === "Delete" || e.key === "Backspace") {
-        e.preventDefault();
-        self.deleteSelected();
       }
     });
   };
@@ -426,7 +394,7 @@
     var first = this.scope === undefined;
     if (data.scope !== this.scope) {
       this.scope = data.scope;
-      if (this.mode !== "edit" && (data.scope ? teams.indexOf(data.scope) !== -1 : !first)) {
+      if (data.scope ? teams.indexOf(data.scope) !== -1 : !first) {
         // Back to all teams: the busiest flow, as on a fresh load.
         this.team = data.scope || busiest(data);
         this.selected = null;
@@ -451,17 +419,16 @@
         return t && teams.indexOf(t) !== -1;
       })[0];
     }
-    // Server updates never clobber an unsaved draft. The flows on offer and
-    // the top bar's scope are part of what's drawn (the flow picker), so a
-    // change to either redraws even when the shown flow is the same.
-    var key = JSON.stringify([this.team, this.mode, this.definition(), this.flow(), teams, data.scope]);
+    // The flows on offer and the top bar's scope are part of what's drawn
+    // (the flow picker), so a change to either redraws even when the shown
+    // flow is the same.
+    var key = JSON.stringify([this.team, this.definition(), this.flow(), teams, data.scope]);
     if (key === this.lastKey) return;
     this.lastKey = key;
     this.render();
   };
 
   Flow.prototype.definition = function () {
-    if (this.mode === "edit" && this.draft) return this.draft;
     return this.data && this.data.definitions ? this.data.definitions[this.team] : null;
   };
 
@@ -511,7 +478,6 @@
 
   Flow.prototype.render = function () {
     this.renderToolbar();
-    this.renderErrors();
     this.renderDiagram();
     this.renderDrawer();
     this.syncHash();
@@ -535,10 +501,9 @@
     bar.textContent = "";
 
     var teams = (this.data && this.data.teams) || [];
-    if (teams.length > 1 || this.mode === "edit") {
+    if (teams.length > 1) {
       var select = el("select", "fx-team-select");
       select.setAttribute("aria-label", "Flow for");
-      select.disabled = this.mode === "edit";
       var groups = { team: el("optgroup"), project: el("optgroup") };
       groups.team.label = "Teams";
       groups.project.label = "Projects";
@@ -566,6 +531,7 @@
         self.render();
       });
       bar.appendChild(select);
+      if (window.SymphonyDropdown) window.SymphonyDropdown.enhance(select);
     } else if (teams.length === 1) {
       bar.appendChild(el("span", "fx-team-name", this.scopeLabel(teams[0].key)));
     }
@@ -574,54 +540,30 @@
     var entry = this.entry();
     if (this.derived()) {
       bar.appendChild(el("span", "fx-flow-meta", "Linear states across teams · read-only"));
-    } else if (definition && definition.inherited && this.mode === "view") {
+    } else if (definition && definition.inherited) {
       var from = this.sourceLabel(definition.source);
       bar.appendChild(el("span", "fx-flow-meta", "Using the " + from + " flow"));
-    } else if (definition && definition.updated_by && this.mode === "view") {
+    } else if (definition && definition.updated_by) {
       bar.appendChild(el("span", "fx-flow-meta", "v" + definition.version + " · edited by " + definition.updated_by));
     }
 
     var spacer = el("span", "fx-flow-spacer");
     bar.appendChild(spacer);
 
-    if (this.mode === "edit") {
-      bar.appendChild(button("+ Stage", "fx-chip", function () {
-        self.addStage();
-      }));
-      if (this.opts.assistFlow) {
-        bar.appendChild(button("✦ Draft flow with AI", "fx-chip fx-assist-btn", function () {
-          self.openFlowAssist();
-        }));
-      }
-      bar.appendChild(el("span", "fx-flow-hint", "Drag stages · drag ＋ to connect · Delete removes"));
-      if (entry && entry.custom && entry.kind !== "default") {
-        bar.appendChild(button(entry.kind === "project" ? "Use team flow" : "Use default flow", "fx-chip", function () {
-          self.resetScope();
-        }));
-      }
-      bar.appendChild(button("Discard", "fx-chip", function () {
-        self.exitEdit();
-      }));
-      var save = button(this.saving ? "Saving…" : "Save", "fx-action is-primary", function () {
-        self.save();
-      });
-      save.disabled = !!this.saving;
-      bar.appendChild(save);
-    } else if (this.canEdit()) {
-      var inherited = definition && definition.inherited;
-      var noun = entry && entry.kind === "project" ? "this project" : entry && entry.kind === "team" ? "this team" : "";
-      if (this.opts.assistFlow) {
-        bar.appendChild(button("✦ Design with AI", "fx-chip fx-assist-btn", function () {
-          self.enterEdit();
-          self.openFlowAssist();
-        }));
-      }
-      bar.appendChild(button(inherited && noun ? "Customize for " + noun : "Edit flow", "fx-chip", function () {
-        self.enterEdit();
+    // Flows are edited from a coding agent over MCP, never here. The button
+    // opens the MCP setup popup (install steps and the person's token).
+    if (definition && !this.derived()) {
+      var hint = el("span", "fx-flow-hint", "Edit this flow from your coding agent: save_flow over");
+      hint.title = "get_flow, then save_flow with scope " + this.team;
+      bar.appendChild(hint);
+      bar.appendChild(button("MCP", "fx-chip fx-mcp-btn", function () {
+        self.opts.push("open_mcp_setup", {}, function (reply) {
+          if (!reply || !reply.ok) self.opts.toast((reply && reply.error) || "Couldn't open the MCP setup", "error");
+        });
       }));
     }
 
-    if (this.mode === "view" && definition && !this.derived()) {
+    if (definition && !this.derived()) {
       var auto = autopilotOf(definition);
       var chip = button(auto.enabled ? "✋ Earned autonomy · " + auto.streak + " in a row" : "✋ Earned autonomy: off", "fx-chip fx-autopilot" + (auto.enabled ? " is-on" : ""), function () {
         self.openAutopilot(chip);
@@ -681,51 +623,6 @@
     count.focus();
   };
 
-  Flow.prototype.openFlowAssist = function () {
-    var self = this;
-    this.opts.assistFlow(this.team, this.scopeLabel(), this.draft, function (suggestion) {
-      var version = self.draft.version;
-      var request = self.draft._flowRequest;
-      self.draft = clone(suggestion.definition);
-      self.draft.version = version;
-      self.draft._flowRequest = request;
-      self.selected = null;
-      self.errors = [];
-      self.lastKey = null;
-      self.render();
-      self.opts.toast("Draft applied. Review it, then Save.", "ok");
-    });
-  };
-
-  Flow.prototype.resetScope = function () {
-    var self = this;
-    var entry = this.entry();
-    var parent = entry.kind === "project" ? "its team's flow" : "the default flow";
-    if (!window.confirm("Remove " + this.scopeLabel() + "'s own flow? It will use " + parent + " again.")) return;
-    this.opts.push("factory_reset", { team: this.team }, function (reply) {
-      if (reply && reply.ok) {
-        self.opts.toast(self.scopeLabel() + " now uses " + parent, "ok");
-        self.exitEdit();
-      } else {
-        self.errors = [(reply && reply.error) || "Couldn't remove the flow"];
-        self.render();
-      }
-    });
-  };
-
-  Flow.prototype.renderErrors = function () {
-    var box = this.errorBox;
-    box.textContent = "";
-    box.hidden = !this.errors.length;
-    if (!this.errors.length) return;
-    box.appendChild(el("strong", null, "Can't save yet:"));
-    var list = el("ul");
-    this.errors.forEach(function (e) {
-      list.appendChild(el("li", null, e));
-    });
-    box.appendChild(list);
-  };
-
   // ------------------------------------------------------------------ diagram
 
   Flow.prototype.renderDiagram = function () {
@@ -741,7 +638,6 @@
     var box = bounds(definition, routes);
     this.fit = box;
     this.applyView();
-    root.classList.toggle("is-editing", this.mode === "edit");
     root.classList.toggle("has-selection", !!this.selected);
 
     var defs = svg("defs", {});
@@ -760,13 +656,6 @@
       defs.appendChild(marker);
     });
     root.appendChild(defs);
-
-    if (this.mode === "edit") {
-      root.appendChild(svg("rect", { x: box.x, y: box.y, width: box.w, height: box.h, class: "fx-grid-bg", fill: "url(#fx-grid)" }));
-      var pattern = svg("pattern", { id: "fx-grid", width: GRID, height: GRID, patternUnits: "userSpaceOnUse" });
-      pattern.appendChild(svg("circle", { cx: 1, cy: 1, r: 1, class: "fx-grid-dot" }));
-      defs.appendChild(pattern);
-    }
 
     var counts = flow.edges || {};
     var maxCount = Object.keys(counts).reduce(function (m, k) {
@@ -831,7 +720,7 @@
         chipLayer.appendChild(chip);
       }
 
-      if (count > 0 && !reduceMotion && t.by === "agent" && self.mode === "view") {
+      if (count > 0 && !reduceMotion && t.by === "agent") {
         var n = Math.min(3, 1 + Math.floor(Math.log(count) / Math.LN2));
         var dur = 2.2 + (index % 3) * 0.35;
         for (var i = 0; i < n; i++) {
@@ -849,8 +738,6 @@
     var nodeLayer = svg("g", { class: "fx-nodes" });
     root.appendChild(nodeLayer);
     root.appendChild(chipLayer);
-    this.connector = svg("path", { class: "fx-connector", d: "" });
-    root.appendChild(this.connector);
 
     definition.stages.forEach(function (stage) {
       nodeLayer.appendChild(self.renderNode(stage, flow.nodes[stage.id] || { issues: [], count: 0, running: 0 }));
@@ -942,22 +829,6 @@
       g.appendChild(line);
     }
 
-    if (this.mode === "edit") {
-      var port = svg("g", { class: "fx-port", transform: "translate(" + r.w + "," + r.h / 2 + ")" });
-      port.appendChild(svg("circle", { r: 9 }));
-      var plus = svg("text", { "text-anchor": "middle", y: "4" });
-      plus.textContent = "+";
-      port.appendChild(plus);
-      port.addEventListener("pointerdown", function (e) {
-        e.stopPropagation();
-        self.startConnect(e, stage.id);
-      });
-      g.appendChild(port);
-    }
-
-    g.addEventListener("pointerdown", function (e) {
-      if (self.mode === "edit" && e.button === 0) self.startDrag(e, stage.id);
-    });
     g.addEventListener("contextmenu", function (e) {
       e.preventDefault();
       e.stopPropagation();
@@ -975,7 +846,7 @@
       }
     });
     g.addEventListener("pointerenter", function (e) {
-      if (self.drag || self.connect) return;
+      if (self.pan) return;
       self.opts.tip.show(e, function (tip) {
         tip.appendChild(el("strong", "fx-tip-value", stage.name));
         tip.appendChild(el("div", "fx-tip-row", KIND_LABEL[stage.kind] + " · " + stage.linear_state + (stage.label ? " + label " + stage.label : "")));
@@ -1023,8 +894,7 @@
     this.closeStageMenu();
     var stage = this.stageById(stageId);
     if (!stage) return;
-    var editing = this.mode === "edit";
-    var allowed = editing || this.canControl();
+    var allowed = this.canControl();
     var agentStage = !!DISPATCHABLE[stage.kind];
 
     var menu = el("div", "fx-menu");
@@ -1090,7 +960,7 @@
       if (model && model !== "default") menu.appendChild(el("p", "fx-menu-note", "Runs " + model));
       chips("Thinking", effortOptions(), stage.effort, "effort");
     }
-    item(editing ? "Edit stage" : "Open stage", null, true, null, function () {
+    item("Open stage", null, true, null, function () {
       self.select({ type: "stage", id: stage.id });
     });
     if (!allowed) menu.appendChild(el("p", "fx-menu-note", "Only this flow's team members and admins can change it."));
@@ -1246,20 +1116,6 @@
     return ctm ? pt.matrixTransform(ctm.inverse()) : { x: 0, y: 0 };
   };
 
-  Flow.prototype.startDrag = function (e, id) {
-    var stage = this.stageById(id);
-    var p = this.svgPoint(e);
-    this.drag = { id: id, dx: p.x - stage.position.x, dy: p.y - stage.position.y, sx: e.clientX, sy: e.clientY };
-    this.dragged = false;
-    this.svg.setPointerCapture(e.pointerId);
-  };
-
-  Flow.prototype.startConnect = function (e, from) {
-    this.connect = { from: from };
-    this.svg.setPointerCapture(e.pointerId);
-    this.opts.tip.hide();
-  };
-
   Flow.prototype.onPointerMove = function (e) {
     if (this.pan) {
       var dx = e.clientX - this.pan.x;
@@ -1271,19 +1127,6 @@
       this.panBy(-dx * scale, -dy * scale);
       this.pan.x = e.clientX;
       this.pan.y = e.clientY;
-    } else if (this.drag) {
-      if (Math.abs(e.clientX - this.drag.sx) + Math.abs(e.clientY - this.drag.sy) > 4) this.dragged = true;
-      if (!this.dragged) return;
-      var p = this.svgPoint(e);
-      var stage = this.stageById(this.drag.id);
-      stage.position = { x: snap(p.x - this.drag.dx), y: snap(p.y - this.drag.dy) };
-      this.renderDiagram();
-    } else if (this.connect) {
-      var from = rectOf(this.stageById(this.connect.from));
-      var q = this.svgPoint(e);
-      var start = { x: from.x + from.w, y: from.cy };
-      var midX = (start.x + q.x) / 2;
-      this.connector.setAttribute("d", roundedPath([start, { x: midX, y: start.y }, { x: midX, y: q.y }, { x: q.x, y: q.y }]));
     }
   };
 
@@ -1298,148 +1141,7 @@
           self.dragged = false;
         }, 0);
       }
-    } else if (this.drag) {
-      this.drag = null;
-      // Let the click handler see whether this was a drag.
-      setTimeout(function () {
-        self.dragged = false;
-      }, 0);
-      if (this.dragged) this.lastKey = null;
-    } else if (this.connect) {
-      var target = document.elementFromPoint(e.clientX, e.clientY);
-      var node = target && target.closest ? target.closest("[data-stage]") : null;
-      var from = this.connect.from;
-      this.connect = null;
-      this.connector.setAttribute("d", "");
-      if (node && node.getAttribute("data-stage") !== from) this.addTransition(from, node.getAttribute("data-stage"));
     }
-  };
-
-  // ------------------------------------------------------------------ editing: model
-
-  Flow.prototype.enterEdit = function () {
-    this.mode = "edit";
-    this.draft = clone(this.data.definitions[this.team]);
-    this.baseVersion = this.draft.version;
-    this.errors = [];
-    this.lastKey = null;
-    this.render();
-  };
-
-  Flow.prototype.exitEdit = function () {
-    this.mode = "view";
-    this.draft = null;
-    this.errors = [];
-    this.saving = false;
-    this.selected = null;
-    this.lastKey = null;
-    this.render();
-  };
-
-  Flow.prototype.addStage = function () {
-    var d = this.draft;
-    var maxX = d.stages.reduce(function (m, s) {
-      return Math.max(m, s.position.x);
-    }, 0);
-    var minY = d.stages.reduce(function (m, s) {
-      return Math.min(m, s.position.y);
-    }, 160);
-    var base = "new-stage";
-    var id = base;
-    var n = 1;
-    while (this.stageById(id)) id = base + "-" + ++n;
-    d.stages.push({
-      id: id,
-      name: "New stage",
-      kind: "agent",
-      linear_state: "In Progress",
-      label: id,
-      default: false,
-      instructions: "",
-      harness: null,
-      effort: null,
-      max_agents: null,
-      paused: false,
-      approval: false,
-      position: { x: snap(maxX + 200), y: snap(minY) },
-      _new: true
-    });
-    this.select({ type: "stage", id: id });
-  };
-
-  Flow.prototype.addTransition = function (from, to) {
-    var d = this.draft;
-    var exists = d.transitions.some(function (t) {
-      return t.from === from && t.to === to;
-    });
-    if (!exists) d.transitions.push({ from: from, to: to, by: "agent", criteria: "" });
-    this.select({ type: "edge", id: from + ">" + to });
-  };
-
-  Flow.prototype.deleteSelected = function () {
-    var d = this.draft;
-    var sel = this.selected;
-    if (!d || !sel) return;
-    if (sel.type === "stage") {
-      d.stages = d.stages.filter(function (s) {
-        return s.id !== sel.id;
-      });
-      d.transitions = d.transitions.filter(function (t) {
-        return t.from !== sel.id && t.to !== sel.id;
-      });
-    } else {
-      d.transitions = d.transitions.filter(function (t) {
-        return t.from + ">" + t.to !== sel.id;
-      });
-    }
-    this.select(null);
-  };
-
-  Flow.prototype.renameStage = function (stage, name) {
-    stage.name = name;
-    // New stages follow their name until saved; saved ids stay stable.
-    if (stage._new) {
-      var oldId = stage.id;
-      var id = slugify(name);
-      var self = this;
-      var n = 1;
-      var candidate = id;
-      while (candidate !== oldId && this.stageById(candidate)) candidate = id + "-" + ++n;
-      stage.id = candidate;
-      if (stage.label === oldId) stage.label = candidate;
-      this.draft.transitions.forEach(function (t) {
-        if (t.from === oldId) t.from = candidate;
-        if (t.to === oldId) t.to = candidate;
-      });
-      if (self.selected && self.selected.id === oldId) self.selected.id = candidate;
-    }
-  };
-
-  Flow.prototype.save = function () {
-    var self = this;
-    var definition = clone(this.draft);
-    delete definition._flowRequest;
-    definition.stages.forEach(function (s) {
-      delete s._new;
-    });
-    this.saving = true;
-    this.renderToolbar();
-    this.opts.push("factory_save", { team: this.team, version: this.baseVersion, definition: definition }, function (reply) {
-      self.saving = false;
-      if (reply && reply.ok) {
-        self.data.definitions[self.team] = reply.definition;
-        self.opts.toast("Saved the " + self.scopeLabel() + " flow (v" + reply.definition.version + ")", "ok");
-        self.exitEdit();
-      } else if (reply && reply.conflict) {
-        self.errors = [
-          (reply.conflict.updated_by || "Someone") + " saved a newer version while you were editing. Discard to load theirs, then redo your changes."
-        ];
-        self.render();
-      } else {
-        self.errors = (reply && reply.errors) || [(reply && reply.error) || "Save failed"];
-        self.render();
-      }
-    });
   };
 
   // ------------------------------------------------------------------ drawer
@@ -1463,8 +1165,7 @@
     if (sel.type === "stage") {
       var stage = this.stageById(sel.id);
       if (!stage) return void (drawer.hidden = true);
-      if (this.mode === "edit") this.stageForm(drawer, stage);
-      else this.stageView(drawer, stage);
+      this.stageView(drawer, stage);
     } else {
       var parts = sel.id.split(">");
       var t = definition.transitions.filter(function (x) {
@@ -1680,8 +1381,8 @@
     });
   };
 
-  // One live stage control (view mode), applied immediately and rolled back if
-  // the server refuses it. In edit mode it only changes the draft.
+  // One live stage control, applied immediately and rolled back if the
+  // server refuses it.
   Flow.prototype.setStageControl = function (stage, field, value, done) {
     var self = this;
     var previous = stage[field];
@@ -1689,7 +1390,6 @@
     this.lastKey = null;
     this.renderDiagram();
     this.renderDrawer();
-    if (this.mode === "edit") return;
     var key = { harness: "backend" }[field] || field;
     this.opts.push("factory_control", { team: this.team, stage: stage.id, field: key, value: value }, function (reply) {
       if (reply && reply.ok) {
@@ -1704,7 +1404,7 @@
     });
   };
 
-  // Live stage controls (view mode): one field at a time, applied immediately.
+  // Live stage controls: one field at a time, applied immediately.
   Flow.prototype.controls = function (drawer, stage) {
     var self = this;
     var enabled = this.canControl();
@@ -1731,214 +1431,13 @@
     if (!enabled) drawer.appendChild(el("p", "fx-drawer-note", "You can change this team's stage controls if you're a Linear admin or a member of the team."));
   };
 
-  Flow.prototype.stageForm = function (drawer, stage) {
-    var self = this;
-    this.drawerHead(drawer, stage.name || "Stage", stage._new ? "New stage · id " + stage.id : "id " + stage.id);
-    var form = el("div", "fx-form fx-form-edit");
-    var rerender = function () {
-      self.lastKey = null;
-      self.renderDiagram();
-    };
-
-    form.appendChild(
-      field("Name", input(stage.name, function (v) {
-        self.renameStage(stage, v);
-        rerender();
-      }))
-    );
-    form.appendChild(
-      field("Kind", choice(KINDS.map(function (k) {
-        return [k, KIND_LABEL[k]];
-      }), stage.kind, true, function (v) {
-        stage.kind = v;
-        rerender();
-        self.renderDrawer();
-      }), KIND_HELP[stage.kind])
-    );
-
-    var states = el("datalist");
-    states.id = "fx-linear-states";
-    (this.data.linear_states || []).forEach(function (s) {
-      var o = el("option");
-      o.value = s;
-      states.appendChild(o);
-    });
-    form.appendChild(states);
-    var stateInput = input(stage.linear_state, function (v) {
-      stage.linear_state = v;
-      rerender();
-    });
-    stateInput.setAttribute("list", "fx-linear-states");
-    form.appendChild(field("Linear state", stateInput, "The workflow state issues in this stage are in."));
-
-    var labelInput = input(stage.label || "", function (v) {
-      stage.label = v.trim() ? v.trim().toLowerCase() : null;
-      rerender();
-    });
-    labelInput.placeholder = "none";
-    form.appendChild(
-      field("Stage label", labelInput, "Shown in Linear as " + ((this.data.label_prefix || "factory") + "/" + (stage.label || "…")) + ". Leave empty if the state alone identifies the stage.")
-    );
-
-    var def = el("label", "fx-check");
-    var box = el("input");
-    box.type = "checkbox";
-    box.checked = !!stage.default;
-    box.addEventListener("change", function () {
-      stage.default = box.checked;
-    });
-    def.appendChild(box);
-    def.appendChild(document.createTextNode(" Default stage for issues in this state with no stage label"));
-    form.appendChild(def);
-
-    if (DISPATCHABLE[stage.kind]) {
-      var gate = el("label", "fx-check");
-      var gateBox = el("input");
-      gateBox.type = "checkbox";
-      gateBox.checked = !!stage.approval;
-      gateBox.addEventListener("change", function () {
-        stage.approval = gateBox.checked;
-        rerender();
-      });
-      gate.appendChild(gateBox);
-      gate.appendChild(document.createTextNode(" ✋ A person approves before the issue moves on"));
-      form.appendChild(gate);
-      form.appendChild(
-        el(
-          "p",
-          "fx-field-hint",
-          "The agent posts its work on the Linear ticket, recommends a move and adds the `" +
-            (this.data.approval_label || "needs-approval") +
-            "` label. The issue waits in Needs you until someone approves a move."
-        )
-      );
-    }
-
-    var instructions = el("textarea", "fx-textarea");
-    instructions.rows = 6;
-    instructions.value = stage.instructions || "";
-    instructions.placeholder = "What should the agent do in this stage, and what does done look like?";
-    instructions.addEventListener("input", function () {
-      stage.instructions = instructions.value;
-    });
-    var instructionsField = field("Agent instructions", instructions, "Added to the agent's prompt while an issue is in this stage.");
-    if (this.opts.assist) {
-      instructionsField.appendChild(
-        button("✦ Draft with AI", "fx-chip fx-assist-btn", function () {
-          self.opts.assist(self.team, self.draft, stage, function (suggestion) {
-            if (suggestion.instructions) stage.instructions = suggestion.instructions;
-            if (suggestion.skill && suggestion.skill.content) stage.skill = suggestion.skill;
-            if (suggestion.transitions) self.applySuggestedTransitions(stage, suggestion.transitions);
-            rerender();
-            self.renderDrawer();
-          });
-        })
-      );
-    }
-    form.appendChild(instructionsField);
-
-    if (DISPATCHABLE[stage.kind]) {
-      var checks = el("textarea", "fx-textarea fx-mono");
-      checks.rows = 3;
-      checks.value = (stage.checks || []).join("\n");
-      checks.placeholder = "services/test.sh -new-from origin/main";
-      checks.addEventListener("input", function () {
-        stage.checks = checks.value
-          .split("\n")
-          .map(function (line) {
-            return line.trim();
-          })
-          .filter(Boolean);
-      });
-      form.appendChild(
-        field("Checks before moving on", checks, "One shell command per line. Symphony runs them in the issue's workspace when the agent finishes; if any fails, the agent is told why and keeps working.")
-      );
-    }
-
-    if (stage.skill && stage.skill.content) {
-      var skillField = el("div", "fx-field");
-      skillField.appendChild(el("span", "fx-field-label", "Skill · " + (stage.skill.path || "skill")));
-      skillField.appendChild(el("pre", "fx-assist-text fx-skill-preview", stage.skill.content));
-      skillField.appendChild(
-        button("Remove skill", "fx-link-btn", function () {
-          stage.skill = null;
-          self.renderDrawer();
-        })
-      );
-      form.appendChild(skillField);
-    }
-
-    if (DISPATCHABLE[stage.kind]) {
-      form.appendChild(field("Harness", choice(harnessOptions(this.data.harnesses), stage.harness, true, function (v) {
-        stage.harness = v;
-        rerender();
-      })));
-      form.appendChild(field("Thinking", choice(effortOptions(), stage.effort, true, function (v) {
-        stage.effort = v;
-        rerender();
-      })));
-      form.appendChild(field("Max agents", stepper(stage.max_agents, true, this.data.capacity || 10, function (v) {
-        stage.max_agents = v;
-        rerender();
-        self.renderDrawer();
-      })));
-    }
-
-    drawer.appendChild(form);
-    drawer.appendChild(button("Delete stage", "fx-action fx-danger", function () {
-      self.deleteSelected();
-    }));
-  };
-
-  Flow.prototype.applySuggestedTransitions = function (stage, suggested) {
-    var d = this.draft;
-    var self = this;
-    suggested.forEach(function (t) {
-      if (!self.stageById(t.from) || !self.stageById(t.to)) return;
-      var existing = d.transitions.filter(function (x) {
-        return x.from === t.from && x.to === t.to;
-      })[0];
-      if (existing) {
-        existing.criteria = existing.criteria || t.criteria;
-      } else {
-        d.transitions.push({ from: t.from, to: t.to, by: t.by === "human" ? "human" : "agent", criteria: t.criteria || "" });
-      }
-    });
-  };
-
   Flow.prototype.edgeView = function (drawer, t) {
-    var self = this;
     var from = this.stageById(t.from);
     var to = this.stageById(t.to);
     this.drawerHead(drawer, (from ? from.name : t.from) + " → " + (to ? to.name : t.to), "Connection");
     var count = (this.flow().edges || {})[t.from + ">" + t.to] || 0;
     drawer.appendChild(el("p", "fx-drawer-copy", count + (count === 1 ? " issue has" : " issues have") + " taken this path."));
-
-    if (this.mode !== "edit") {
-      drawer.appendChild(el("p", "fx-drawer-copy", (t.by === "human" ? "A person moves issues along this connection" : "Agents move issues along this connection") + (t.criteria ? " when: " + t.criteria : ".")));
-      return;
-    }
-
-    var form = el("div", "fx-form fx-form-edit");
-    form.appendChild(
-      field("Moved by", choice([["agent", "Agent"], ["human", "Person"]], t.by, true, function (v) {
-        t.by = v;
-        self.lastKey = null;
-        self.renderDiagram();
-      }), "Agents are told about agent moves; people get a button for person moves.")
-    );
-    var criteria = el("textarea", "fx-textarea");
-    criteria.rows = 3;
-    criteria.value = t.criteria || "";
-    criteria.placeholder = "When should an issue take this path?";
-    criteria.addEventListener("input", function () {
-      t.criteria = criteria.value;
-    });
-    form.appendChild(field("When", criteria));
-    drawer.appendChild(form);
-    drawer.appendChild(button("Delete connection", "fx-action fx-danger", function () {
-      self.deleteSelected();
-    }));
+    drawer.appendChild(el("p", "fx-drawer-copy", (t.by === "human" ? "A person moves issues along this connection" : "Agents move issues along this connection") + (t.criteria ? " when: " + t.criteria : ".")));
   };
 
   // ------------------------------------------------------------------ form widgets
@@ -1951,23 +1450,6 @@
     r.appendChild(text);
     r.appendChild(control);
     return r;
-  }
-
-  function field(label, control, hint) {
-    var f = el("label", "fx-field");
-    f.appendChild(el("span", "fx-field-label", label));
-    f.appendChild(control);
-    if (hint) f.appendChild(el("small", "fx-field-hint", hint));
-    return f;
-  }
-
-  function input(value, onInput) {
-    var i = el("input", "fx-input");
-    i.value = value || "";
-    i.addEventListener("input", function () {
-      onInput(i.value);
-    });
-    return i;
   }
 
   function toggle(on, enabled, onLabel, offLabel, onChange) {

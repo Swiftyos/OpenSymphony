@@ -23,7 +23,7 @@ most: **Set up a new project**, **How Symphony picks the repo**, **Working acros
 | Project | A Linear project Symphony listens to (`list_projects`), mapped to one **primary** GitHub repo and optionally more repos (`repos`). |
 | Home repo | The one repo an issue is worked in: its workspace, branch, commits and PR are there. See **How Symphony picks the repo**. |
 | Reference repos | The project's other repos, checked out read-only beside the home repo under `.symphony/repos/<name>`. |
-| Flow | The stages issues move through and the moves between them. An issue follows its project's own flow if it has one, else its team's, else the organisation default (`DEFAULT`). Admins edit `DEFAULT` (dashboard: Overview -> **Default flow**); a team's members and team admins edit their team's flow. |
+| Flow | The stages issues move through and the moves between them. An issue follows its project's own flow if it has one, else its team's, else the organisation default (`DEFAULT`). Flows are edited over MCP only (`get_flow`, then `save_flow`; `reset_flow` to inherit again); the dashboard shows them read-only, with an **MCP** button for setting this up. Admins edit `DEFAULT`; a team's members and team admins edit their team's flow and its projects' flows. |
 | Team | A Linear team Symphony knows: one with work, a flow, or added by an admin or the accounts import (no project needed). A team follows `DEFAULT` until it gets its own flow. |
 | Overview | What people who see several teams land on: issues by **Linear state** (Triage, Backlog, Todo, In progress, Done, Canceled; then each team's state names) across teams, since teams' flows differ. `symphony_status` returns the same as `overview`. |
 | Opt-in label | The install's `require_label` (e.g. `auto-build`). Issues without it are never dispatched and never shown: not on the dashboard, the overview, or by any tool here. |
@@ -267,10 +267,11 @@ a step after rotating replaces the old entry.
 | Action | Needs |
 | --- | --- |
 | Read tools | any token; you see the teams and projects you have access to, and nothing of other teams (admins and global viewers see every team) |
-| Flow edits (`save_flow`, `set_stage_control`, `set_autopilot`, `reset_flow`) | `write`; members their teams' flows and their projects' flows, admins any (including `DEFAULT`) |
+| Flow edits (`save_flow`, `set_stage_control`, `set_autopilot`, `reset_flow`) | `write`; members and team admins their teams' flows and their projects' flows, admins any; `DEFAULT` admins only |
 | `move_issue`, `review_issue`, `send_agent_message` | `write`; members issues of their teams or granted projects. Members make `human` moves, admins any move |
 | `refresh` | `write` |
-| `add_project`, `remove_project` | `write` and admin |
+| `add_project` | `write` and admin |
+| `remove_project` | `write`; admins, or an admin of a team the project belongs to |
 
 `write` tools change Symphony: they're refused for read-only people (global viewers, Linear
 guests), and not listed to them. Write tools are refused while the server's controls are switched off. Flow changes apply to the
@@ -304,7 +305,7 @@ Change (what your account may change):
 | `send_agent_message` | `identifier`, `text` (max 8000) | Messages the agent on an issue. |
 | `refresh` | none | Polls Linear now instead of at the next tick. |
 | `add_project` | `project` (URL or slug id), `repo` (`owner/name`), optional `default_branch`, `backend`, `environment`, `workflow`, `repos` (each `repo`, optional `name`, `default_branch`, `description`) | Admins: listen to a Linear project from the next poll, or replace its settings. Creates its labels in Linear. |
-| `remove_project` | `project` | Admins: stop listening to a project added through MCP; running agents finish, nothing new starts. |
+| `remove_project` | `project` | Removes a project from Symphony: no longer polled or routed (also one from symphony.yml), its project flow dropped, gone from the dashboard's project picker; its issues' history is kept, hidden. Running agents finish. Nothing changes in Linear or GitHub; `add_project` brings it back. |
 
 Projects in the config file can't be changed or removed here; projects added here can only point
 at GitHub repos and can't set hooks or prompts.
@@ -337,6 +338,22 @@ Blocked transitions allow. Issues blocked by other issues come back by themselve
 `get_transcript` on the blocker show its progress. `move_issue` either one to take over.
 
 **Tell an agent something.** `send_agent_message` with the identifier and your text.
+
+## Flows are edited over MCP
+
+The dashboard shows every flow read-only; flows change only through these tools, so a change is
+always a reviewed definition rather than a drag on a canvas:
+
+1. `get_flow` with the scope (`DEFAULT`, a team key, or `project:<slug>`): the definition and its
+   `version` (0 while the scope still inherits).
+2. Edit the definition (stages, transitions, autopilot) and `save_flow` it with that
+   `base_version`. Invalid definitions are refused with every problem listed; a newer save is a
+   conflict to re-read and redo. Saving creates any missing `factory/<stage>` labels.
+3. `reset_flow` drops a team's or project's own flow so it inherits again.
+
+Runtime controls stay one click away in the dashboard and here: `set_stage_control` (pause,
+max agents, harness, effort, approval) and `set_autopilot`. Drafting a flow is your coding agent's
+job: describe what you want and let it write the definition.
 
 ## Guardrails
 

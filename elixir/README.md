@@ -820,7 +820,7 @@ from it.
 
 ### Editing flows on disk
 
-Each scope's flow is a file in `~/.symphony/factories` (`<TEAM>.json`, `project--<slug>.json`, `DEFAULT.json`). The dashboard's flow editor is the usual way to change one, but you can also edit the file:
+Each scope's flow is a file in `~/.symphony/factories` (`<TEAM>.json`, `project--<slug>.json`, `DEFAULT.json`). MCP's `save_flow` is the usual way to change one, but you can also edit the file:
 - **Pickup.** Symphony rescans the directory every couple of seconds and loads a changed file once it validates, with no restart.
 - **Bad edits.** An invalid edit is logged, and the last good flow stays.
 - **Deleting a file** returns that scope to its inherited flow.
@@ -1258,34 +1258,30 @@ label back to Linear.
 
 #### Editing a flow
 
-**Edit flow** (or **Customize for this project/team** when it still uses an inherited flow)
-turns the diagram into an editor. Saving a project or team that inherited creates its own
-flow; **Use team flow** / **Use default flow** in the editor removes it again.
+Flows are edited over MCP, from your coding agent, never in the dashboard: the dashboard shows
+every flow read-only, and its **MCP** button (beside the flow picker) opens the MCP setup with
+your token. `get_flow` returns a scope's definition (`DEFAULT`, a team key, or
+`project:<slug>`) and its `version`; `save_flow` saves an edited one against that version;
+`reset_flow` makes a team or project inherit again. Saving a scope that inherited creates its own
+flow. A definition holds:
 
-![Flow editor](../.github/media/dashboard-flow-editor.png)
+- **Stages**: id, name, **kind** (*queue*, *agent*, *human*, *parked* (never dispatched), or
+  *done*), **Linear state** plus an optional **stage label** (many stages can share a state; for
+  example, Implement and Merge both live in In Progress, told apart by label), agent
+  instructions, an optional skill, default harness, thinking level and agent cap, and a position
+  on the diagram.
+- **Transitions**: from, to, whether an **agent** or a **person** moves issues along it, and when
+  (its exit criteria). Agents are told their allowed moves; people get buttons for theirs.
+- **Saving** checks the flow (every stage needs a Linear state, there's a done stage, ...) and
+  lists every problem; if someone saved first, the save is refused rather than overwriting their
+  change. Symphony then creates the `factory` label group and any missing stage labels in Linear:
+  in the team, or for a project, in every team with issues in it.
+- **Who can edit.** Team members and team admins edit their own team's flow and the flows of
+  projects their team works in; people given a project edit its flow; admins edit any flow, and
+  only admins the organisation default.
 
-- **Stages.** Use **+ Stage** to add one, drag stages to place them, and click one to set its:
-  - name
-  - **kind**: *queue* (waiting for an agent), *agent*, *human*, *parked* (never dispatched), or
-    *done*
-  - **Linear state**, plus an optional **stage label**. Many stages can share a state; for
-    example, Implement, QA, and Merge all live in In Progress, told apart by label.
-  - agent instructions
-  - default harness, thinking level, and agent cap
-- **Connections.** Drag from a stage's ＋ handle to another stage. Each connection says whether
-  an **agent** or a **person** moves issues along it, and when (its exit criteria). Agents are told
-  their allowed moves; people get buttons for theirs.
-- **Routing.** Lines are drawn at right angles with rounded corners, spaced apart where they
-  share a side, with loops kept in their own lanes.
-- **Saving.**
-  - Saving checks the flow (for example: every stage needs a Linear state, and there's a done
-    stage) and lists any problems.
-  - If someone else saved first, you're told rather than overwriting their change.
-  - On save, Symphony creates the `factory` label group and any missing stage labels in
-    Linear: in the team, or for a project, in every team with issues in it.
-- **Who can edit.** Team members edit their own team's flow and the flows of projects their team
-  works in; people given a project edit its flow; admins edit any flow, including the
-  organisation default.
+To design or change a flow, describe your process to your coding agent and let it write the
+definition (the MCP manual's "Flows are edited over MCP" section walks it through).
 
 #### How stages hand off
 
@@ -1308,7 +1304,7 @@ everything that happened. **✓ Approve** keeps the move and removes the label; 
 returns the issue to the stage it came from. Team members can approve their team's issues (and
 anyone given the issue's project); the stage panel has the same buttons.
 
-- **Always:** tick ✋ on a stage (in the editor, or right-click it on the diagram) and every move out
+- **Always:** tick ✋ on a stage (right-click it on the diagram, or `set_stage_control` over MCP) and every move out
   of it needs approval.
 - **Earned autonomy:** the **✋ Earned autonomy** setting above a flow makes every agent stage need
   approval until it gets N approvals in a row (10 by default, 1 to 100). Each stage shows its
@@ -1322,36 +1318,6 @@ the − / + / Fit buttons in the corner.
 Agents get a **"Your current stage"** section in their prompt. It has the stage's instructions,
 the stage's skill if it has one, and each allowed move with the exact Linear state and label to
 set. Workflow templates can place it themselves with `{{ stage.prompt }}`.
-
-#### Designing a flow with AI
-
-**✦ Design with AI** (above the diagram, or **✦ Draft flow with AI** while editing) designs a
-whole flow from a description of your process, for example: "Agents implement and open a PR.
-A second agent reviews the diff for security issues and sends it back if it finds any. Then QA
-runs Playwright against the preview deploy. A person approves, an agent merges."
-
-- It starts from the flow the team or project uses now, keeps stage ids where a stage keeps its
-  purpose, and writes every stage's instructions and, optionally, skill files for agent stages.
-- The draft is checked like a save. If it isn't a valid flow, the harness is shown the problems
-  and gets one chance to fix them.
-- Runtime controls (harness, thinking level, agent cap, pause) carry over for stages that keep
-  their id, and new layouts are placed on the grid automatically.
-- The preview lists the summary, the stages added, changed, and removed, each stage's
-  instructions and skill, and the connections. **Apply to editor** puts it in the editor; nothing
-  changes until you **Save**. A whole flow usually takes one to three minutes.
-
-#### Drafting a stage with AI
-
-In a stage's form, **✦ Draft with AI** takes a plain description ("before review, run the
-Playwright suite against the preview deploy; send it back if anything fails") and drafts:
-
-- the stage's agent instructions
-- its connections, with who moves each one and when
-- an optional skill file, which is stored with the stage and added to its prompt
-
-It runs your configured harness (`claude -p`, `codex exec`, or `opencode run`) one-shot in an
-empty scratch directory with file, shell, and web tools disallowed. A draft takes 20 to 40
-seconds. Nothing changes until you review the preview and click **Apply**, then **Save**.
 
 ### Sign-in and permissions
 

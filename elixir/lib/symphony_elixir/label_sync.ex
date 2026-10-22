@@ -94,7 +94,15 @@ defmodule SymphonyElixir.LabelSync do
   @spec project_teams() :: %{String.t() => [String.t()]}
   def project_teams, do: :persistent_term.get({__MODULE__, :project_teams}, %{})
 
+  @doc """
+  Each project's Linear page, by slug, as Linear reported it at the last sync.
+  """
+  @spec project_urls() :: %{String.t() => String.t()}
+  def project_urls, do: :persistent_term.get({__MODULE__, :project_urls}, %{})
+
   defp remember_names(info) do
+    urls = for {slug, %{url: "https://" <> _ = url}} <- info, into: project_urls(), do: {slug, url}
+    if urls != project_urls(), do: :persistent_term.put({__MODULE__, :project_urls}, urls)
     names = for {slug, %{name: name}} <- info, is_binary(name), into: project_names(), do: {slug, name}
     teams = for {slug, %{teams: teams}} <- info, is_list(teams), into: project_teams(), do: {slug, teams}
     :persistent_term.put({__MODULE__, :project_names}, names)

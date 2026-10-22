@@ -18,13 +18,13 @@ defmodule SymphonyElixirWeb.DashboardLive do
   require Logger
 
   alias SymphonyElixir.{AgentInbox, Auth, Config, FactoryControls, IssueMoves, IssueStage, McpTokens, Policy}
-  alias SymphonyElixir.Factory.{Assistant, Definition, Store}
+  alias SymphonyElixir.Factory.{Definition, Store}
   alias SymphonyElixir.Linear.Issue
-  alias SymphonyElixir.{SessionHistory, Transcript}
-  alias SymphonyElixir.UsageLedger
+  alias SymphonyElixir.{ProjectRoutes, SessionHistory, Transcript}
   alias SymphonyElixir.Users
-  alias SymphonyElixirWeb.{Endpoint, FactoryPresenter, ObservabilityPubSub, Overview, Presenter, UserAuth, Visibility}
+  alias SymphonyElixirWeb.{Endpoint, FactoryPresenter, ObservabilityPubSub, Overview, Presenter, QuickLinks}
   alias SymphonyElixirWeb.ScopePicker
+  alias SymphonyElixirWeb.{UserAuth, Visibility}
   @runtime_tick_ms 1_000
   # Ended sessions change only when a run ends; they're re-read this often
   # rather than on every orchestrator update.
@@ -153,80 +153,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
     {:reply, reply, socket}
   end
 
-  def handle_event("factory_save", %{"team" => team, "version" => version, "definition" => definition}, socket)
-      when is_binary(team) and is_integer(version) and is_map(definition) do
-    reply =
-      with :ok <- authorize(socket, {:edit_flow, team}),
-           {:ok, saved} <- Store.put(team, definition, version, actor(socket)) do
-        IssueMoves.sync_stage_labels(team, saved)
-        ObservabilityPubSub.broadcast_update()
-        %{ok: true, definition: saved}
-      else
-        {:error, {:conflict, current}} -> %{ok: false, conflict: current}
-        {:error, [_ | _] = errors} -> %{ok: false, errors: errors}
-        {:error, reason} -> %{ok: false, errors: [describe_error(reason)]}
-      end
-
-    {:reply, reply, socket}
-  end
-
-  # Drafting runs the harness CLI (up to a few minutes), so it runs off the
-  # LiveView process and the result is pushed back when it's ready.
-  def handle_event("factory_assist", %{"team" => team, "stage" => stage, "request" => request} = params, socket)
-      when is_binary(team) and is_binary(stage) do
-    case authorize(socket, {:edit_flow, team}) do
-      :ok ->
-        ref = Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
-        definition = assist_definition(params["definition"], team)
-        skill? = params["skill"] != false
-
-        socket =
-          start_async(socket, {:assist, ref}, fn -> Assistant.draft(definition, stage, request, skill: skill?) end)
-
-        {:reply, %{ok: true, pending: true, ref: ref}, socket}
-
-      {:error, reason} ->
-        {:reply, %{ok: false, error: describe_error(reason)}, socket}
-    end
-  end
-
-  # Drafts a whole flow for a scope (team, project, or the default) from a
-  # description, starting from the editor's current draft.
-  def handle_event("factory_assist_flow", %{"team" => scope, "request" => request} = params, socket) when is_binary(scope) do
-    case authorize(socket, {:edit_flow, scope}) do
-      :ok ->
-        ref = Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
-        base = assist_definition(params["definition"], scope)
-
-        opts = [
-          scope_label: scope_label(scope),
-          linear_states: known_states(base),
-          label_prefix: IssueStage.label_prefix(),
-          skills: params["skills"] != false
-        ]
-
-        socket = start_async(socket, {:assist, ref}, fn -> Assistant.draft_flow(base, request, opts) end)
-        {:reply, %{ok: true, pending: true, ref: ref}, socket}
-
-      {:error, reason} ->
-        {:reply, %{ok: false, error: describe_error(reason)}, socket}
-    end
-  end
-
-  # Drops a team's or project's own flow so it inherits again.
-  def handle_event("factory_reset", %{"team" => scope}, socket) when is_binary(scope) do
-    reply =
-      with :ok <- authorize(socket, {:edit_flow, scope}),
-           :ok <- Store.reset_team(scope) do
-        ObservabilityPubSub.broadcast_update()
-        %{ok: true}
-      else
-        {:error, reason} -> %{ok: false, error: describe_error(reason)}
-      end
-
-    {:reply, reply, socket}
-  end
-
   # The chat-style transcript of an issue's agents, if the viewer can see it.
   def handle_event("open_chat", %{"id" => identifier}, socket) when is_binary(identifier) do
     if Visibility.filter_issue(%{}, socket.assigns.current_user, identifier) == :hidden,
@@ -255,6 +181,31 @@ defmodule SymphonyElixirWeb.DashboardLive do
           {:ok, _message} -> {:noreply, socket |> assign(:chat_error, nil) |> assign_chat() |> push_event("chat_sent", %{})}
           {:error, reason} -> {:noreply, assign(socket, :chat_error, message_error(reason))}
         end
+    end
+  end
+
+  # Removes the picked project from Symphony (`ProjectRoutes.remove/2`): no
+  # longer polled, routed or listed; its history stays. Admins and admins of a
+  # team it belongs to.
+  def handle_event("remove_project", %{"project" => slug}, socket) when is_binary(slug) do
+    with :ok <- authorize(socket, {:remove_project, slug}),
+         :ok <- ProjectRoutes.remove(slug, actor(socket)) do
+      SymphonyElixir.Orchestrator.request_refresh_async()
+      ObservabilityPubSub.broadcast_update()
+      team = socket.assigns.team_filter
+      {:noreply, push_patch(socket, to: if(team, do: "/?team=" <> team, else: "/"))}
+    else
+      {:error, reason} -> {:noreply, assign(socket, :approval_error, describe_error(reason))}
+    end
+  end
+
+  # The flow panel's MCP button: flows are edited from a coding agent, so it
+  # opens the same setup popup as the first visit. Looking only, so read-only
+  # people may open it too.
+  def handle_event("open_mcp_setup", _params, socket) do
+    case mcp_setup(socket.assigns.current_user) do
+      nil -> {:reply, %{ok: false, error: "MCP needs a signed-in account and server.mcp.enabled."}, socket}
+      setup -> {:reply, %{ok: true}, assign(socket, :mcp_setup, setup)}
     end
   end
 
@@ -310,40 +261,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
   def handle_async(:refresh, {:exit, _reason}, socket) do
     socket = assign(socket, :refreshing, false)
     {:noreply, if(socket.assigns.refresh_again, do: request_refresh(socket), else: socket)}
-  end
-
-  def handle_async({:assist, ref}, {:ok, {:ok, suggestion}}, socket) do
-    {:noreply, push_event(socket, "factory_assist_result", %{ref: ref, ok: true, suggestion: suggestion})}
-  end
-
-  def handle_async({:assist, ref}, {:ok, {:error, message}}, socket) do
-    {:noreply, push_event(socket, "factory_assist_result", %{ref: ref, ok: false, error: message})}
-  end
-
-  def handle_async({:assist, ref}, {:exit, _reason}, socket) do
-    {:noreply, push_event(socket, "factory_assist_result", %{ref: ref, ok: false, error: "The assistant stopped unexpectedly."})}
-  end
-
-  # The unsaved draft the editor is working on, if it's a valid definition;
-  # otherwise the team's saved flow.
-  defp assist_definition(%{} = draft, team) do
-    case Definition.validate(draft) do
-      {:ok, definition} -> definition
-      {:error, _errors} -> Store.get(team)
-    end
-  end
-
-  defp assist_definition(_draft, team), do: Store.get(team)
-
-  defp scope_label("project:" <> slug), do: "the project #{get_in(UsageLedger.projects(), [slug, :name]) || slug}"
-  defp scope_label(scope), do: if(scope == Store.default_team(), do: "the whole organisation (the default flow)", else: "the #{scope} team")
-
-  defp known_states(definition) do
-    settings = Config.settings!()
-
-    (Enum.map(definition["stages"], & &1["linear_state"]) ++
-       settings.tracker.active_states ++ ["In Review"] ++ settings.tracker.terminal_states)
-    |> Enum.uniq_by(&String.downcase/1)
   end
 
   # IssueMoves checks the person may move the issue once it knows its team.
@@ -407,6 +324,15 @@ defmodule SymphonyElixirWeb.DashboardLive do
         flows: Map.put(factory.flows, entry.key, flow)
     }
   end
+
+  defp quick_links(true, _visible, _team, _project), do: %{linear: nil, repos: []}
+  defp quick_links(false, visible, team, project), do: QuickLinks.for_scope(visible, team, project)
+
+  defp can_remove_project?(user, slug) do
+    FactoryPresenter.controls_enabled?(Config.settings!()) and Policy.can?(user, {:remove_project, slug})
+  end
+
+  defp project_name(choices, slug), do: Enum.find_value(choices, slug, &(&1.slug == slug && &1.name))
 
   defp flow_title(true, _overview?), do: "Default flow"
   defp flow_title(_default?, true), do: "Flow · all teams by Linear state"
@@ -520,9 +446,28 @@ defmodule SymphonyElixirWeb.DashboardLive do
                 </p>
                 <p :if={!@default_flow? and !@overview?} class="panel-hint">Click a stage to manage it or move its issues. Solid lines are agent moves, dotted lines are person moves.</p>
                 <p :if={@default_flow?} class="panel-hint">
-                  Every team without its own flow follows this one, and so does every team added later. <a href="/">← Overview</a>
+                  Every team without its own flow follows this one, and so does every team added later. Admins edit it from a coding agent over MCP (save_flow, scope DEFAULT).
+                  <a href="/">← All teams</a>
                 </p>
               </div>
+              <nav :if={@quick_links.linear || @quick_links.repos != []} class="fx-quick-links" aria-label="Links">
+                <a :if={@quick_links.linear} class="fx-link-chip is-linear" href={@quick_links.linear.url} target="_blank" rel="noopener">
+                  {@quick_links.linear.label} ↗
+                </a>
+                <a :for={repo <- @quick_links.repos} class="fx-link-chip is-repo" href={repo.url} target="_blank" rel="noopener" title="GitHub repo">
+                  {repo.label} ↗
+                </a>
+                <button
+                  :if={@project_filter && can_remove_project?(@current_user, @project_filter)}
+                  type="button"
+                  class="fx-link-chip is-remove"
+                  phx-click="remove_project"
+                  phx-value-project={@project_filter}
+                  data-confirm={"Remove #{project_name(@project_choices, @project_filter)} from Symphony? It stops being polled and leaves the project list; its history is kept. Nothing changes in Linear or GitHub. An admin can add it back over MCP (add_project)."}
+                >
+                  Remove project
+                </button>
+              </nav>
               <div id="fx-diagram" data-fx="diagram" phx-update="ignore"></div>
             </section>
 
@@ -615,14 +560,19 @@ defmodule SymphonyElixirWeb.DashboardLive do
               </button>
             </div>
             <select
+              id="sessions-window"
               name="window"
-              class="sessions-window"
+              class="sessions-window dd-native"
+              tabindex="-1"
+              phx-hook="Dropdown"
+              data-dropdown-slot="sessions-window-dd"
               aria-label="Completed in"
               disabled={@sessions_view == "live" or @sessions_query != ""}
               title={if @sessions_query != "", do: "Search covers every kept session"}
             >
               <option :for={{value, label, _ms} <- session_windows()} value={value} selected={value == @sessions_window}><%= label %></option>
             </select>
+            <span id="sessions-window-dd" class="dd" phx-update="ignore"></span>
             <input
               type="search"
               name="query"
@@ -806,9 +756,19 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   # The MCP setup opens once, on someone's first visit, and never in local mode.
-  defp first_visit_mcp_setup(%Auth.User{local: false, id: id}) do
+  defp first_visit_mcp_setup(%Auth.User{local: false, id: id} = user) do
+    case Users.get(id) do
+      %{mcp_welcomed_at: nil} -> mcp_setup(user)
+      _ -> nil
+    end
+  end
+
+  defp first_visit_mcp_setup(_user), do: nil
+
+  # The setup popup's URL and the person's own token; nil in local mode (no
+  # account, so no token) or with MCP off.
+  defp mcp_setup(%Auth.User{local: false, id: id}) do
     with true <- Config.settings!().server.mcp.enabled == true,
-         %{mcp_welcomed_at: nil} <- Users.get(id),
          {:ok, secret, _token} <- McpTokens.current(id) do
       %{url: SymphonyElixirWeb.McpSetup.url(Endpoint.url()), token: secret}
     else
@@ -816,7 +776,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
     end
   end
 
-  defp first_visit_mcp_setup(_user), do: nil
+  defp mcp_setup(_user), do: nil
 
   # The pickers offer the teams and projects this person can see (a chosen
   # team's projects only); an unknown or hidden one in the URL falls back to
@@ -899,6 +859,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
     |> assign(:default_visible?, default_visible?(visible))
     |> assign(:payload, payload)
     |> assign(:overview?, all? and not default? and multi_team?(user, choices))
+    |> assign(:quick_links, quick_links(default?, visible, team, project))
     |> assign_overview()
     |> assign_sessions()
   end

@@ -258,19 +258,23 @@ defmodule SymphonyElixir.TeamsOverviewTest do
       assert Policy.can?(tia, {:edit_flow, "PAY"})
       refute Policy.can?(wes, {:edit_flow, "PAY"})
 
-      # The same through the dashboard and MCP.
-      {:ok, view, _html} = live(iap_conn(people.tia), "/?flow=default")
-      render_hook(view, "factory_save", %{"team" => "DEFAULT", "version" => 0, "definition" => Definition.default_template()})
-      assert_reply(view, %{ok: false, errors: ["Only admins can do that."]})
-      assert error!(token!(people.tia), "save_flow", %{"scope" => "DEFAULT", "base_version" => 0, "definition" => Definition.default_template()}) =~ "Only admins"
-      assert error!(token!(people.vic), "save_flow", %{"scope" => "DEFAULT", "base_version" => 0, "definition" => Definition.default_template()}) =~ "read-only"
+      # The same over MCP, where flows are edited; the dashboard only shows them.
+      template = Definition.default_template()
+      assert error!(token!(people.tia), "save_flow", %{"scope" => "DEFAULT", "base_version" => 0, "definition" => template}) =~ "Only admins"
+      assert error!(token!(people.vic), "save_flow", %{"scope" => "DEFAULT", "base_version" => 0, "definition" => template}) =~ "read-only"
       refute Store.custom?("DEFAULT")
-
-      {:ok, view, html} = live(iap_conn(people.ada), "/?flow=default")
-      assert html =~ "Every team without its own flow follows this one"
-      render_hook(view, "factory_save", %{"team" => "DEFAULT", "version" => 0, "definition" => Definition.default_template()})
-      assert_reply(view, %{ok: true})
+      assert %{"version" => 1} = ok!(token!(people.ada), "save_flow", %{"scope" => "DEFAULT", "base_version" => 0, "definition" => template})
       assert Store.custom?("DEFAULT")
+
+      {:ok, _view, html} = live(iap_conn(people.ada), "/?flow=default")
+      assert html =~ "Every team without its own flow follows this one"
+      assert html =~ "save_flow"
+
+      # The MCP button opens the setup popup, for read-only people too.
+      {:ok, view, _html} = live(iap_conn(people.vic), "/")
+      render_hook(view, "open_mcp_setup", %{})
+      assert_reply(view, %{ok: true})
+      assert render(view) =~ "mcp-welcome-title"
     end
 
     test "admins add a team on the Users page; global viewers see the list only", %{people: people} do
@@ -332,6 +336,9 @@ defmodule SymphonyElixir.TeamsOverviewTest do
     test "with all teams picked, a global viewer's flow is Linear states across teams, read-only", %{people: people} do
       {:ok, _view, html} = live(iap_conn(people.vic), "/")
       assert html =~ "Flow · all teams by Linear state"
+      # The pickers are drawn as the dashboard's own dropdowns over the native selects.
+      assert html =~ ~s(data-dropdown-slot="team-picker-dd")
+      assert html =~ ~s(id="team-picker-dd")
       factory = factory_data(html)
       assert factory["scope"] == "overview"
       assert %{"kind" => "overview"} = hd(factory["teams"])
@@ -405,6 +412,99 @@ defmodule SymphonyElixir.TeamsOverviewTest do
       UsageLedger.observe_issue(%{issue | labels: []}, external: true)
       assert UsageLedger.hidden?("WEB-2")
       refute Enum.any?(UsageLedger.snapshot().flow.issues, &(&1.issue == "WEB-2"))
+    end
+  end
+
+  describe "quick links and removing projects" do
+    setup do
+      SymphonyElixir.ProjectRoutes.reset()
+      SymphonyElixirWeb.QuickLinks.reset()
+
+      on_exit(fn ->
+        SymphonyElixir.ProjectRoutes.reset()
+        SymphonyElixirWeb.QuickLinks.reset()
+      end)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        server_host: "0.0.0.0",
+        tracker_kind: "linear",
+        tracker_api_token: "server-key",
+        tracker_require_label: "auto-build",
+        tracker_projects: [%{slug: "checkout", repo: "acme/checkout", repos: [%{repo: "acme/checkout-docs", name: "docs"}]}]
+      )
+
+      path = Workflow.workflow_file_path()
+      File.write!(path, String.replace(File.read!(path), "\nserver:\n", "\nserver:\n  mcp:\n    enabled: true\n", global: false))
+      WorkflowStore.force_reload()
+
+      issue = %Issue{
+        id: "id-PAY-7",
+        identifier: "PAY-7",
+        title: "Checkout totals",
+        state: "Todo",
+        state_type: "unstarted",
+        labels: ["auto-build"],
+        project_slug: "checkout",
+        url: "https://linear.app/acme/issue/PAY-7/checkout-totals"
+      }
+
+      UsageLedger.observe_issue(issue, external: true)
+      %{issue: issue}
+    end
+
+    test "a picked team or project links to its Linear page and its repos", %{people: people} do
+      {:ok, _view, html} = live(iap_conn(people.vic), "/?team=PAY")
+      assert html =~ "https://linear.app/acme/team/PAY/active"
+      assert html =~ "https://github.com/acme/checkout"
+      assert html =~ "https://github.com/acme/checkout-docs"
+
+      {:ok, _view, html} = live(iap_conn(people.vic), "/?team=PAY&project=checkout")
+      assert html =~ "https://linear.app/acme/project/checkout"
+      assert html =~ "https://github.com/acme/checkout-docs"
+
+      # All teams: the workspace, and no repos.
+      {:ok, _view, html} = live(iap_conn(people.vic), "/")
+      assert html =~ ~s(href="https://linear.app/acme")
+      refute html =~ "github.com/acme/checkout"
+
+      # Someone who can't see the project gets none of its links.
+      {:ok, _view, html} = live(iap_conn(people.wes), "/")
+      refute html =~ "github.com/acme/checkout"
+    end
+
+    test "admins and the project's team admins remove a project; it stays gone", %{people: people, issue: issue} do
+      [tia, wes, vic] = Enum.map([people.tia, people.wes, people.vic], &user!/1)
+      assert Policy.can?(tia, {:remove_project, "checkout"})
+      assert Policy.authorize(wes, {:remove_project, "checkout"}) == {:error, :not_team_admin}
+      assert Policy.authorize(vic, {:remove_project, "checkout"}) == {:error, :read_only}
+      assert error!(token!(people.wes), "remove_project", %{"project" => "checkout"}) =~ "teams you administer"
+      assert error!(token!(people.vic), "remove_project", %{"project" => "checkout"}) =~ "read-only"
+
+      {:ok, _view, html} = live(iap_conn(people.vic), "/?team=PAY&project=checkout")
+      refute html =~ "Remove project"
+      {:ok, view, html} = live(iap_conn(people.tia), "/?team=PAY&project=checkout")
+      assert html =~ "Remove project"
+      assert html =~ "Remove checkout from Symphony?"
+
+      {:ok, _} = Store.put("project:checkout", Definition.default_template(), 0, "tia")
+      render_click(view, "remove_project", %{"project" => "checkout"})
+      assert_patch(view, "/?team=PAY")
+
+      assert SymphonyElixir.ProjectRoutes.removed?("checkout")
+      refute Store.custom?("project:checkout")
+      refute Enum.any?(Config.linear_project_routes(), &(&1.slug == "checkout"))
+      refute Enum.any?(FactoryPresenter.payload([], Config.settings!()).teams, &(&1[:slug] == "checkout"))
+
+      # The next poll reads its issue again: still not listed, history kept.
+      UsageLedger.observe_issue(issue, external: true)
+      refute Enum.any?(FactoryPresenter.payload([], Config.settings!()).teams, &(&1[:slug] == "checkout"))
+      assert Map.has_key?(UsageLedger.projects(), "checkout")
+      {:ok, _view, html} = live(iap_conn(people.tia), "/?team=PAY&project=checkout")
+      refute html =~ ~s(<option value="checkout")
+
+      # Admins bring it back over MCP.
+      assert %{"restored" => "checkout"} = ok!(token!(people.ada), "add_project", %{"project" => "checkout", "repo" => "acme/checkout"})
+      assert Enum.any?(Config.linear_project_routes(), &(&1.slug == "checkout"))
     end
   end
 

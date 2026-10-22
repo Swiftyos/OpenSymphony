@@ -566,35 +566,25 @@ defmodule SymphonyElixir.Config do
 
   @spec linear_project_routes(Schema.t()) :: [linear_project_route()]
   def linear_project_routes(%Schema{} = settings) do
+    # Projects removed from Symphony (`ProjectRoutes.remove/2`) are neither
+    # polled nor routed, even when the config file still lists them.
+    removed = SymphonyElixir.ProjectRoutes.removed()
+
     routes =
       settings.tracker.projects
       |> List.wrap()
       |> Enum.filter(&(is_binary(&1.slug) and String.trim(&1.slug) != ""))
       |> with_stored_routes()
+      |> Enum.reject(&MapSet.member?(removed, &1.slug))
 
-    case routes do
-      [] ->
-        case settings.tracker.project_slug do
-          project_slug when is_binary(project_slug) ->
-            [
-              %{
-                slug: project_slug,
-                repo: nil,
-                workflow: nil,
-                backend: nil,
-                workspace_root: nil,
-                repos: [],
-                environment: nil
-              }
-            ]
-
-          _ ->
-            []
-        end
-
-      _ ->
-        routes
+    case {routes, settings.tracker.project_slug} do
+      {[], slug} when is_binary(slug) -> if MapSet.member?(removed, slug), do: [], else: legacy_route(slug)
+      _ -> routes
     end
+  end
+
+  defp legacy_route(project_slug) do
+    [%{slug: project_slug, repo: nil, workflow: nil, backend: nil, workspace_root: nil, repos: [], environment: nil}]
   end
 
   # Multi-project mode also listens to the projects added at runtime (MCP,

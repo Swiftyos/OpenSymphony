@@ -14,14 +14,12 @@ _In this [demo video](.github/media/symphony-demo.mp4), Symphony monitors a Line
 
 ![Symphony dashboard](.github/media/dashboard-overview.png)
 
-The dashboard shows each Linear team's factory as a live flow diagram you can steer. You can
-design the flow itself: add stages, draw connections, and draft a stage's agent instructions
-and skill with AI. Click a stage to pause it, cap its agents, choose its harness and thinking
-level, or move issues along its connections. People sign in with Symphony accounts tied to
+The dashboard shows each Linear team's factory as a live flow diagram you can steer, and, with
+all teams picked, everything Symphony is working on by Linear state. Flows themselves are
+designed from your coding agent over MCP. Click a stage to pause it, cap its agents, choose its
+harness and thinking level, or move issues along its connections. People sign in with Symphony accounts tied to
 their Linear identity. The dashboard also shows what needs a human, what each agent is doing,
 and what it all costs by project, team, task, and harness.
-
-![Flow editor](.github/media/dashboard-flow-editor.png)
 
 See [elixir/README.md](elixir/README.md#web-dashboard) for details.
 
@@ -48,7 +46,7 @@ The experimental Elixir implementation currently supports:
 - A live dashboard that shows and steers the factory, with cost tracking by project, team, task, and harness.
 - Per-issue agent transcripts (messages, commands, edits, thinking), and messages to the agent
   working on an issue, delivered into a running Codex turn or at the start of the next turn.
-- An MCP endpoint (`/mcp`) so your own agents can watch the factory and edit flows, move issues,
+- An MCP endpoint (`/mcp`) so your own agents can watch the factory and edit flows (the only place flows are edited), move issues,
   and message agents with per-person, scoped, expiring tokens. It's safe to expose without a
   sign-in proxy.
 

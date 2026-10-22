@@ -4,7 +4,6 @@ defmodule SymphonyElixirWeb.StaticAssets do
   @dashboard_css_path Path.expand("../../priv/static/dashboard.css", __DIR__)
   @factory_js_path Path.expand("../../priv/static/factory.js", __DIR__)
   @factory_flow_js_path Path.expand("../../priv/static/factory_flow.js", __DIR__)
-  @factory_assist_js_path Path.expand("../../priv/static/factory_assist.js", __DIR__)
   @logo_css_path Path.expand("../../priv/static/agent_factory_logo.css", __DIR__)
   @brand_dir Path.expand("../../priv/static/brand", __DIR__)
   # Favicons, served at the paths browsers ask for unprompted.
@@ -22,7 +21,6 @@ defmodule SymphonyElixirWeb.StaticAssets do
   @external_resource @dashboard_css_path
   @external_resource @factory_js_path
   @external_resource @factory_flow_js_path
-  @external_resource @factory_assist_js_path
   @external_resource @logo_css_path
   for {_path, {_type, file}} <- @brand_files, do: @external_resource(Path.join(@brand_dir, file))
   @external_resource @phoenix_html_js_path
@@ -32,7 +30,6 @@ defmodule SymphonyElixirWeb.StaticAssets do
   @dashboard_css File.read!(@dashboard_css_path)
   @factory_js File.read!(@factory_js_path)
   @factory_flow_js File.read!(@factory_flow_js_path)
-  @factory_assist_js File.read!(@factory_assist_js_path)
   @logo_css File.read!(@logo_css_path)
   @phoenix_html_js File.read!(@phoenix_html_js_path)
   @phoenix_js File.read!(@phoenix_js_path)
@@ -45,7 +42,6 @@ defmodule SymphonyElixirWeb.StaticAssets do
             "/agent_factory_logo.css" => {"text/css", @logo_css},
             "/factory.js" => {"application/javascript", @factory_js},
             "/factory_flow.js" => {"application/javascript", @factory_flow_js},
-            "/factory_assist.js" => {"application/javascript", @factory_assist_js},
             "/vendor/phoenix_html/phoenix_html.js" => {"application/javascript", @phoenix_html_js},
             "/vendor/phoenix/phoenix.js" => {"application/javascript", @phoenix_js},
             "/vendor/phoenix_live_view/phoenix_live_view.js" => {"application/javascript", @phoenix_live_view_js}

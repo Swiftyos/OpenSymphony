@@ -11,6 +11,7 @@ defmodule SymphonyElixir.FactoryEditorTest do
   alias SymphonyElixir.Factory.{Definition, StagePrompt, Store}
   alias SymphonyElixir.Linear.{Adapter, Client}
   alias SymphonyElixirWeb.{FactoryPresenter, Visibility}
+  alias SymphonyElixirWeb.Mcp.Tools
 
   @endpoint SymphonyElixirWeb.Endpoint
 
@@ -410,30 +411,6 @@ defmodule SymphonyElixir.FactoryEditorTest do
 
     defp session_for(account), do: iap_conn(account)
 
-    test "members save their own team's flow; conflicts and invalid flows are reported", %{mia: mia} do
-      {:ok, view, html} = live(session_for(mia), "/")
-      assert html =~ "factory_flow.js?v="
-
-      draft = Store.get("PAY") |> Map.update!("stages", &(&1 ++ [%{"id" => "qa", "name" => "QA", "kind" => "agent", "linear_state" => "In Progress", "label" => "qa"}]))
-      render_hook(view, "factory_save", %{"team" => "PAY", "version" => 0, "definition" => draft})
-      assert_reply(view, %{ok: true, definition: %{"version" => 1, "updated_by" => "mia"}})
-
-      # Labels are synced to Linear in the background.
-      assert_receive {:graphql, _, %{input: %{name: "qa", parentId: "new-factory"}}}, 1_000
-
-      render_hook(view, "factory_save", %{"team" => "PAY", "version" => 0, "definition" => draft})
-      assert_reply(view, %{ok: false, conflict: %{"version" => 1}})
-
-      render_hook(view, "factory_save", %{"team" => "PAY", "version" => 1, "definition" => %{"stages" => []}})
-      assert_reply(view, %{ok: false, errors: ["a factory needs at least one stage"]})
-
-      render_hook(view, "factory_save", %{"team" => "WEB", "version" => 0, "definition" => draft})
-      assert_reply(view, %{ok: false, errors: ["Only this team's members and Linear admins can change its flow."]})
-
-      render_hook(view, "factory_save", %{"team" => "../x", "version" => 0, "definition" => draft})
-      assert_reply(view, %{ok: false, errors: [_]})
-    end
-
     test "moves follow the team's connections; agent-only moves need an admin", %{mia: mia, ada: ada} do
       {:ok, view, _html} = live(session_for(mia), "/")
 
@@ -584,45 +561,22 @@ defmodule SymphonyElixir.FactoryEditorTest do
       assert %{"codex" => _, "claude" => _, "opencode" => _} = FactoryPresenter.payload([], Config.settings!()).harness_models
     end
 
-    test "whole flows are drafted with AI for teams and projects, and project flows can be dropped", %{mia: mia} do
-      bin = Path.join(System.tmp_dir!(), "symphony-editor-flow-#{System.unique_integer([:positive])}")
-      File.mkdir_p!(bin)
+    test "project flows are saved and dropped over MCP; saving syncs labels to the project's teams", %{mia: mia} do
       template = Definition.default_template()
-      flow = Jason.encode!(%{"summary" => "Same flow.", "stages" => template["stages"], "transitions" => template["transitions"]})
-      File.write!(Path.join(bin, "claude"), "#!/bin/sh\nprintf '%s' '#{flow}'\n")
-      File.chmod!(Path.join(bin, "claude"), 0o755)
-      path = System.get_env("PATH")
-      System.put_env("PATH", bin <> ":" <> path)
       UsageLedger.observe_issue(%Issue{id: "1", identifier: "PAY-1", state: "Todo", project_slug: "checkout"})
-      checkout = %Issue{identifier: "PAY-1", project_slug: "checkout", project_name: "Checkout"}
-      UsageLedger.record_tokens(%{issue: checkout, backend: "claude"}, %{input_tokens: 1, output_tokens: 0})
+      {:ok, user} = Auth.user_for_id(mia.id)
+      ctx = %{user: user, actor: "mia via MCP", via: "test"}
 
-      try do
-        {:ok, view, _html} = live(session_for(mia), "/")
-        render_hook(view, "factory_assist_flow", %{"team" => "project:checkout", "request" => "Keep it simple.", "definition" => Store.get("project:checkout", "PAY")})
-        assert_reply(view, %{ok: true, pending: true, ref: ref})
-        assert_push_event(view, "factory_assist_result", %{ref: ^ref, ok: true, suggestion: suggestion}, 5_000)
-        assert %{summary: "Same flow.", changes: %{added: [], removed: []}} = suggestion
+      assert {:ok, %{saved: true}} = Tools.call("save_flow", %{"scope" => "project:checkout", "base_version" => 0, "definition" => template}, ctx)
+      assert_receive {:graphql, _, %{input: %{name: "factory"}}}, 1_000
+      assert Store.custom?("project:checkout")
 
-        # The default flow, which every team without its own follows, is admins' only.
-        render_hook(view, "factory_assist_flow", %{"team" => "DEFAULT", "request" => "x"})
-        assert_reply(view, %{ok: false, error: "Only admins can do that."})
+      # The default flow, which every team without its own follows, is admins' only.
+      assert {:error, "Only admins can do that."} = Tools.call("save_flow", %{"scope" => "DEFAULT", "base_version" => 0, "definition" => template}, ctx)
 
-        # Saving a project flow syncs its labels to the project's teams.
-        render_hook(view, "factory_save", %{"team" => "project:checkout", "version" => 0, "definition" => template})
-        assert_reply(view, %{ok: true})
-        assert_receive {:graphql, _, %{input: %{name: "factory"}}}, 1_000
-
-        render_hook(view, "factory_reset", %{"team" => "project:checkout"})
-        assert_reply(view, %{ok: true})
-        refute Store.custom?("project:checkout")
-
-        render_hook(view, "factory_reset", %{"team" => "WEB"})
-        assert_reply(view, %{ok: false})
-      after
-        System.put_env("PATH", path)
-        File.rm_rf!(bin)
-      end
+      assert {:ok, %{reset: true, now_uses: "template"}} = Tools.call("reset_flow", %{"scope" => "project:checkout"}, ctx)
+      refute Store.custom?("project:checkout")
+      assert {:error, _} = Tools.call("reset_flow", %{"scope" => "WEB"}, ctx)
     end
 
     test "the team picker narrows the dashboard to one team's work and projects", %{ada: ada, mia: mia} do
@@ -767,33 +721,6 @@ defmodule SymphonyElixir.FactoryEditorTest do
       assert html =~ ~s(id="cost-by-stage")
       render_change(element(view, "#team-picker"), %{"team" => "all"})
       assert_patch(view, "/insights?range=day")
-    end
-
-    test "AI drafts run in the background and are pushed when ready", %{mia: mia} do
-      bin = Path.join(System.tmp_dir!(), "symphony-editor-bin-#{System.unique_integer([:positive])}")
-      File.mkdir_p!(bin)
-      draft = Jason.encode!(%{"instructions" => "Do QA.", "transitions" => [], "skill" => nil})
-      File.write!(Path.join(bin, "claude"), "#!/bin/sh\nprintf '%s' '#{draft}'\n")
-      File.chmod!(Path.join(bin, "claude"), 0o755)
-      path = System.get_env("PATH")
-      System.put_env("PATH", bin <> ":" <> path)
-
-      try do
-        {:ok, view, _html} = live(session_for(mia), "/")
-        render_hook(view, "factory_assist", %{"team" => "PAY", "stage" => "merge", "request" => "Use a merge queue.", "definition" => Store.get("PAY")})
-        assert_reply(view, %{ok: true, pending: true, ref: ref})
-        assert_push_event(view, "factory_assist_result", %{ref: ^ref, ok: true, suggestion: %{instructions: "Do QA."}}, 5_000)
-
-        render_hook(view, "factory_assist", %{"team" => "PAY", "stage" => "merge", "request" => "", "definition" => %{"bad" => true}})
-        assert_reply(view, %{ok: true, ref: ref2})
-        assert_push_event(view, "factory_assist_result", %{ref: ^ref2, ok: false, error: "Describe what the stage should do."}, 5_000)
-
-        render_hook(view, "factory_assist", %{"team" => "WEB", "stage" => "merge", "request" => "x"})
-        assert_reply(view, %{ok: false, error: "Only this team's members" <> _})
-      after
-        System.put_env("PATH", path)
-        File.rm_rf!(bin)
-      end
     end
   end
 end

@@ -153,9 +153,11 @@ defmodule SymphonyElixirWeb.FactoryPresenter do
 
   defp team_kind(key), do: if(key == Store.default_team(), do: "default", else: "team")
 
-  # Configured projects, projects with work, and projects with their own flow.
+  # Configured projects, projects with work, and projects with their own flow;
+  # never one removed from Symphony (its history stays, hidden).
   defp project_entries(settings) do
     seen = UsageLedger.projects()
+    removed = SymphonyElixir.ProjectRoutes.removed()
     linear_names = SymphonyElixir.LabelSync.project_names()
     linear_teams = SymphonyElixir.LabelSync.project_teams()
 
@@ -164,7 +166,7 @@ defmodule SymphonyElixirWeb.FactoryPresenter do
     |> Enum.map(& &1.slug)
     |> Kernel.++(Map.keys(seen))
     |> Kernel.++(Store.projects())
-    |> Enum.filter(&(is_binary(&1) and is_binary(Store.project_scope(&1))))
+    |> Enum.filter(&(is_binary(&1) and is_binary(Store.project_scope(&1)) and not MapSet.member?(removed, &1)))
     |> Enum.uniq()
     |> Enum.map(fn slug ->
       info = Map.get(seen, slug, %{name: nil, teams: []})

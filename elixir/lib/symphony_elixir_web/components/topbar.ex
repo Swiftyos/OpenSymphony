@@ -24,7 +24,7 @@ defmodule SymphonyElixirWeb.Topbar do
     <header class="topbar">
       <a class="brand" href="/">
         <img :if={logo?()} class="brand-logo" src="/branding/logo" alt="" />
-        <Brand.logo :if={!logo?()} id="brand-crane" class="brand-crane" />
+        <Brand.tile :if={!logo?()} id="brand-tile" class="brand-tile" />
         <h1 class="ops-title">
           <span class="sr-only">Agent Factory</span>
           <span class="brand-name" aria-hidden="true">Agent Factory</span>
@@ -39,17 +39,36 @@ defmodule SymphonyElixirWeb.Topbar do
 
       <form :if={@teams != []} id="team-picker" class="team-picker" phx-change="pick_team" phx-hook="TeamPicker">
         <label class="team-picker-label" for="team-picker-select">Team</label>
-        <select id="team-picker-select" name="team" class="team-picker-select">
+        <select
+          id="team-picker-select"
+          name="team"
+          class="team-picker-select dd-native"
+          tabindex="-1"
+          phx-hook="Dropdown"
+          data-dropdown-slot="team-picker-dd"
+          data-dropdown-search
+        >
           <option value="all" selected={is_nil(@team)}>All teams</option>
           <option :for={t <- @teams} value={t.key} selected={t.key == @team}>
             {t.key}{if t.name, do: " · #{t.name}"}
           </option>
         </select>
+        <span id="team-picker-dd" class="dd" phx-update="ignore"></span>
         <label :if={@projects != []} class="team-picker-label" for="project-picker-select">Project</label>
-        <select :if={@projects != []} id="project-picker-select" name="project" class="team-picker-select">
+        <select
+          :if={@projects != []}
+          id="project-picker-select"
+          name="project"
+          class="team-picker-select dd-native"
+          tabindex="-1"
+          phx-hook="Dropdown"
+          data-dropdown-slot="project-picker-dd"
+          data-dropdown-search
+        >
           <option value="all" selected={is_nil(@project)}>All projects</option>
           <option :for={p <- @projects} value={p.slug} selected={p.slug == @project}>{p.name}</option>
         </select>
+        <span :if={@projects != []} id="project-picker-dd" class="dd" phx-update="ignore"></span>
       </form>
 
       <div class="topbar-meta">

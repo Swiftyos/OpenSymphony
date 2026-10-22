@@ -353,20 +353,31 @@ defmodule SymphonyElixir.McpToolsTest do
       assert note =~ "Issues are worked in acme/widgets unless labelled repo/api (acme/widgets-api)."
 
       assert error!(mia, "add_project", %{"project" => "abc123def456", "repo" => "acme/app"}) =~ "Only admins"
-      assert error!(mia, "remove_project", %{"project" => "0a1b2c3d4e5f"}) =~ "Only admins"
+      # Mia is a member, not an admin of a team the project belongs to.
+      assert error!(mia, "remove_project", %{"project" => "0a1b2c3d4e5f"}) =~ "teams you administer"
 
       assert error!(admin, "add_project", %{"project" => "abc123def456", "repo" => "../srv"}) =~ "owner/name"
       assert error!(admin, "add_project", %{"project" => "not a project!", "repo" => "a/b"}) =~ "Linear project URL"
 
       assert %{"removed" => "0a1b2c3d4e5f"} = ok!(admin, "remove_project", %{"project" => "0a1b2c3d4e5f"})
-      assert error!(admin, "remove_project", %{"project" => "0a1b2c3d4e5f"}) =~ "isn't listening"
+      assert SymphonyElixir.ProjectRoutes.list() == []
+      assert SymphonyElixir.ProjectRoutes.removed?("0a1b2c3d4e5f")
+      # Removing again changes nothing; adding it back clears the removal.
+      assert %{"removed" => "0a1b2c3d4e5f"} = ok!(admin, "remove_project", %{"project" => "0a1b2c3d4e5f"})
+      assert %{"added" => _} = ok!(admin, "add_project", %{"project" => url, "repo" => "acme/widgets"})
+      refute SymphonyElixir.ProjectRoutes.removed?("0a1b2c3d4e5f")
     end
 
-    test "projects set in the config file can't be changed here; controls off blocks changes", %{admin_token: admin} do
+    test "projects set in the config file are changed there, but can be removed and restored; controls off blocks changes", %{admin_token: admin} do
       write_config!("    enabled: true", tracker_projects: [%{slug: "fromfile1"}])
       assert %{"projects" => [%{"project" => "fromfile1", "source" => "config", "active" => true}]} = ok!(admin, "list_projects")
       assert error!(admin, "add_project", %{"project" => "fromfile1", "repo" => "a/b"}) =~ "symphony.yml"
-      assert error!(admin, "remove_project", %{"project" => "fromfile1"}) =~ "symphony.yml"
+
+      # Removed: no longer polled, though the file still lists it; add_project brings it back.
+      assert %{"removed" => "fromfile1"} = ok!(admin, "remove_project", %{"project" => "fromfile1"})
+      refute Enum.any?(Config.linear_project_routes(), &(&1.slug == "fromfile1"))
+      assert %{"restored" => "fromfile1"} = ok!(admin, "add_project", %{"project" => "fromfile1", "repo" => "a/b"})
+      assert Enum.any?(Config.linear_project_routes(), &(&1.slug == "fromfile1"))
 
       write_config!("    enabled: true\n  controls: false")
       assert error!(admin, "add_project", %{"project" => "abc123def456", "repo" => "a/b"}) =~ "read-only"

@@ -748,8 +748,9 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert live_view_js =~ "var LiveView = (() => {"
 
-    # Branding: the crane logo in the top bar, its stylesheet, and the favicons.
-    assert html =~ ~s(id="brand-crane")
+    # Branding: the favicon's tile in the top bar (animated on hover), its stylesheet, and the favicons.
+    assert html =~ ~s(id="brand-tile")
+    assert html =~ "afl-tile-bg"
     assert html =~ ~s(phx-update="ignore")
     assert html =~ "/agent_factory_logo.css?v="
     assert html =~ ~s(rel="apple-touch-icon")
@@ -757,6 +758,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     logo_css = response(get(build_conn(), "/agent_factory_logo.css"), 200)
     assert logo_css =~ "@keyframes afl-snap"
     assert logo_css =~ "prefers-reduced-motion"
+    assert logo_css =~ "a:hover > .afl.is-tile"
 
     for {path, type} <- [
           {"/favicon.ico", "image/x-icon"},

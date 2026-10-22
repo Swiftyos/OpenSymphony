@@ -127,9 +127,7 @@
       },
       toast: function (message, tone) {
         self.toast(message, tone);
-      },
-      assist: window.SymphonyAssist ? window.SymphonyAssist.forPanel(self) : null,
-      assistFlow: window.SymphonyAssist ? window.SymphonyAssist.flowForPanel(self) : null
+      }
     });
 
     // One fixed-position tooltip for every slot.
@@ -177,21 +175,6 @@
     this.hook.pushEvent(event, payload, onReply);
   };
 
-  // Results the server pushes later (e.g. AI drafts), matched by ref.
-  Panel.prototype.waitFor = function (event, ref, cb) {
-    this.waiters = this.waiters || {};
-    this.waiters[event + ":" + ref] = cb;
-  };
-
-  Panel.prototype.deliver = function (event, payload) {
-    var key = event + ":" + (payload && payload.ref);
-    var cb = this.waiters && this.waiters[key];
-    if (cb) {
-      delete this.waiters[key];
-      cb(payload);
-    }
-  };
-
   Panel.prototype.toast = function (message, tone) {
     var toast = this.toastEl || (this.toastEl = el("div", "fx-toast"));
     if (!toast.parentNode) document.body.appendChild(toast);
@@ -222,13 +205,7 @@
       return;
     }
     var panel = panels[targetId] || (panels[targetId] = new Panel(target));
-    if (hook && panel.hook !== hook) {
-      panel.hook = hook;
-      if (typeof hook.handleEvent === "function")
-        hook.handleEvent("factory_assist_result", function (payload) {
-        panel.deliver("factory_assist_result", payload);
-      });
-    }
+    if (hook && panel.hook !== hook) panel.hook = hook;
     // Coalesce bursts of server updates into one paint.
     if (panel._frame) cancelAnimationFrame(panel._frame);
     panel._frame = requestAnimationFrame(function () {
@@ -237,7 +214,258 @@
     });
   }
 
+  // ---------------------------------------------------------------- dropdowns
+
+  // The dashboard's dropdowns: a native <select> stays in the page (forms,
+  // labels and LiveView's phx-change keep working off it) and is drawn as a
+  // button and a listbox in the dashboard's own style. Keyboard: arrows,
+  // Home/End, Enter, Esc; typing jumps to a match, or filters when the list
+  // has a search field (long lists, or data-dropdown-search). Choosing sets
+  // the select's value and fires its input and change events.
+  var ddOpen = null;
+
+  function closeOpenDropdown() {
+    if (ddOpen) ddOpen.close();
+  }
+
+  document.addEventListener("pointerdown", function (e) {
+    if (ddOpen && !ddOpen.root.contains(e.target)) ddOpen.close();
+  }, true);
+
+  function Dropdown(select, slot) {
+    this.select = select;
+    this.root = slot || el("span");
+    if (!slot) select.parentNode.insertBefore(this.root, select.nextSibling);
+    this.root.classList.add("dd");
+    this.root.textContent = "";
+    select.classList.add("dd-native");
+    select.tabIndex = -1;
+    select.setAttribute("aria-hidden", "true");
+    this.id = (select.id || "dd" + Math.random().toString(36).slice(2)) + "-list";
+    this.button = el("button", "dd-button");
+    this.button.type = "button";
+    this.button.setAttribute("aria-haspopup", "listbox");
+    this.button.setAttribute("aria-expanded", "false");
+    this.button.setAttribute("aria-controls", this.id);
+    var label = select.getAttribute("aria-label") || (select.id && document.querySelector('label[for="' + select.id + '"]') ? document.querySelector('label[for="' + select.id + '"]').textContent : null);
+    if (label) this.button.setAttribute("aria-label", label.trim());
+    this.value = el("span", "dd-value");
+    this.button.appendChild(this.value);
+    this.button.appendChild(el("span", "dd-caret", "▾"));
+    this.pop = el("div", "dd-pop");
+    this.pop.hidden = true;
+    this.list = el("ul", "dd-list");
+    this.list.id = this.id;
+    this.list.setAttribute("role", "listbox");
+    this.list.tabIndex = -1;
+    this.root.appendChild(this.button);
+    this.root.appendChild(this.pop);
+    this.bind();
+    this.sync();
+    select._dropdown = this;
+  }
+
+  Dropdown.prototype.items = function () {
+    return Array.prototype.slice.call(this.list.querySelectorAll('[role="option"]:not([hidden])'));
+  };
+
+  // Mirrors the select: its options (and optgroups), value and disabled state.
+  Dropdown.prototype.sync = function () {
+    var self = this;
+    var select = this.select;
+    var options = select.querySelectorAll("option");
+    var current = select.options[select.selectedIndex];
+    this.value.textContent = current ? current.textContent.trim() : "";
+    this.button.disabled = select.disabled;
+    if (select.title) this.button.title = select.title;
+    this.list.textContent = "";
+    this.pop.textContent = "";
+    this.search = null;
+    if (options.length > 8 || select.hasAttribute("data-dropdown-search")) {
+      this.search = el("input", "dd-search");
+      this.search.type = "search";
+      this.search.placeholder = "Filter…";
+      this.search.setAttribute("aria-label", "Filter");
+      this.search.setAttribute("aria-controls", this.id);
+      this.search.addEventListener("input", function () {
+        self.filter(self.search.value);
+      });
+      this.search.addEventListener("keydown", function (e) {
+        self.onKey(e, true);
+      });
+      this.pop.appendChild(this.search);
+    }
+    this.pop.appendChild(this.list);
+    Array.prototype.forEach.call(select.children, function (child) {
+      if (child.tagName === "OPTGROUP") {
+        var group = el("li", "dd-group", child.label);
+        group.setAttribute("role", "presentation");
+        self.list.appendChild(group);
+        Array.prototype.forEach.call(child.children, function (o) {
+          self.addOption(o);
+        });
+      } else if (child.tagName === "OPTION") {
+        self.addOption(child);
+      }
+    });
+  };
+
+  Dropdown.prototype.addOption = function (option) {
+    var self = this;
+    var item = el("li", "dd-option", option.textContent.trim());
+    item.setAttribute("role", "option");
+    item.id = this.id + "-" + this.list.children.length;
+    item.dataset.value = option.value;
+    item.setAttribute("aria-selected", option.selected ? "true" : "false");
+    if (option.disabled) item.setAttribute("aria-disabled", "true");
+    item.addEventListener("pointerdown", function (e) {
+      e.preventDefault();
+    });
+    item.addEventListener("click", function () {
+      if (!option.disabled) self.choose(option.value);
+    });
+    this.list.appendChild(item);
+  };
+
+  Dropdown.prototype.bind = function () {
+    var self = this;
+    this.button.addEventListener("click", function () {
+      if (self.pop.hidden) self.open();
+      else self.close();
+    });
+    this.button.addEventListener("keydown", function (e) {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        self.open();
+      }
+    });
+    this.list.addEventListener("keydown", function (e) {
+      self.onKey(e, false);
+    });
+  };
+
+  Dropdown.prototype.open = function () {
+    if (this.button.disabled) return;
+    closeOpenDropdown();
+    this.pop.hidden = false;
+    this.button.setAttribute("aria-expanded", "true");
+    this.root.classList.add("is-open");
+    ddOpen = this;
+    var selected = this.list.querySelector('[aria-selected="true"]') || this.items()[0];
+    this.activate(selected);
+    if (this.search) {
+      this.search.value = "";
+      this.filter("");
+      this.search.focus();
+    } else {
+      this.list.focus();
+    }
+  };
+
+  Dropdown.prototype.close = function (refocus) {
+    this.pop.hidden = true;
+    this.button.setAttribute("aria-expanded", "false");
+    this.root.classList.remove("is-open");
+    if (ddOpen === this) ddOpen = null;
+    if (refocus) this.button.focus();
+  };
+
+  Dropdown.prototype.activate = function (item) {
+    var current = this.list.querySelector(".is-active");
+    if (current) current.classList.remove("is-active");
+    if (!item) return;
+    item.classList.add("is-active");
+    this.list.setAttribute("aria-activedescendant", item.id);
+    if (this.search) this.search.setAttribute("aria-activedescendant", item.id);
+    if (item.scrollIntoView) item.scrollIntoView({ block: "nearest" });
+  };
+
+  Dropdown.prototype.filter = function (text) {
+    var q = text.trim().toLowerCase();
+    Array.prototype.forEach.call(this.list.querySelectorAll('[role="option"]'), function (item) {
+      item.hidden = q !== "" && item.textContent.toLowerCase().indexOf(q) === -1;
+    });
+    this.activate(this.items()[0]);
+  };
+
+  Dropdown.prototype.onKey = function (e, inSearch) {
+    var items = this.items();
+    var active = this.list.querySelector(".is-active");
+    var i = items.indexOf(active);
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      this.activate(items[Math.min(i + 1, items.length - 1)]);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      this.activate(items[Math.max(i - 1, 0)]);
+    } else if (e.key === "Home" && !inSearch) {
+      e.preventDefault();
+      this.activate(items[0]);
+    } else if (e.key === "End" && !inSearch) {
+      e.preventDefault();
+      this.activate(items[items.length - 1]);
+    } else if (e.key === "Enter" || (e.key === " " && !inSearch)) {
+      e.preventDefault();
+      if (active && active.getAttribute("aria-disabled") !== "true") this.choose(active.dataset.value);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      this.close(true);
+    } else if (e.key === "Tab") {
+      this.close(false);
+    } else if (!inSearch && e.key.length === 1 && !e.metaKey && !e.ctrlKey) {
+      // Type to jump: the next option starting with what was typed.
+      var now = Date.now();
+      this.typed = now - (this.typedAt || 0) < 700 ? (this.typed || "") + e.key.toLowerCase() : e.key.toLowerCase();
+      this.typedAt = now;
+      var typed = this.typed;
+      var match = items.filter(function (item) {
+        return item.textContent.toLowerCase().indexOf(typed) === 0;
+      })[0];
+      if (match) this.activate(match);
+    }
+  };
+
+  Dropdown.prototype.choose = function (value) {
+    var select = this.select;
+    var changed = select.value !== value;
+    select.value = value;
+    this.close(true);
+    this.sync();
+    if (changed) {
+      select.dispatchEvent(new Event("input", { bubbles: true }));
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+  };
+
+  // Draws `select` as a dropdown (in `slot` when given), or refreshes one
+  // already drawn.
+  window.SymphonyDropdown = {
+    enhance: function (select, slot) {
+      if (select._dropdown && (!slot || select._dropdown.root === slot) && select._dropdown.root.isConnected) {
+        select._dropdown.sync();
+        return select._dropdown;
+      }
+      return new Dropdown(select, slot);
+    }
+  };
+
   window.SymphonyHooks = window.SymphonyHooks || {};
+  // A server-rendered <select phx-hook="Dropdown" data-dropdown-slot="id">:
+  // drawn in the phx-update="ignore" element with that id, so LiveView's
+  // patches change the select and never the drawn dropdown.
+  window.SymphonyHooks.Dropdown = {
+    mounted: function () {
+      this.draw();
+    },
+    updated: function () {
+      this.draw();
+    },
+    draw: function () {
+      var slot = document.getElementById(this.el.dataset.dropdownSlot);
+      window.SymphonyDropdown.enhance(this.el, slot);
+    }
+  };
+
   window.SymphonyHooks.FactoryData = {
     mounted: function () {
       sync(this.el, this);

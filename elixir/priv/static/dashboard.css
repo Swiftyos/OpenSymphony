@@ -169,6 +169,13 @@ pre {
   flex: none;
 }
 
+.brand-tile {
+  display: block;
+  width: 34px;
+  height: 34px;
+  flex: none;
+}
+
 .login-crane {
   display: block;
   height: 44px;
@@ -2067,36 +2074,6 @@ a.brand:hover {
   font-size: 0.76rem;
 }
 
-.fx-flow-errors {
-  margin-bottom: 8px;
-  padding: 8px 12px;
-  border: 1px solid rgba(208, 59, 59, 0.55);
-  border-radius: 10px;
-  color: var(--ink-2);
-  font-size: 0.8rem;
-}
-
-.fx-flow-errors strong {
-  color: var(--critical-ink);
-}
-
-.fx-flow-errors ul {
-  margin: 4px 0 0;
-  padding-left: 18px;
-}
-
-.fx-diagram.is-editing .fx-node {
-  cursor: grab;
-}
-
-.fx-diagram.is-editing .fx-node:active {
-  cursor: grabbing;
-}
-
-.fx-grid-dot {
-  fill: var(--dot);
-}
-
 .fx-edge-by-human.fx-edge-human,
 .fx-edge-by-human.fx-edge-idle {
   stroke-dasharray: 2 4;
@@ -2160,42 +2137,6 @@ a.brand:hover {
   stroke: rgba(208, 59, 59, 0.5);
 }
 
-.fx-port {
-  cursor: crosshair;
-}
-
-.fx-port circle {
-  fill: var(--raised-2);
-  stroke: var(--ink-2);
-}
-
-.fx-port text {
-  fill: var(--ink);
-  font-size: 13px;
-  font-weight: 700;
-  pointer-events: none;
-}
-
-.fx-port:hover circle {
-  fill: var(--ink);
-}
-
-.fx-port:hover text {
-  fill: var(--page);
-}
-
-.fx-connector {
-  fill: none;
-  stroke: var(--ink);
-  stroke-width: 2;
-  stroke-dasharray: 5 4;
-  pointer-events: none;
-}
-
-.fx-form-edit {
-  gap: 12px;
-}
-
 .fx-field {
   display: grid;
   gap: 5px;
@@ -2211,8 +2152,7 @@ a.brand:hover {
   font-size: 0.72rem;
 }
 
-.fx-input,
-.fx-textarea {
+.fx-input {
   width: 100%;
   padding: 7px 9px;
   border: 1px solid var(--line-strong);
@@ -2223,13 +2163,7 @@ a.brand:hover {
   font-size: 0.84rem;
 }
 
-.fx-textarea {
-  resize: vertical;
-  line-height: 1.45;
-}
-
-.fx-input:focus,
-.fx-textarea:focus {
+.fx-input:focus {
   outline: none;
   border-color: var(--ink-2);
 }
@@ -2244,21 +2178,6 @@ a.brand:hover {
 
 .fx-instructions {
   white-space: pre-wrap;
-}
-
-.fx-danger {
-  align-self: flex-start;
-  border-color: rgba(208, 59, 59, 0.5);
-  color: var(--critical-ink);
-}
-
-.fx-danger:hover {
-  border-color: var(--critical);
-  color: var(--critical-ink);
-}
-
-.fx-assist-btn {
-  justify-self: start;
 }
 
 .fx-knockbacks {
@@ -2637,182 +2556,6 @@ a.brand:hover {
   outline-offset: 2px;
 }
 
-/* -- AI flow designer (modal) */
-
-.fx-assist-modal {
-  position: fixed;
-  inset: 0;
-  z-index: 60;
-  display: grid;
-  place-items: start center;
-  padding: 6vh 16px 16px;
-  background: rgba(8, 9, 12, 0.66);
-  backdrop-filter: blur(3px);
-  animation: fx-fade 120ms ease-out;
-}
-
-.fx-assist-flow {
-  width: min(720px, 100%);
-  max-height: 86vh;
-  overflow: auto;
-  padding: 18px;
-  box-shadow: var(--shadow-pop);
-}
-
-.fx-assist-flow .is-working::before {
-  content: "";
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  margin-right: 8px;
-  border-radius: 50%;
-  background: var(--h-claude);
-  animation: fx-pulse 1.2s ease-in-out infinite;
-}
-
-.fx-assist-summary {
-  margin: 0 0 4px;
-  color: var(--ink);
-  line-height: 1.5;
-}
-
-.fx-assist-changes {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin: 6px 0;
-}
-
-.fx-change {
-  padding: 2px 8px;
-  border: 1px solid var(--line-strong);
-  border-radius: 999px;
-  color: var(--ink-2);
-  font-size: 0.74rem;
-}
-
-.fx-change-added {
-  border-color: rgba(12, 163, 12, 0.5);
-  color: var(--good-ink);
-}
-
-.fx-change-removed {
-  border-color: rgba(208, 59, 59, 0.5);
-  color: var(--critical-ink);
-}
-
-.fx-assist-stages {
-  display: grid;
-  gap: 4px;
-}
-
-.fx-assist-stage {
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--raised);
-}
-
-.fx-assist-stage > summary {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 7px 10px;
-  cursor: pointer;
-  list-style: none;
-}
-
-.fx-assist-stage > summary::-webkit-details-marker {
-  display: none;
-}
-
-.fx-assist-stage[open] > summary {
-  border-bottom: 1px solid var(--line);
-}
-
-.fx-assist-stage > .fx-assist-text,
-.fx-assist-stage > .fx-assist-h {
-  margin: 8px 10px;
-}
-
-.fx-assist-where {
-  margin-left: auto;
-  color: var(--muted);
-  font-size: 0.76rem;
-}
-
-.fx-assist-skill {
-  padding: 1px 6px;
-  border-radius: 4px;
-  background: var(--raised-2);
-  color: var(--ink-2);
-  font-size: 0.7rem;
-}
-
-.fx-kind {
-  min-width: 52px;
-  color: var(--muted);
-  font-size: 0.7rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.fx-kind-done {
-  color: var(--good-ink);
-}
-
-.fx-kind-parked {
-  color: var(--critical-ink);
-}
-
-@keyframes fx-fade {
-  from {
-    opacity: 0;
-  }
-}
-
-/* -- AI assistant */
-
-.fx-assist {
-  display: grid;
-  gap: 8px;
-  padding: 12px;
-  border: 1px solid var(--ink-2);
-  border-radius: 12px;
-  background: var(--raised-2);
-}
-
-.fx-assist-h {
-  margin: 8px 0 4px;
-  color: var(--ink-2);
-  font-size: 0.78rem;
-  font-weight: 650;
-}
-
-.fx-assist-text {
-  max-height: 220px;
-  overflow: auto;
-  padding: 8px 10px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--well);
-  color: var(--ink);
-  font-family: var(--mono);
-  font-size: 0.74rem;
-  white-space: pre-wrap;
-}
-
-.fx-skill-preview {
-  max-height: 140px;
-}
-
-.fx-assist-list {
-  margin: 0;
-  padding-left: 18px;
-  color: var(--ink-2);
-  font-size: 0.8rem;
-}
-
 /* ------------------------------------------------------------------ motion & a11y */
 
 @keyframes fx-dash {
@@ -3099,7 +2842,6 @@ a.brand:hover {
 .fx-action,
 .fx-chip,
 .fx-link-btn,
-.fx-assist-btn,
 .fx-chat-btn,
 .copy-button,
 .chat-open {
@@ -3117,7 +2859,6 @@ a.brand:hover {
 .fx-action:hover:not([disabled]),
 .fx-chip:hover:not(.is-active),
 .fx-link-btn:hover,
-.fx-assist-btn:hover,
 .fx-chat-btn:hover,
 .copy-button:hover,
 .chat-open:hover {
@@ -3138,7 +2879,6 @@ a.brand:hover {
 
 .fx-search,
 .fx-input,
-.fx-textarea,
 .team-picker-select,
 .fx-team-select {
   border: 0;
@@ -4608,4 +4348,232 @@ a.fx-stat:hover {
   .sessions-controls .fx-search {
     max-width: none;
   }
+}
+
+/* -- flow panel quick links: the picked team's or project's Linear page and its repos */
+
+.fx-quick-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: -2px 0 10px;
+}
+
+.fx-link-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--ink-2);
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  text-decoration: none;
+}
+
+.fx-link-chip:hover {
+  border-color: var(--accent-strong);
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.fx-link-chip.is-linear::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: #5e6ad2;
+}
+
+.fx-link-chip.is-repo::before {
+  content: "⌥";
+  color: var(--muted);
+}
+
+.fx-mcp-btn {
+  border-color: var(--accent-strong);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 650;
+}
+
+/* -- dropdowns (factory.js `Dropdown`): the native select stays for forms and
+   LiveView, hidden; a button and listbox are drawn in the dashboard's style. */
+
+.dd-native {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.dd {
+  position: relative;
+  display: inline-block;
+  min-width: 0;
+  vertical-align: middle;
+}
+
+.dd:empty {
+  display: none;
+}
+
+.dd-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  max-width: 100%;
+  padding: 6px 10px 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--raised);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.07);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.dd-button:hover:not(:disabled),
+.dd.is-open .dd-button {
+  border-color: var(--accent-strong);
+}
+
+.dd-button:focus-visible {
+  outline: 2px solid var(--accent-strong);
+  outline-offset: 2px;
+}
+
+.dd-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.dd-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dd-caret {
+  flex: none;
+  color: var(--muted);
+  font-size: 0.7rem;
+  transition: transform 0.15s ease;
+}
+
+.dd.is-open .dd-caret {
+  transform: rotate(180deg);
+}
+
+.dd-pop {
+  position: absolute;
+  z-index: 60;
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 100%;
+  width: max-content;
+  max-width: 340px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--card);
+  box-shadow: var(--shadow-pop);
+}
+
+.dd-search {
+  width: 100%;
+  margin-bottom: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--well);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.8rem;
+}
+
+.dd-search:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 0;
+}
+
+.dd-list {
+  max-height: 320px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+  outline: none;
+}
+
+.dd-group {
+  padding: 8px 10px 4px;
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.dd-option {
+  padding: 6px 10px;
+  border-radius: 8px;
+  color: var(--ink-2);
+  font-size: 0.82rem;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.dd-option.is-active {
+  background: var(--tint);
+  color: var(--ink);
+}
+
+.dd-option[aria-selected="true"] {
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 650;
+}
+
+.dd-option[aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.team-picker .dd {
+  width: 170px;
+}
+
+.team-picker .dd-button {
+  padding: 7px 12px;
+}
+
+.fx-flow-toolbar .dd-button {
+  border-radius: 8px;
+}
+
+.sessions-controls .dd-button,
+.access-add .dd-button {
+  border-radius: 9px;
+  font-weight: 500;
+}
+
+.fx-link-chip.is-remove {
+  border-color: rgba(208, 59, 59, 0.45);
+  color: var(--critical-ink);
+  cursor: pointer;
+}
+
+.fx-link-chip.is-remove:hover {
+  border-color: var(--critical);
+  background: rgba(208, 59, 59, 0.06);
 }

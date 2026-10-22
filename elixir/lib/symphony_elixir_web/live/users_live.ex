@@ -233,7 +233,7 @@ defmodule SymphonyElixirWeb.UsersLive do
       |> List.wrap()
       |> Enum.map(& &1.slug)
       |> Kernel.++(Map.keys(seen) ++ Store.projects())
-      |> Enum.filter(&is_binary/1)
+      |> Enum.filter(&(is_binary(&1) and not SymphonyElixir.ProjectRoutes.removed?(&1)))
       |> Enum.uniq()
       |> Enum.map(&%{slug: &1, name: get_in(seen, [&1, :name]) || SymphonyElixir.LabelSync.project_names()[&1] || &1})
       |> Enum.sort_by(&String.downcase(&1.name))
@@ -350,7 +350,15 @@ defmodule SymphonyElixirWeb.UsersLive do
                       class="access-add"
                     >
                       <input type="hidden" name="account" value={account.id} />
-                      <select name="choice" aria-label={"Give @#{account.username} access"}>
+                      <select
+                        id={"grant-select-#{account.id}"}
+                        name="choice"
+                        class="dd-native"
+                        tabindex="-1"
+                        aria-label={"Give @#{account.username} access"}
+                        phx-hook="Dropdown"
+                        data-dropdown-slot={"grant-dd-#{account.id}"}
+                      >
                         <option value="">+ Add access</option>
                         <optgroup :if={@grantable.teams != []} label="Team">
                           <option :for={team <- @grantable.teams -- Map.get(account, :access, [])} value={"access:" <> team}>
@@ -375,6 +383,7 @@ defmodule SymphonyElixirWeb.UsersLive do
                           <option value="role:global_viewer">Global viewer</option>
                         </optgroup>
                       </select>
+                      <span id={"grant-dd-#{account.id}"} class="dd" phx-update="ignore"></span>
                     </form>
                   </div>
                 </td>
@@ -411,7 +420,7 @@ defmodule SymphonyElixirWeb.UsersLive do
         </div>
 
         <form :if={@admin?} id="add-team" phx-submit="add_team" class="access-add team-add">
-          <input type="text" name="team" placeholder="Linear team key or id, e.g. PAY" aria-label="Linear team key or id" autocomplete="off" />
+          <input type="text" name="team" class="fx-search" placeholder="Linear team key or id, e.g. PAY" aria-label="Linear team key or id" autocomplete="off" />
           <button type="submit" class="fx-action">Add team</button>
         </form>
 

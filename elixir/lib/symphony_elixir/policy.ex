@@ -49,6 +49,7 @@ defmodule SymphonyElixir.Policy do
           | {:message_agent, String.t() | nil, String.t() | nil}
           | {:edit_flow, String.t() | nil}
           | {:grant, String.t()}
+          | {:remove_project, String.t()}
 
   # LiveView events that only change what the page shows (or the viewer's own
   # settings). Read-only people may send these and nothing else; an event not
@@ -56,7 +57,7 @@ defmodule SymphonyElixir.Policy do
   @read_events ~w(
     pick_team pick_range open_trace close_issue
     open_chat close_chat toggle_chat_size toggle_bell close_bell
-    sessions_view sessions_filter dismiss_mcp_setup
+    sessions_view sessions_filter open_mcp_setup dismiss_mcp_setup
   )
 
   @spec role(User.t() | nil) :: role()
@@ -141,6 +142,11 @@ defmodule SymphonyElixir.Policy do
   end
 
   defp authorize_change(user, {:grant, scope}), do: check(role(user) == :admin or team_admin_for?(user, scope), :not_team_admin)
+
+  # Removing a project from Symphony: admins, and admins of a team it belongs to.
+  defp authorize_change(user, {:remove_project, slug}) when is_binary(slug),
+    do: check(role(user) == :admin or team_admin_for?(user, "project:" <> slug), :not_team_admin)
+
   defp authorize_change(_user, _action), do: {:error, :not_allowed}
 
   defp check(true, _reason), do: :ok
@@ -223,7 +229,9 @@ defmodule SymphonyElixir.Policy do
   defp default_flow?(scope), do: is_nil(scope) or (is_binary(scope) and String.upcase(String.trim(scope)) == Store.default_team())
 
   # Team admins grant their teams and the projects their teams work in.
-  defp team_admin_for?(user, "project:" <> slug), do: Enum.any?(project_teams(slug), &(&1 in team_admin_of(user)))
+  defp team_admin_for?(user, "project:" <> slug),
+    do: Enum.any?(project_teams(slug) ++ Map.get(LabelSync.project_teams(), slug, []), &(&1 in team_admin_of(user)))
+
   defp team_admin_for?(user, scope) when is_binary(scope), do: scope in team_admin_of(user)
   defp team_admin_for?(_user, _scope), do: false
 

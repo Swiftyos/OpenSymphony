@@ -83,7 +83,6 @@ defmodule SymphonyElixirWeb.Router do
 
     get("/factory.js", StaticAssetController, :factory_js)
     get("/factory_flow.js", StaticAssetController, :factory_flow_js)
-    get("/factory_assist.js", StaticAssetController, :factory_assist_js)
     get("/branding/logo", StaticAssetController, :logo)
     get("/vendor/phoenix_html/phoenix_html.js", StaticAssetController, :phoenix_html_js)
     get("/vendor/phoenix/phoenix.js", StaticAssetController, :phoenix_js)

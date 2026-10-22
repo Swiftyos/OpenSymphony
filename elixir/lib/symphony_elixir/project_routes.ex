@@ -14,6 +14,12 @@ defmodule SymphonyElixir.ProjectRoutes do
   `workspace.root/<slug>`, so agents can't point Symphony at host paths.
   Without a workflow the project runs on Symphony's own config and prompt.
 
+  A project can also be removed from Symphony (`remove/2`), whether it was
+  added here or is in `symphony.yml`: Symphony stops polling and routing it,
+  its project flow is dropped, and it leaves the dashboard's project picker.
+  Its issues' history (usage, moves, traces) is kept, only hidden. Adding it
+  again (`put/2`, or `restore/1` for one in `symphony.yml`) undoes that.
+
   Persisted through `SymphonyElixir.StateStore` (`~/.symphony/project_routes.json`).
   """
 
@@ -22,6 +28,7 @@ defmodule SymphonyElixir.ProjectRoutes do
 
   alias SymphonyElixir.Config
   alias SymphonyElixir.Config.Schema.{TrackerProject, TrackerProjectRepo}
+  alias SymphonyElixir.Factory.Store
   alias SymphonyElixir.StateStore
 
   @table :symphony_project_routes
@@ -57,7 +64,8 @@ defmodule SymphonyElixir.ProjectRoutes do
   """
   @spec list() :: [route()]
   def list do
-    if ready?(), do: @table |> :ets.tab2list() |> Enum.map(&elem(&1, 1)) |> Enum.sort_by(& &1.slug), else: []
+    routes = if ready?(), do: for({slug, route} <- :ets.tab2list(@table), is_binary(slug), do: route), else: []
+    Enum.sort_by(routes, & &1.slug)
   end
 
   @doc """
@@ -88,6 +96,31 @@ defmodule SymphonyElixir.ProjectRoutes do
   @spec delete(String.t()) :: :ok | {:error, :not_found}
   def delete(slug), do: GenServer.call(__MODULE__, {:delete, slug})
 
+  @doc """
+  Removes a project from Symphony: its stored route if it has one, and the
+  slug is remembered as removed, so a project in `symphony.yml` or one seen in
+  past work stops being polled and listed. See the moduledoc.
+  """
+  @spec remove(String.t(), String.t()) :: :ok | {:error, :invalid_slug}
+  def remove(slug, removed_by), do: GenServer.call(__MODULE__, {:remove, slug, removed_by})
+
+  @doc "Takes a project back off the removed list (one in `symphony.yml` polls again)."
+  @spec restore(String.t()) :: :ok
+  def restore(slug), do: GenServer.call(__MODULE__, {:restore, slug})
+
+  @doc "Slugs of the projects removed from Symphony."
+  @spec removed() :: MapSet.t(String.t())
+  def removed do
+    case ready?() && :ets.lookup(@table, :removed) do
+      [{:removed, set}] -> set
+      _ -> MapSet.new()
+    end
+  end
+
+  @spec removed?(String.t() | nil) :: boolean()
+  def removed?(slug) when is_binary(slug), do: MapSet.member?(removed(), slug)
+  def removed?(_slug), do: false
+
   @doc false
   @spec reset() :: :ok
   def reset do
@@ -108,6 +141,7 @@ defmodule SymphonyElixir.ProjectRoutes do
     with {:ok, route} <- validate(attrs, added_by),
          :ok <- check_limit(route.slug) do
       :ets.insert(@table, {route.slug, route})
+      put_removed(MapSet.delete(removed(), route.slug))
       persist(state.path)
       Logger.info("Project route saved slug=#{route.slug} repo=#{route.repo} by=#{added_by}")
       {:reply, {:ok, route}, state}
@@ -127,15 +161,41 @@ defmodule SymphonyElixir.ProjectRoutes do
     end
   end
 
+  def handle_call({:remove, slug, removed_by}, _from, state) do
+    if is_binary(slug) and Regex.match?(@slug_pattern, slug) do
+      :ets.delete(@table, slug)
+      put_removed(MapSet.put(removed(), slug))
+      persist(state.path)
+      # Its own flow goes too; its issues' history stays (hidden).
+      Store.reset_team("project:" <> slug)
+      Logger.info("Project removed slug=#{slug} by=#{removed_by}")
+      {:reply, :ok, state}
+    else
+      {:reply, {:error, :invalid_slug}, state}
+    end
+  end
+
+  def handle_call({:restore, slug}, _from, state) do
+    if removed?(slug) do
+      put_removed(MapSet.delete(removed(), slug))
+      persist(state.path)
+      Logger.info("Project restored slug=#{slug}")
+    end
+
+    {:reply, :ok, state}
+  end
+
   def handle_call(:reset, _from, state) do
     :ets.delete_all_objects(@table)
     {:reply, :ok, state}
   end
 
+  defp put_removed(set), do: :ets.insert(@table, {:removed, set})
+
   defp ready?, do: :ets.whereis(@table) != :undefined
 
   defp check_limit(slug) do
-    if :ets.member(@table, slug) or :ets.info(@table, :size) < @max_routes,
+    if :ets.member(@table, slug) or length(list()) < @max_routes,
       do: :ok,
       else: {:error, "Symphony already listens to #{@max_routes} stored projects; remove one first."}
   end
@@ -272,7 +332,7 @@ defmodule SymphonyElixir.ProjectRoutes do
   defp persist(nil), do: :ok
 
   defp persist(path) do
-    case StateStore.write(path, Jason.encode!(%{version: 1, routes: list()}, pretty: true)) do
+    case StateStore.write(path, Jason.encode!(%{version: 1, routes: list(), removed: removed() |> MapSet.to_list() |> Enum.sort()}, pretty: true)) do
       :ok -> :ok
       {:error, reason} -> Logger.error("Project route save failed path=#{path} reason=#{inspect(reason)}")
     end
@@ -282,8 +342,9 @@ defmodule SymphonyElixir.ProjectRoutes do
 
   defp load(path) do
     with {:ok, body} <- StateStore.read(path),
-         {:ok, %{"routes" => routes}} when is_list(routes) <- Jason.decode(body) do
+         {:ok, %{"routes" => routes} = doc} when is_list(routes) <- Jason.decode(body) do
       Enum.each(routes, &load_route/1)
+      put_removed(MapSet.new(for slug <- List.wrap(doc["removed"]), is_binary(slug), do: slug))
     else
       {:error, :enoent} -> :ok
       other -> Logger.error("Project route load failed path=#{path} reason=#{inspect(other, limit: 5)}")

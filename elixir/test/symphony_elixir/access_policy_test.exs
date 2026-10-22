@@ -290,10 +290,6 @@ defmodule SymphonyElixir.AccessPolicyTest do
         {"send_back_issue", %{"id" => "id-PAY-1"}},
         {"factory_control", %{"team" => "PAY", "stage" => "review", "field" => "paused", "value" => true}},
         {"factory_autopilot", %{"team" => "PAY", "enabled" => true, "streak" => 2}},
-        {"factory_save", %{"team" => "PAY", "version" => 0, "definition" => %{}}},
-        {"factory_reset", %{"team" => "PAY"}},
-        {"factory_assist", %{"team" => "PAY", "stage" => "review", "request" => "x"}},
-        {"factory_assist_flow", %{"team" => "PAY", "request" => "x"}},
         {"send_message", %{"text" => "hi"}},
         {"some_future_event", %{}}
       ]

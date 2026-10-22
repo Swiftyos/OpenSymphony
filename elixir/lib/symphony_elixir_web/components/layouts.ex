@@ -35,9 +35,8 @@ defmodule SymphonyElixirWeb.Layouts do
         <script defer src={StaticAssets.url("/vendor/phoenix_html/phoenix_html.js")}></script>
         <script defer src={StaticAssets.url("/vendor/phoenix/phoenix.js")}></script>
         <script defer src={StaticAssets.url("/vendor/phoenix_live_view/phoenix_live_view.js")}></script>
-        <%!-- Order matters: factory.js uses the flow and assist modules. --%>
+        <%!-- Order matters: factory.js uses the flow module. --%>
         <script defer src={StaticAssets.url("/factory_flow.js")}></script>
-        <script defer src={StaticAssets.url("/factory_assist.js")}></script>
         <script defer src={StaticAssets.url("/factory.js")}></script>
         <script>
           window.addEventListener("DOMContentLoaded", function () {

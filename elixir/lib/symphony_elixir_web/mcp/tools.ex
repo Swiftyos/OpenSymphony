@@ -236,7 +236,8 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
       name: "remove_project",
       scope: "write",
       destructive: true,
-      description: "Admins: stop listening to a Linear project added with add_project. Issues already running finish; no new ones start. Projects from symphony.yml can't be removed here.",
+      description:
+        "Admins, and admins of a team the project belongs to: remove a project from Symphony. Symphony stops polling and routing it (also one from symphony.yml), drops its project flow, and it leaves the dashboard's project picker; its issues' history is kept, hidden. Issues already running finish; no new ones start. Nothing changes in Linear or GitHub. add_project brings it back.",
       properties: %{project: %{type: "string", description: "The Linear project's URL or slug id."}},
       required: ["project"]
     }
@@ -559,7 +560,7 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
   defp run("add_project", args, ctx) do
     with :ok <- admin_controls(ctx.user),
          {:ok, slug} <- project_arg(args),
-         :ok <- not_in_config(slug),
+         :ok <- restore_from_config(slug, ctx),
          {:ok, route} <- ProjectRoutes.put(Map.put(args, "slug", slug), ctx.actor) do
       # The project's name (for the dashboard) and its teams' labels come from Linear.
       if Config.settings!().tracker.kind == "linear",
@@ -581,17 +582,13 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
   end
 
   defp run("remove_project", args, ctx) do
-    with :ok <- admin_controls(ctx.user),
+    with :ok <- controls_on(),
          {:ok, slug} <- project_arg(args),
-         :ok <- not_in_config(slug) do
-      case ProjectRoutes.delete(slug) do
-        :ok ->
-          ObservabilityPubSub.broadcast_update()
-          {:ok, %{removed: slug}}
-
-        {:error, :not_found} ->
-          {:error, "Symphony isn't listening to a project #{slug} added through MCP."}
-      end
+         :ok <- allowed(ctx.user, {:remove_project, slug}),
+         :ok <- ProjectRoutes.remove(slug, ctx.actor) |> then(&if(&1 == :ok, do: :ok, else: {:error, "#{slug} isn't a Linear project slug id."})) do
+      Orchestrator.request_refresh_async()
+      ObservabilityPubSub.broadcast_update()
+      {:ok, %{removed: slug, note: "Symphony no longer polls #{slug}; its history is kept, hidden. add_project brings it back."}}
     end
   end
 
@@ -618,6 +615,21 @@ defmodule SymphonyElixirWeb.Mcp.Tools do
     with {:ok, value} <- string_arg(args, "project") do
       slug = value |> String.trim_trailing("/") |> String.split("/") |> List.last() |> String.split("-") |> List.last()
       if Regex.match?(~r/^[a-z0-9]{6,32}$/i, slug), do: {:ok, String.downcase(slug)}, else: {:error, "project must be a Linear project URL or its slug id."}
+    end
+  end
+
+  # A project from symphony.yml that was removed comes back as it is there.
+  defp restore_from_config(slug, ctx) do
+    with {:error, _message} = error <- not_in_config(slug) do
+      if ProjectRoutes.removed?(slug) do
+        :ok = ProjectRoutes.restore(slug)
+        Logger.info("MCP restored project slug=#{slug} by=#{ctx.actor}")
+        Orchestrator.request_refresh_async()
+        ObservabilityPubSub.broadcast_update()
+        {:ok, %{restored: slug, note: "Symphony polls #{slug} again, as symphony.yml sets it up."}}
+      else
+        error
+      end
     end
   end
 

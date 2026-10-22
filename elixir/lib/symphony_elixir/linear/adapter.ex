@@ -488,6 +488,7 @@ defmodule SymphonyElixir.Linear.Adapter do
       nodes {
         slugId
         name
+        url
         teams(first: 50) {
           nodes {
             key
@@ -499,16 +500,17 @@ defmodule SymphonyElixir.Linear.Adapter do
   """
 
   @doc """
-  Each project's (by slug) name and the keys of the teams it belongs to.
+  Each project's (by slug) name, Linear URL and the keys of the teams it
+  belongs to.
   """
-  @spec project_info([String.t()]) ::
-          {:ok, %{String.t() => %{name: String.t() | nil, teams: [String.t()]}}} | {:error, term()}
+  @type project_info :: %{name: String.t() | nil, url: String.t() | nil, teams: [String.t()]}
+  @spec project_info([String.t()]) :: {:ok, %{String.t() => project_info()}} | {:error, term()}
   def project_info([]), do: {:ok, %{}}
 
   def project_info(slugs) when is_list(slugs) do
     case client_module().graphql(@project_teams_query, %{slugs: slugs}) do
       {:ok, %{"data" => %{"projects" => %{"nodes" => nodes}}}} when is_list(nodes) ->
-        {:ok, Map.new(nodes, &{&1["slugId"], %{name: &1["name"], teams: for(%{"key" => key} <- get_in(&1, ["teams", "nodes"]) || [], do: key)}})}
+        {:ok, Map.new(nodes, &{&1["slugId"], %{name: &1["name"], url: &1["url"], teams: for(%{"key" => key} <- get_in(&1, ["teams", "nodes"]) || [], do: key)}})}
 
       {:ok, response} ->
         {:error, {:unexpected_response, response}}
