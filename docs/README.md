@@ -2,6 +2,11 @@
 
 - [Architecture](architecture.md): what Symphony is made of, how an issue moves through it,
   durability, launchers, security, observability, scaling and configuration.
+- [Software factory findings](factory-findings.md): how Symphony compares with the "software
+  factory" model, and what other teams and vendors do for triage, specs, review, verification,
+  self-improvement, metrics and autonomy.
+- [Factory roadmap](factory-roadmap.md): next steps and milestones for growing Symphony into a
+  factory that checks its own work, measures itself and learns from corrections.
 
 Implementation docs for the Elixir app live in [`elixir/docs/`](../elixir/docs/):
 
